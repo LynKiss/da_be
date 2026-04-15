@@ -1,4 +1,3 @@
-
 import {
   Injectable,
   NestInterceptor,
@@ -17,18 +16,23 @@ export interface Response<T> {
 }
 
 @Injectable()
-export class TransformInterceptor<T>
-  implements NestInterceptor<T, Response<T>>
-{
+export class TransformInterceptor<T> implements NestInterceptor<
+  T,
+  Response<T>
+> {
   constructor(private reflector: Reflector) {}
 
   intercept(
     context: ExecutionContext,
     next: CallHandler,
   ): Observable<Response<T>> {
+    const httpResponse = context
+      .switchToHttp()
+      .getResponse<{ statusCode?: number }>();
+
     return next.handle().pipe(
       map((data: T) => ({
-        statusCode: context.switchToHttp().getResponse().statusCode,
+        statusCode: httpResponse.statusCode ?? 200,
         message:
           this.reflector.get<string>(RESPONSE_MESSAGE, context.getHandler()) ||
           '',
