@@ -60,6 +60,21 @@ JWT_REFRESH_EXPIRED=6000s
 - `GET /api/v1/users`
 - `GET /api/v1/users/me`
 
+### Permissions
+
+- `GET /api/v1/permissions`
+- `GET /api/v1/permissions/roles/:role`
+- `PUT /api/v1/permissions/roles/:role`
+- `GET /api/v1/roles`
+
+### Contacts
+
+- `POST /api/v1/contacts`
+- `GET /api/v1/contacts/my`
+- `GET /api/v1/contacts/:id`
+- `GET /api/v1/contacts`
+- `PATCH /api/v1/contacts/:id/status`
+
 ## Huong Dan Test Bang Postman
 
 ### 1. Tao environment
@@ -132,7 +147,131 @@ Yeu cau:
 
 Neu dung admin thi thuong goi duoc. Neu khong du quyen se nhan `403 Forbidden`.
 
-### 7. Refresh access token
+### 7. Lay danh sach permissions
+
+- Method: `GET`
+- URL: `{{base_url}}/permissions`
+
+Yeu cau:
+
+- can Bearer token
+- user phai co permission `manage_permissions`
+
+### 8. Lay permission cua role
+
+- Method: `GET`
+- URL: `{{base_url}}/permissions/roles/admin`
+
+Ban co the thay `admin` bang:
+
+- `admin`
+- `staff`
+- `customer`
+
+Yeu cau:
+
+- can Bearer token
+- user phai co permission `manage_permissions`
+
+### 9. Cap nhat permission cho role
+
+- Method: `PUT`
+- URL: `{{base_url}}/permissions/roles/staff`
+- Body: `raw -> JSON`
+
+```json
+{
+  "permissionIds": ["2", "3", "8"]
+}
+```
+
+Yeu cau:
+
+- can Bearer token
+- user phai co permission `manage_permissions`
+
+### 10. Lay danh sach roles
+
+- Method: `GET`
+- URL: `{{base_url}}/roles`
+
+Yeu cau:
+
+- can Bearer token
+- user phai co permission `manage_permissions`
+
+### 11. Tao contact
+
+- Method: `POST`
+- URL: `{{base_url}}/contacts`
+- Body: `raw -> JSON`
+
+```json
+{
+  "subject": "Hoi ve phi giao hang",
+  "message": "Shop co ho tro giao hang lien tinh khong?"
+}
+```
+
+Yeu cau:
+
+- can Bearer token
+
+### 12. Xem contact cua chinh minh
+
+- Method: `GET`
+- URL: `{{base_url}}/contacts/my`
+
+Yeu cau:
+
+- can Bearer token
+
+### 13. Xem chi tiet 1 contact
+
+- Method: `GET`
+- URL: `{{base_url}}/contacts/1`
+
+Yeu cau:
+
+- can Bearer token
+- owner cua contact xem duoc contact cua minh
+- admin/staff co permission `manage_users` xem duoc tat ca
+
+### 14. Xem toan bo contacts
+
+- Method: `GET`
+- URL: `{{base_url}}/contacts`
+
+Yeu cau:
+
+- can Bearer token
+- tam thoi dung permission `manage_users` de truy cap route quan tri contacts
+
+### 15. Cap nhat trang thai contact
+
+- Method: `PATCH`
+- URL: `{{base_url}}/contacts/1/status`
+- Body: `raw -> JSON`
+
+```json
+{
+  "status": "resolved"
+}
+```
+
+Gia tri hop le:
+
+- `pending`
+- `processing`
+- `resolved`
+- `closed`
+
+Yeu cau:
+
+- can Bearer token
+- tam thoi dung permission `manage_users`
+
+### 16. Refresh access token
 
 - Method: `GET`
 - URL: `{{base_url}}/auth/refresh`
@@ -149,7 +288,7 @@ Ket qua mong doi:
 
 Sau do cap nhat lai bien `access_token`.
 
-### 8. Logout
+### 17. Logout
 
 - Method: `POST`
 - URL: `{{base_url}}/auth/logout`
@@ -169,8 +308,15 @@ Ket qua:
 2. `GET /auth/account`
 3. `GET /users/me`
 4. `GET /users`
-5. `GET /auth/refresh`
-6. `POST /auth/logout`
+5. `GET /permissions`
+6. `GET /permissions/roles/admin`
+7. `PUT /permissions/roles/staff`
+8. `POST /contacts`
+9. `GET /contacts/my`
+10. `GET /contacts`
+11. `PATCH /contacts/1/status`
+12. `GET /auth/refresh`
+13. `POST /auth/logout`
 
 ## Lenh kiem tra
 
