@@ -27,6 +27,11 @@ export class RolesService {
     };
   }
 
+  async findAll() {
+    const roles = Object.values(UserRole);
+    return Promise.all(roles.map((role) => this.findOne(role)));
+  }
+
   private mapPermission(permission: PermissionEntity) {
     return {
       _id: permission.permissionId.toString(),
