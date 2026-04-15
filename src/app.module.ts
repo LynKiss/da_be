@@ -6,6 +6,16 @@ import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { typeOrmConfig } from './config/typeorm.config';
 import { DatabasesModule } from './databases/databases.module';
+import { PermissionsModule } from './permissions/permissions.module';
+import { CategoriesModule } from './categories/categories.module';
+import { ProductsModule } from './products/products.module';
+import { CartsModule } from './carts/carts.module';
+import { OrdersModule } from './orders/orders.module';
+import { DiscountsModule } from './discounts/discounts.module';
+import { NewsModule } from './news/news.module';
+import { CommentsModule } from './comments/comments.module';
+import { ContactsModule } from './contacts/contacts.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -15,6 +25,16 @@ import { DatabasesModule } from './databases/databases.module';
     TypeOrmModule.forRootAsync(typeOrmConfig),
     AuthModule,
     DatabasesModule,
+    PermissionsModule,
+    CategoriesModule,
+    ProductsModule,
+    CartsModule,
+    OrdersModule,
+    DiscountsModule,
+    NewsModule,
+    CommentsModule,
+    ContactsModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
