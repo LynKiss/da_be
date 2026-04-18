@@ -1,5 +1,9 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CartItemEntity } from '../carts/entities/cart-item.entity';
+import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
+import { ProductEntity } from '../products/entities/product.entity';
+import { UserEntity } from '../users/entities/user.entity';
 import { OrdersController } from './orders.controller';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
@@ -18,6 +22,10 @@ import { OrdersService } from './orders.service';
       OrderItemEntity,
       OrderStatusHistoryEntity,
       ReturnEntity,
+      ShoppingCartEntity,
+      CartItemEntity,
+      ProductEntity,
+      UserEntity,
     ]),
   ],
   controllers: [OrdersController],

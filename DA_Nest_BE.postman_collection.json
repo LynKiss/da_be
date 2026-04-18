@@ -1,0 +1,930 @@
+{
+  "info": {
+    "_postman_id": "6d7f68b1-2d25-4e6e-82df-f0f0fd664001",
+    "name": "DA Nest BE",
+    "description": "Postman collection for implemented user, address, cart, and order flows.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000/api/v1"
+    },
+    {
+      "key": "username",
+      "value": ""
+    },
+    {
+      "key": "email",
+      "value": ""
+    },
+    {
+      "key": "password",
+      "value": ""
+    },
+    {
+      "key": "newPassword",
+      "value": ""
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "shippingAddressId",
+      "value": ""
+    },
+    {
+      "key": "secondaryShippingAddressId",
+      "value": ""
+    },
+    {
+      "key": "cartItemId",
+      "value": ""
+    },
+    {
+      "key": "secondaryCartItemId",
+      "value": ""
+    },
+    {
+      "key": "userOrderId",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": "prd-0001-1111-1111-1111111111111111"
+    },
+    {
+      "key": "secondaryProductId",
+      "value": "prd-0002-2222-2222-2222222222222222"
+    },
+    {
+      "key": "deliveryId",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register User",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now();",
+                  "pm.collectionVariables.set('username', `user_${suffix}`);",
+                  "pm.collectionVariables.set('email', `user_${suffix}@example.com`);",
+                  "pm.collectionVariables.set('password', 'Secret123');",
+                  "pm.collectionVariables.set('newPassword', 'Secret1234');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Register status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Register response envelope is valid', function () {",
+                  "  pm.expect(json).to.have.property('statusCode');",
+                  "  pm.expect(json).to.have.property('data');",
+                  "  pm.expect(json.data.username).to.eql(pm.collectionVariables.get('username'));",
+                  "  pm.expect(json.data.email).to.eql(pm.collectionVariables.get('email'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"avatarUrl\": \"https://example.com/avatars/{{username}}.jpg\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/register"
+          },
+          "response": []
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Login status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('accessToken', json.data.access_token);",
+                  "pm.test('Access token is returned', function () {",
+                  "  pm.expect(json.data.access_token).to.be.a('string').and.not.empty;",
+                  "  pm.expect(json.data.user.username).to.eql(pm.collectionVariables.get('username'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{username}}",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "{{password}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/auth/login"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get account status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Account matches logged in user', function () {",
+                  "  pm.expect(json.data.user.username).to.eql(pm.collectionVariables.get('username'));",
+                  "  pm.expect(json.data.user.email).to.eql(pm.collectionVariables.get('email'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/account"
+          },
+          "response": []
+        },
+        {
+          "name": "Login With New Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Login with new password status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('accessToken', json.data.access_token);",
+                  "pm.collectionVariables.set('password', pm.collectionVariables.get('newPassword'));",
+                  "pm.test('New password login succeeds', function () {",
+                  "  pm.expect(json.data.access_token).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{username}}",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "{{newPassword}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": "{{baseUrl}}/auth/login"
+          },
+          "response": []
+        },
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Logout status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Logout succeeds', function () {",
+                  "  pm.expect(json.data.success).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/auth/logout"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Get My Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get my profile status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Profile returns current user', function () {",
+                  "  pm.expect(json.data.username).to.eql(pm.collectionVariables.get('username'));",
+                  "  pm.expect(json.data.email).to.eql(pm.collectionVariables.get('email'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/me"
+          },
+          "response": []
+        },
+        {
+          "name": "Update My Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update profile status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Updated username is returned', function () {",
+                  "  pm.expect(json.data.username).to.eql(pm.collectionVariables.get('username') + '_updated');",
+                  "});",
+                  "pm.collectionVariables.set('username', json.data.username);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}_updated\",\n  \"avatarUrl\": \"https://example.com/avatars/{{username}}_updated.jpg\"\n}"
+            },
+            "url": "{{baseUrl}}/users/me"
+          },
+          "response": []
+        },
+        {
+          "name": "Change Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Change password status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Change password returns success message', function () {",
+                  "  pm.expect(json.data.message).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"oldPassword\": \"{{password}}\",\n  \"newPassword\": \"{{newPassword}}\"\n}"
+            },
+            "url": "{{baseUrl}}/users/me/change-password"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Shipping Addresses",
+      "item": [
+        {
+          "name": "Create Primary Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create primary address status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('shippingAddressId', json.data.id);",
+                  "pm.test('Primary address id is stored', function () {",
+                  "  pm.expect(json.data.id).to.be.a('string').and.not.empty;",
+                  "  pm.expect(json.data.isDefault).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientName\": \"{{username}}\",\n  \"phone\": \"0901234567\",\n  \"addressLine\": \"123 Test Street\",\n  \"ward\": \"Ward 1\",\n  \"district\": \"District 1\",\n  \"province\": \"Ho Chi Minh\",\n  \"isDefault\": true\n}"
+            },
+            "url": "{{baseUrl}}/users/me/addresses"
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Addresses",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get addresses status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Address list contains primary address', function () {",
+                  "  pm.expect(json.data).to.be.an('array');",
+                  "  pm.expect(json.data.some(item => item.id === pm.collectionVariables.get('shippingAddressId'))).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/me/addresses"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Primary Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update primary address status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Primary address is updated', function () {",
+                  "  pm.expect(json.data.addressLine).to.eql('456 Updated Street');",
+                  "  pm.expect(json.data.phone).to.eql('0907654321');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"0907654321\",\n  \"addressLine\": \"456 Updated Street\"\n}"
+            },
+            "url": "{{baseUrl}}/users/me/addresses/{{shippingAddressId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Secondary Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create secondary address status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('secondaryShippingAddressId', json.data.id);",
+                  "pm.test('Secondary address id is stored', function () {",
+                  "  pm.expect(json.data.id).to.be.a('string').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"recipientName\": \"{{username}} alt\",\n  \"phone\": \"0911111111\",\n  \"addressLine\": \"789 Secondary Street\",\n  \"ward\": \"Ward 2\",\n  \"district\": \"District 2\",\n  \"province\": \"Ho Chi Minh\"\n}"
+            },
+            "url": "{{baseUrl}}/users/me/addresses"
+          },
+          "response": []
+        },
+        {
+          "name": "Set Primary Address As Default",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Set default address status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Selected address becomes default', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('shippingAddressId'));",
+                  "  pm.expect(json.data.isDefault).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/users/me/addresses/{{shippingAddressId}}/default"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Secondary Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Delete secondary address status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Delete secondary address succeeds', function () {",
+                  "  pm.expect(json.data.deleted).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/users/me/addresses/{{secondaryShippingAddressId}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Cart",
+      "item": [
+        {
+          "name": "Get Cart",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get cart status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Cart envelope is valid', function () {",
+                  "  pm.expect(json.data).to.have.property('items');",
+                  "  pm.expect(json.data.items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/cart"
+          },
+          "response": []
+        },
+        {
+          "name": "Add Primary Cart Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Add cart item status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('cartItemId', json.data.id);",
+                  "pm.test('Primary cart item is stored', function () {",
+                  "  pm.expect(json.data.productId).to.eql(pm.collectionVariables.get('productId'));",
+                  "  pm.expect(json.data.quantity).to.eql(1);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"quantity\": 1\n}"
+            },
+            "url": "{{baseUrl}}/cart/items"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Primary Cart Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update cart item status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Primary cart item quantity is updated', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('cartItemId'));",
+                  "  pm.expect(json.data.quantity).to.eql(2);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 2\n}"
+            },
+            "url": "{{baseUrl}}/cart/items/{{cartItemId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Add Secondary Cart Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Add secondary cart item status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('secondaryCartItemId', json.data.id);",
+                  "pm.test('Secondary cart item is stored', function () {",
+                  "  pm.expect(json.data.productId).to.eql(pm.collectionVariables.get('secondaryProductId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{secondaryProductId}}\",\n  \"quantity\": 1\n}"
+            },
+            "url": "{{baseUrl}}/cart/items"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Secondary Cart Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Delete secondary cart item status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Delete cart item succeeds', function () {",
+                  "  pm.expect(json.data.deleted).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/cart/items/{{secondaryCartItemId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Cart After Changes",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get cart after changes status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Cart keeps primary item only', function () {",
+                  "  pm.expect(json.data.items.length).to.be.greaterThan(0);",
+                  "  pm.expect(json.data.items.some(item => item.id === pm.collectionVariables.get('cartItemId'))).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/cart"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "Create Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create order status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('userOrderId', json.data.id);",
+                  "pm.test('Created order includes items and total', function () {",
+                  "  pm.expect(json.data.id).to.be.a('string').and.not.empty;",
+                  "  pm.expect(json.data.items).to.be.an('array').and.not.empty;",
+                  "  pm.expect(Number(json.data.totalPayment)).to.be.greaterThan(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shippingAddressId\": \"{{shippingAddressId}}\",\n  \"deliveryId\": \"{{deliveryId}}\",\n  \"paymentMethod\": \"cod\",\n  \"note\": \"Please call before delivery\"\n}"
+            },
+            "url": "{{baseUrl}}/orders"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Order Detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get order detail status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order detail returns selected order', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('userOrderId'));",
+                  "  pm.expect(json.data.items).to.be.an('array').and.not.empty;",
+                  "  pm.expect(json.data.history).to.be.an('array').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orders/{{userOrderId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Cancel order status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order is cancelled', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('userOrderId'));",
+                  "  pm.expect(json.data.status).to.eql('cancelled');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "url": "{{baseUrl}}/orders/{{userOrderId}}/cancel"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "User Order History",
+      "item": [
+        {
+          "name": "Get My Orders",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get my orders status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('My orders contains created order', function () {",
+                  "  pm.expect(json.data).to.be.an('array');",
+                  "  pm.expect(json.data.some(item => item.id === pm.collectionVariables.get('userOrderId'))).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/me/orders"
+          },
+          "response": []
+        },
+        {
+          "name": "Get My Order Detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get my order detail status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('My order detail returns selected order', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('userOrderId'));",
+                  "  pm.expect(json.data.items).to.be.an('array').and.not.empty;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/users/me/orders/{{userOrderId}}"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
