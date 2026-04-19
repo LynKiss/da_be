@@ -3,7 +3,7 @@ import {
   CreateDateColumn,
   Entity,
   JoinColumn,
-  OneToOne,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { UserEntity } from './user.entity';
@@ -32,7 +32,7 @@ export class RefreshTokenEntity {
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;
 
-  @OneToOne(() => UserEntity, (user) => user.refreshToken, {
+  @ManyToOne(() => UserEntity, (user) => user.refreshTokens, {
     onDelete: 'CASCADE',
   })
   @JoinColumn({ name: 'user_id', referencedColumnName: 'userId' })

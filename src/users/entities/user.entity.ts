@@ -2,7 +2,7 @@ import {
   Column,
   CreateDateColumn,
   Entity,
-  OneToOne,
+  OneToMany,
   PrimaryColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -74,6 +74,6 @@ export class UserEntity {
   @UpdateDateColumn({ name: 'updated_at', type: 'datetime' })
   updatedAt: Date;
 
-  @OneToOne(() => RefreshTokenEntity, (refreshToken) => refreshToken.user)
-  refreshToken?: RefreshTokenEntity | null;
+  @OneToMany(() => RefreshTokenEntity, (refreshToken) => refreshToken.user)
+  refreshTokens?: RefreshTokenEntity[];
 }

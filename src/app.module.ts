@@ -15,6 +15,7 @@ import { DiscountsModule } from './discounts/discounts.module';
 import { NewsModule } from './news/news.module';
 import { CommentsModule } from './comments/comments.module';
 import { ContactsModule } from './contacts/contacts.module';
+import { NotificationsModule } from './notifications/notifications.module';
 import { ReportsModule } from './reports/reports.module';
 
 @Module({
@@ -34,6 +35,7 @@ import { ReportsModule } from './reports/reports.module';
     NewsModule,
     CommentsModule,
     ContactsModule,
+    NotificationsModule,
     ReportsModule,
   ],
   controllers: [AppController],

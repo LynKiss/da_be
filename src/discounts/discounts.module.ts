@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { CategoryEntity } from '../categories/entities/category.entity';
+import { ProductEntity } from '../products/entities/product.entity';
 import { DiscountsController } from './discounts.controller';
 import { CouponUsageEntity } from './entities/coupon-usage.entity';
 import { DiscountCategoryEntity } from './entities/discount-category.entity';
@@ -14,6 +16,8 @@ import { DiscountsService } from './discounts.service';
       DiscountCategoryEntity,
       DiscountProductEntity,
       CouponUsageEntity,
+      CategoryEntity,
+      ProductEntity,
     ]),
   ],
   controllers: [DiscountsController],

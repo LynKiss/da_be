@@ -7,7 +7,10 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   Public,
   RequirePermissions,
@@ -17,6 +20,13 @@ import { CreateProductDto } from './dto/create-product.dto';
 import { QueryProductsDto } from './dto/query-products.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { ProductsService } from './products.service';
+
+type UploadedImageFile = {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname: string;
+};
 
 @Controller('products')
 export class ProductsController {
@@ -58,5 +68,21 @@ export class ProductsController {
   @ResponseMessage('Delete product')
   removeProduct(@Param('id') id: string) {
     return this.productsService.remove(id);
+  }
+
+  @Post(':id/images')
+  @RequirePermissions('manage_products')
+  @UseInterceptors(FileInterceptor('file'))
+  @ResponseMessage('Upload product image')
+  uploadProductImage(
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedImageFile,
+    @Body('isPrimary') isPrimary?: string,
+  ) {
+    return this.productsService.uploadProductImage(
+      id,
+      file,
+      isPrimary === 'true',
+    );
   }
 }

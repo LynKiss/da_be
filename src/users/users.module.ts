@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationEntity } from '../notifications/entities/notification.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderEntity } from '../orders/entities/order.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
@@ -13,6 +14,7 @@ import { UsersService } from './users.service';
     TypeOrmModule.forFeature([
       UserEntity,
       RefreshTokenEntity,
+      NotificationEntity,
       ShippingAddressEntity,
       OrderEntity,
       OrderItemEntity,

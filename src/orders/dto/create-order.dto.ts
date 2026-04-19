@@ -17,4 +17,9 @@ export class CreateOrderDto {
   @IsString()
   @MaxLength(1000)
   note?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  discountCode?: string;
 }

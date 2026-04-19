@@ -41,6 +41,10 @@
       "value": ""
     },
     {
+      "key": "adminAccessToken",
+      "value": ""
+    },
+    {
       "key": "shippingAddressId",
       "value": ""
     },
@@ -71,9 +75,85 @@
     {
       "key": "deliveryId",
       "value": "1"
+    },
+    {
+      "key": "adminDiscountId",
+      "value": ""
+    },
+    {
+      "key": "adminDiscountCode",
+      "value": ""
     }
   ],
   "item": [
+    {
+      "name": "Public",
+      "item": [
+        {
+          "name": "Get Available Discounts",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get available discounts status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Available discounts returns array', function () {",
+                  "  pm.expect(json.data).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/discounts"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Products With Applied Discount",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get products list status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Products include effective price fields', function () {",
+                  "  pm.expect(json.data).to.have.property('items');",
+                  "  if (json.data.items.length > 0) {",
+                  "    pm.expect(json.data.items[0]).to.have.property('basePrice');",
+                  "    pm.expect(json.data.items[0]).to.have.property('effectivePrice');",
+                  "    pm.expect(json.data.items[0]).to.have.property('appliedDiscount');",
+                  "  }",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/products"
+          },
+          "response": []
+        }
+      ]
+    },
     {
       "name": "Auth",
       "item": [
@@ -770,10 +850,93 @@
       ]
     },
     {
+      "name": "Wishlist",
+      "item": [
+        {
+          "name": "Get Wishlist",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get wishlist status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Wishlist returns array', function () {",
+                  "  pm.expect(json.data).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wishlist"
+          },
+          "response": []
+        },
+        {
+          "name": "Add Wishlist Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Add wishlist item status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Wishlist add returns product', function () {",
+                  "  pm.expect(json.data.productId).to.eql(pm.collectionVariables.get('productId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/wishlist/{{productId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Remove Wishlist Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Remove wishlist item status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Wishlist remove succeeds', function () {",
+                  "  pm.expect(json.data.success).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/wishlist/{{productId}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Orders",
       "item": [
         {
-          "name": "Create Order",
+          "name": "Create Order Happy Path",
           "event": [
             {
               "listen": "test",
@@ -805,6 +968,43 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"shippingAddressId\": \"{{shippingAddressId}}\",\n  \"deliveryId\": \"{{deliveryId}}\",\n  \"paymentMethod\": \"cod\",\n  \"note\": \"Please call before delivery\"\n}"
+            },
+            "url": "{{baseUrl}}/orders"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Order With Discount",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create order with discount status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('userOrderId', json.data.id);",
+                  "pm.test('Created discounted order includes discount amount', function () {",
+                  "  pm.expect(json.data.id).to.be.a('string').and.not.empty;",
+                  "  pm.expect(Number(json.data.discountAmount)).to.be.greaterThan(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shippingAddressId\": \"{{shippingAddressId}}\",\n  \"deliveryId\": \"{{deliveryId}}\",\n  \"paymentMethod\": \"cod\",\n  \"note\": \"Please call before delivery\",\n  \"discountCode\": \"WELCOME10\"\n}"
             },
             "url": "{{baseUrl}}/orders"
           },
@@ -921,6 +1121,498 @@
             "method": "GET",
             "header": [],
             "url": "{{baseUrl}}/users/me/orders/{{userOrderId}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Orders",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{adminAccessToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Get Orders List",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get orders list status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Orders list returns paginated data', function () {",
+                  "  pm.expect(json.data).to.have.property('meta');",
+                  "  pm.expect(json.data).to.have.property('items');",
+                  "  pm.expect(json.data.items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orders?page=1&limit=10"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Any Order Detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get any order detail status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Admin can read target order', function () {",
+                  "  pm.expect(json.data.id).to.eql(pm.collectionVariables.get('userOrderId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orders/{{userOrderId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Order Status To Confirmed",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update order status to confirmed status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order status is confirmed', function () {",
+                  "  pm.expect(json.data.status).to.eql('confirmed');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"confirmed\",\n  \"note\": \"Admin confirmed order\"\n}"
+            },
+            "url": "{{baseUrl}}/orders/{{userOrderId}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Order Status To Processing",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update order status to processing status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order status is processing', function () {",
+                  "  pm.expect(json.data.status).to.eql('processing');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"processing\",\n  \"note\": \"Admin moved order to processing\"\n}"
+            },
+            "url": "{{baseUrl}}/orders/{{userOrderId}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Order Status To Shipping",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update order status to shipping status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order status is shipping', function () {",
+                  "  pm.expect(json.data.status).to.eql('shipping');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"shipping\",\n  \"note\": \"Admin moved order to shipping\"\n}"
+            },
+            "url": "{{baseUrl}}/orders/{{userOrderId}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Order Status To Delivered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update order status to delivered status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Order status is delivered', function () {",
+                  "  pm.expect(json.data.status).to.eql('delivered');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"delivered\",\n  \"note\": \"Admin marked order as delivered\"\n}"
+            },
+            "url": "{{baseUrl}}/orders/{{userOrderId}}/status"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Discounts",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{adminAccessToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Get Discounts For Admin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get discounts for admin status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Discount admin list returns array', function () {",
+                  "  pm.expect(json.data).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/discounts/admin"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Discount",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const suffix = Date.now();",
+                  "pm.collectionVariables.set('adminDiscountCode', `ADMIN${suffix}`);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Create discount status is 201', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.collectionVariables.set('adminDiscountId', json.data.discountId);",
+                  "pm.test('Created discount is returned', function () {",
+                  "  pm.expect(json.data.discountCode).to.eql(pm.collectionVariables.get('adminDiscountCode'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"discountCode\": \"{{adminDiscountCode}}\",\n  \"discountName\": \"Admin Discount Test\",\n  \"discountType\": \"percent\",\n  \"appliesTo\": \"order\",\n  \"startAt\": \"2026-04-19T00:00:00.000Z\",\n  \"expireDate\": \"2026-12-31T23:59:59.000Z\",\n  \"discountDescription\": \"Discount for admin collection test\",\n  \"discountValue\": \"10\",\n  \"isActive\": true,\n  \"usageLimit\": 100,\n  \"minOrderValue\": \"100000\",\n  \"maxDiscountAmount\": \"50000\"\n}"
+            },
+            "url": "{{baseUrl}}/discounts"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Discount Detail",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get discount detail status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Discount detail matches created discount', function () {",
+                  "  pm.expect(json.data.discountId).to.eql(pm.collectionVariables.get('adminDiscountId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/discounts/admin/{{adminDiscountId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Discount",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Update discount status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Discount is updated', function () {",
+                  "  pm.expect(json.data.discountName).to.eql('Admin Discount Test Updated');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"discountName\": \"Admin Discount Test Updated\",\n  \"usageLimit\": 120,\n  \"isActive\": true\n}"
+            },
+            "url": "{{baseUrl}}/discounts/{{adminDiscountId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Discount",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Delete discount status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Delete discount succeeds', function () {",
+                  "  pm.expect(json.data.success).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/discounts/{{adminDiscountId}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Inventory",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{adminAccessToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Get Inventory Transactions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get inventory transactions status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Inventory transactions returns paginated data', function () {",
+                  "  pm.expect(json.data).to.have.property('meta');",
+                  "  pm.expect(json.data).to.have.property('items');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/inventory/transactions?page=1&limit=10"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Admin Reports",
+      "auth": {
+        "type": "bearer",
+        "bearer": [
+          {
+            "key": "token",
+            "value": "{{adminAccessToken}}",
+            "type": "string"
+          }
+        ]
+      },
+      "item": [
+        {
+          "name": "Get Dashboard Report",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get dashboard report status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Dashboard report returns totals', function () {",
+                  "  pm.expect(json.data).to.have.property('totals');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/reports/dashboard"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Sales Summary",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Get sales summary status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Sales summary returns summary block', function () {",
+                  "  pm.expect(json.data).to.have.property('summary');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/reports/sales-summary"
           },
           "response": []
         }

@@ -2,6 +2,9 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  JoinColumn,
+  ManyToOne,
+  OneToMany,
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
@@ -37,12 +40,27 @@ export class CategoryEntity {
   categorySlug: string;
 
   @Column({
+    name: 'parent_id',
+    type: 'bigint',
+    unsigned: true,
+    nullable: true,
+  })
+  parentId: string | null;
+
+  @Column({
     name: 'is_active',
     type: 'tinyint',
     width: 1,
     default: 1,
   })
   isActive: boolean;
+
+  @Column({
+    name: 'sort_order',
+    type: 'int',
+    default: 0,
+  })
+  sortOrder: number;
 
   @CreateDateColumn({
     name: 'created_at',
@@ -58,4 +76,14 @@ export class CategoryEntity {
     onUpdate: 'CURRENT_TIMESTAMP',
   })
   updatedAt: Date;
+
+  @ManyToOne(() => CategoryEntity, (category) => category.children, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
+  @JoinColumn({ name: 'parent_id', referencedColumnName: 'categoryId' })
+  parent?: CategoryEntity | null;
+
+  @OneToMany(() => CategoryEntity, (category) => category.parent)
+  children?: CategoryEntity[];
 }

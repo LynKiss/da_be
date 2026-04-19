@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import {
   RequirePermissions,
@@ -14,7 +15,9 @@ import {
 } from '../decorator/customize';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { CreateShippingAddressDto } from './dto/create-shipping-address.dto';
+import { QueryAdminUsersDto } from './dto/query-admin-users.dto';
 import { UpdateShippingAddressDto } from './dto/update-shipping-address.dto';
+import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import type { IUser } from './users.interface';
 import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -26,8 +29,28 @@ export class UsersController {
   @Get()
   @RequirePermissions('manage_users')
   @ResponseMessage('Get users list')
-  getUsers() {
-    return this.usersService.findAll();
+  getUsers(@Query() query: QueryAdminUsersDto) {
+    return this.usersService.findAll(query);
+  }
+
+  @Get('admin/customers/:id')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Get customer detail')
+  getCustomerDetail(@Param('id') id: string) {
+    return this.usersService.findAdminUserDetail(id);
+  }
+
+  @Patch('admin/customers/:id/status')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Update customer status')
+  updateCustomerStatus(
+    @Param('id') id: string,
+    @Body() updateAdminUserStatusDto: UpdateAdminUserStatusDto,
+  ) {
+    return this.usersService.updateAdminUserStatus(
+      id,
+      updateAdminUserStatusDto,
+    );
   }
 
   @Get('me')

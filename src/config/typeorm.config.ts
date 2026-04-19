@@ -10,7 +10,7 @@ export const typeOrmConfig: TypeOrmModuleAsyncOptions = {
     username: configService.get<string>('MYSQL_USER') ?? 'root',
     password: configService.get<string>('MYSQL_PASSWORD') ?? '',
     database: configService.get<string>('MYSQL_DB') ?? 'agri_ecommerce',
-    synchronize: true,
+    synchronize: configService.get<string>('TYPEORM_SYNC') === 'true',
     autoLoadEntities: true,
   }),
 };

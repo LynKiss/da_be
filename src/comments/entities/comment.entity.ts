@@ -27,6 +27,14 @@ export class CommentEntity {
   @Column({ name: 'product_id', type: 'char', length: 36 })
   productId: string;
 
+  @Column({
+    name: 'order_item_id',
+    type: 'bigint',
+    unsigned: true,
+    nullable: true,
+  })
+  orderItemId: string | null;
+
   @Column({ name: 'content', type: 'text' })
   content: string;
 

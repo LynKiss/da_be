@@ -22,6 +22,10 @@ export class CreateCategoryDto {
   categorySlug?: string;
 
   @IsOptional()
+  @IsString()
+  parentId?: string | null;
+
+  @IsOptional()
   @IsBoolean()
   isActive?: boolean;
 }

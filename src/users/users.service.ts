@@ -15,7 +15,9 @@ import { Repository } from 'typeorm';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { CreateShippingAddressDto } from './dto/create-shipping-address.dto';
 import { RegisterUserDto } from './dto/create-user.dto';
+import { QueryAdminUsersDto } from './dto/query-admin-users.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import { UpdateShippingAddressDto } from './dto/update-shipping-address.dto';
 import { RefreshTokenEntity } from './entities/refresh-token.entity';
 import { UserEntity, UserRole } from './entities/user.entity';
@@ -45,16 +47,51 @@ export class UsersService {
   async findOneByIdForAuth(userId: string): Promise<UserEntity | null> {
     return this.usersRepository.findOne({
       where: { userId },
-      relations: { refreshToken: true },
     });
   }
 
-  async findAll() {
-    const users = await this.usersRepository.find({
-      order: { createdAt: 'DESC' },
-    });
+  async findAll(query?: QueryAdminUsersDto) {
+    const page = query?.page ?? 1;
+    const limit = query?.limit ?? 10;
+    const queryBuilder = this.usersRepository.createQueryBuilder('user');
 
-    return users.map((user) => this.toPublicUser(user));
+    if (query?.search) {
+      queryBuilder.andWhere(
+        '(user.username LIKE :search OR user.email LIKE :search)',
+        { search: `%${query.search}%` },
+      );
+    }
+
+    if (query?.role) {
+      queryBuilder.andWhere('user.role = :role', { role: query.role });
+    }
+
+    if (query?.isActive !== undefined) {
+      queryBuilder.andWhere('user.is_active = :isActive', {
+        isActive: query.isActive === 'true',
+      });
+    }
+
+    queryBuilder
+      .orderBy('user.created_at', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    const [users, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+      items: users.map((user) => ({
+        ...this.toPublicUser(user),
+        isActive: user.isActive,
+        createdAt: user.createdAt,
+      })),
+    };
   }
 
   async findProfile(userId: string) {
@@ -137,6 +174,19 @@ export class UsersService {
     );
 
     const hashedRefreshToken = await this.hashPassword(refreshToken);
+    const existingToken = await this.refreshTokensRepository.findOne({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (existingToken) {
+      existingToken.refreshToken = hashedRefreshToken;
+      existingToken.expiredAt = expiredAt ?? new Date();
+      existingToken.isRevoked = false;
+      await this.refreshTokensRepository.save(existingToken);
+      return;
+    }
+
     const entity = this.refreshTokensRepository.create({
       userId,
       refreshToken: hashedRefreshToken,
@@ -475,6 +525,46 @@ export class UsersService {
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
       })),
+    };
+  }
+
+  async findAdminUserDetail(userId: string) {
+    const user = await this.usersRepository.findOneBy({ userId });
+    if (!user) {
+      throw new NotFoundException('Nguoi dung khong ton tai');
+    }
+
+    const [addressesCount, ordersCount] = await Promise.all([
+      this.shippingAddressesRepository.count({ where: { userId } }),
+      this.ordersRepository.count({ where: { userId } }),
+    ]);
+
+    return {
+      ...this.toPublicUser(user),
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      statistics: {
+        addressesCount,
+        ordersCount,
+      },
+    };
+  }
+
+  async updateAdminUserStatus(
+    userId: string,
+    updateAdminUserStatusDto: UpdateAdminUserStatusDto,
+  ) {
+    const user = await this.ensureUserExists(userId);
+
+    if (updateAdminUserStatusDto.isActive !== undefined) {
+      user.isActive = updateAdminUserStatusDto.isActive;
+    }
+
+    const savedUser = await this.usersRepository.save(user);
+    return {
+      ...this.toPublicUser(savedUser),
+      isActive: savedUser.isActive,
     };
   }
 }
