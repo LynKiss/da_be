@@ -10,14 +10,20 @@ import { OriginEntity } from './entities/origin.entity';
 import { ProductDescriptionImageEntity } from './entities/product-description-image.entity';
 import { ProductImageEntity } from './entities/product-image.entity';
 import { ProductTagEntity } from './entities/product-tag.entity';
-import { InventoryController } from './inventory.controller';
-import { ProductsController } from './products.controller';
+import { ProductEntity } from './entities/product.entity';
 import { SubcategoryEntity } from './entities/subcategory.entity';
 import { TagEntity } from './entities/tag.entity';
 import { WishlistEntity } from './entities/wishlist.entity';
-import { WishlistController } from './wishlist.controller';
-import { ProductEntity } from './entities/product.entity';
+import { InventoryController } from './inventory.controller';
+import { OriginsController } from './origins.controller';
+import { OriginsService } from './origins.service';
+import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
+import { SubcategoriesController } from './subcategories.controller';
+import { SubcategoriesService } from './subcategories.service';
+import { TagsController } from './tags.controller';
+import { TagsService } from './tags.service';
+import { WishlistController } from './wishlist.controller';
 
 @Module({
   imports: [
@@ -38,8 +44,21 @@ import { ProductsService } from './products.service';
       DiscountProductEntity,
     ]),
   ],
-  controllers: [ProductsController, InventoryController, WishlistController],
-  providers: [ProductsService],
-  exports: [ProductsService, TypeOrmModule],
+  controllers: [
+    ProductsController,
+    InventoryController,
+    WishlistController,
+    OriginsController,
+    SubcategoriesController,
+    TagsController,
+  ],
+  providers: [ProductsService, OriginsService, SubcategoriesService, TagsService],
+  exports: [
+    ProductsService,
+    OriginsService,
+    SubcategoriesService,
+    TagsService,
+    TypeOrmModule,
+  ],
 })
 export class ProductsModule {}

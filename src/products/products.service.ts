@@ -25,14 +25,28 @@ import {
 import { CreateProductDto } from './dto/create-product.dto';
 import { ImportInventoryDto } from './dto/import-inventory.dto';
 import { QueryInventoryTransactionsDto } from './dto/query-inventory-transactions.dto';
-import { QueryProductsDto } from './dto/query-products.dto';
+import {
+  ProductSortBy,
+  QueryProductsDto,
+  SortOrder,
+} from './dto/query-products.dto';
+import {
+  RecordDamageDto,
+  RecordReturnDto,
+} from './dto/record-damage-return.dto';
+import { ReorderImagesDto } from './dto/reorder-images.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import {
   InventoryTransactionEntity,
   InventoryTransactionType,
 } from './entities/inventory-transaction.entity';
+import { OriginEntity } from './entities/origin.entity';
+import { ProductDescriptionImageEntity } from './entities/product-description-image.entity';
 import { ProductEntity } from './entities/product.entity';
 import { ProductImageEntity } from './entities/product-image.entity';
+import { ProductTagEntity } from './entities/product-tag.entity';
+import { SubcategoryEntity } from './entities/subcategory.entity';
+import { TagEntity } from './entities/tag.entity';
 import { WishlistEntity } from './entities/wishlist.entity';
 
 type UploadedImageFile = {
@@ -49,8 +63,18 @@ export class ProductsService {
     private readonly productsRepository: Repository<ProductEntity>,
     @InjectRepository(ProductImageEntity)
     private readonly productImagesRepository: Repository<ProductImageEntity>,
+    @InjectRepository(ProductDescriptionImageEntity)
+    private readonly productDescriptionImagesRepository: Repository<ProductDescriptionImageEntity>,
     @InjectRepository(CategoryEntity)
     private readonly categoriesRepository: Repository<CategoryEntity>,
+    @InjectRepository(SubcategoryEntity)
+    private readonly subcategoriesRepository: Repository<SubcategoryEntity>,
+    @InjectRepository(OriginEntity)
+    private readonly originsRepository: Repository<OriginEntity>,
+    @InjectRepository(TagEntity)
+    private readonly tagsRepository: Repository<TagEntity>,
+    @InjectRepository(ProductTagEntity)
+    private readonly productTagsRepository: Repository<ProductTagEntity>,
     @InjectRepository(InventoryTransactionEntity)
     private readonly inventoryTransactionsRepository: Repository<InventoryTransactionEntity>,
     @InjectRepository(WishlistEntity)
@@ -65,9 +89,13 @@ export class ProductsService {
     private readonly discountProductsRepository: Repository<DiscountProductEntity>,
   ) {}
 
+  // ─── PRODUCTS ────────────────────────────────────────────────────────────────
+
   async findAll(query: QueryProductsDto) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 10;
+    const sortBy = query.sortBy ?? ProductSortBy.CREATED_AT;
+    const sortOrder = query.sortOrder ?? SortOrder.DESC;
 
     const queryBuilder = this.productsRepository.createQueryBuilder('product');
 
@@ -85,12 +113,52 @@ export class ProductsService {
       });
     }
 
+    if (query.subcategoryId) {
+      queryBuilder.andWhere('product.subcategory_id = :subcategoryId', {
+        subcategoryId: query.subcategoryId,
+      });
+    }
+
+    if (query.originId) {
+      queryBuilder.andWhere('product.origin_id = :originId', {
+        originId: query.originId,
+      });
+    }
+
+    if (query.priceMin) {
+      queryBuilder.andWhere('product.product_price >= :priceMin', {
+        priceMin: query.priceMin,
+      });
+    }
+
+    if (query.priceMax) {
+      queryBuilder.andWhere('product.product_price <= :priceMax', {
+        priceMax: query.priceMax,
+      });
+    }
+
+    if (query.expiredSoon) {
+      const soon = new Date();
+      soon.setDate(soon.getDate() + 7);
+      queryBuilder.andWhere(
+        'product.expired_at IS NOT NULL AND product.expired_at <= :soon',
+        { soon },
+      );
+    }
+
+    if (query.lowStock) {
+      const threshold = query.lowStockThreshold ?? 10;
+      queryBuilder.andWhere('product.quantity_available <= :threshold', {
+        threshold,
+      });
+    }
+
     if (!query.includeHidden) {
       queryBuilder.andWhere('product.is_show = :isShow', { isShow: true });
     }
 
     queryBuilder
-      .orderBy('product.created_at', 'DESC')
+      .orderBy(`product.${sortBy}`, sortOrder)
       .skip((page - 1) * limit)
       .take(limit);
 
@@ -100,12 +168,7 @@ export class ProductsService {
     );
 
     return {
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
       items: mappedItems,
     };
   }
@@ -115,8 +178,7 @@ export class ProductsService {
     if (!product) {
       throw new NotFoundException('Product not found');
     }
-
-    return this.enrichProductWithDiscount(product);
+    return this.enrichProductWithFullDetails(product);
   }
 
   async create(createProductDto: CreateProductDto) {
@@ -152,7 +214,10 @@ export class ProductsService {
   }
 
   async update(productId: string, updateProductDto: UpdateProductDto) {
-    const product = await this.findOne(productId);
+    const product = await this.productsRepository.findOneBy({ productId });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
 
     if (updateProductDto.categoryId) {
       await this.ensureCategoryExists(updateProductDto.categoryId);
@@ -168,58 +233,97 @@ export class ProductsService {
         : product.productSlug;
     product.categoryId = updateProductDto.categoryId ?? product.categoryId;
     product.subcategoryId =
-      updateProductDto.subcategoryId ?? product.subcategoryId;
-    product.originId = updateProductDto.originId ?? product.originId;
+      updateProductDto.subcategoryId !== undefined
+        ? (updateProductDto.subcategoryId ?? null)
+        : product.subcategoryId;
+    product.originId =
+      updateProductDto.originId !== undefined
+        ? (updateProductDto.originId ?? null)
+        : product.originId;
     product.productPrice =
       updateProductDto.productPrice ?? product.productPrice;
     product.productPriceSale =
-      updateProductDto.productPriceSale ?? product.productPriceSale;
+      updateProductDto.productPriceSale !== undefined
+        ? (updateProductDto.productPriceSale ?? null)
+        : product.productPriceSale;
     product.quantityAvailable =
       updateProductDto.quantityAvailable ?? product.quantityAvailable;
-    product.description = updateProductDto.description ?? product.description;
+    product.description =
+      updateProductDto.description !== undefined
+        ? (updateProductDto.description ?? null)
+        : product.description;
     product.isShow = updateProductDto.isShow ?? product.isShow;
     product.expiredAt = updateProductDto.expiredAt
       ? new Date(updateProductDto.expiredAt)
       : product.expiredAt;
-    product.unit = updateProductDto.unit ?? product.unit;
+    product.unit =
+      updateProductDto.unit !== undefined
+        ? (updateProductDto.unit ?? null)
+        : product.unit;
     product.quantityPerBox =
       updateProductDto.quantityPerBox ?? product.quantityPerBox;
-    product.barcode = updateProductDto.barcode ?? product.barcode;
-    product.boxBarcode = updateProductDto.boxBarcode ?? product.boxBarcode;
+    product.barcode =
+      updateProductDto.barcode !== undefined
+        ? (updateProductDto.barcode ?? null)
+        : product.barcode;
+    product.boxBarcode =
+      updateProductDto.boxBarcode !== undefined
+        ? (updateProductDto.boxBarcode ?? null)
+        : product.boxBarcode;
 
     return this.productsRepository.save(product);
   }
 
   async remove(productId: string) {
-    const product = await this.findOne(productId);
+    const product = await this.productsRepository.findOneBy({ productId });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
     await this.productsRepository.remove(product);
-
     return { success: true };
+  }
+
+  async toggleVisibility(productId: string) {
+    const product = await this.productsRepository.findOneBy({ productId });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+    product.isShow = !product.isShow;
+    const saved = await this.productsRepository.save(product);
+    return { productId: saved.productId, isShow: saved.isShow };
+  }
+
+  // ─── PRODUCT IMAGES ──────────────────────────────────────────────────────────
+
+  async getProductImages(productId: string) {
+    await this.ensureProductExists(productId);
+    return this.productImagesRepository.find({
+      where: { productId },
+      order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
+    });
   }
 
   async uploadProductImage(
     productId: string,
     file: UploadedImageFile | undefined,
-    isPrimary = true,
+    isPrimary = false,
   ) {
-    const product = await this.productsRepository.findOneBy({ productId });
-    if (!product) {
-      throw new NotFoundException('Product not found');
-    }
+    await this.ensureProductExists(productId);
 
     if (!file) {
       throw new BadRequestException('Image file is required');
     }
-
     if (!file.mimetype.startsWith('image/')) {
       throw new BadRequestException('Only image files are allowed');
     }
-
     if (file.size > 5 * 1024 * 1024) {
       throw new BadRequestException('Image size must be 5MB or less');
     }
 
-    const uploadedImageUrl = await this.uploadImageToCloudinary(file, productId);
+    const uploadedImageUrl = await this.uploadImageToCloudinary(
+      file,
+      productId,
+    );
 
     if (isPrimary) {
       await this.productImagesRepository.update(
@@ -236,16 +340,133 @@ export class ProductsService {
       sortOrder,
     });
 
-    const savedImage = await this.productImagesRepository.save(image);
-
+    const saved = await this.productImagesRepository.save(image);
     return {
-      productImageId: savedImage.productImageId,
+      productImageId: saved.productImageId,
       productId,
-      imageUrl: savedImage.imageUrl,
-      isPrimary: savedImage.isPrimary,
-      sortOrder: savedImage.sortOrder,
+      imageUrl: saved.imageUrl,
+      isPrimary: saved.isPrimary,
+      sortOrder: saved.sortOrder,
     };
   }
+
+  async setPrimaryImage(productId: string, imageId: string) {
+    await this.ensureProductExists(productId);
+
+    const image = await this.productImagesRepository.findOneBy({
+      productImageId: imageId,
+      productId,
+    });
+    if (!image) {
+      throw new NotFoundException('Image not found for this product');
+    }
+
+    await this.productImagesRepository.update(
+      { productId, isPrimary: true },
+      { isPrimary: false },
+    );
+    image.isPrimary = true;
+    await this.productImagesRepository.save(image);
+
+    return { success: true, primaryImageId: imageId };
+  }
+
+  async deleteProductImage(productId: string, imageId: string) {
+    await this.ensureProductExists(productId);
+
+    const image = await this.productImagesRepository.findOneBy({
+      productImageId: imageId,
+      productId,
+    });
+    if (!image) {
+      throw new NotFoundException('Image not found for this product');
+    }
+
+    await this.productImagesRepository.remove(image);
+    return { success: true };
+  }
+
+  async reorderProductImages(productId: string, dto: ReorderImagesDto) {
+    await this.ensureProductExists(productId);
+
+    const images = await this.productImagesRepository.findBy({ productId });
+    const imageMap = new Map(images.map((img) => [img.productImageId, img]));
+
+    for (const id of dto.imageIds) {
+      if (!imageMap.has(id)) {
+        throw new NotFoundException(`Image ${id} not found for this product`);
+      }
+    }
+
+    const updates = dto.imageIds.map((id, index) => {
+      const img = imageMap.get(id)!;
+      img.sortOrder = index;
+      return img;
+    });
+
+    await this.productImagesRepository.save(updates);
+    return this.getProductImages(productId);
+  }
+
+  // ─── DESCRIPTION IMAGES ──────────────────────────────────────────────────────
+
+  async getDescriptionImages(productId: string) {
+    await this.ensureProductExists(productId);
+    return this.productDescriptionImagesRepository.find({
+      where: { productId },
+      order: { sortOrder: 'ASC', createdAt: 'ASC' },
+    });
+  }
+
+  async uploadDescriptionImage(
+    productId: string,
+    file: UploadedImageFile | undefined,
+  ) {
+    await this.ensureProductExists(productId);
+
+    if (!file) {
+      throw new BadRequestException('Image file is required');
+    }
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestException('Only image files are allowed');
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      throw new BadRequestException('Image size must be 5MB or less');
+    }
+
+    const imageUrl = await this.uploadImageToCloudinary(
+      file,
+      `${productId}-desc`,
+    );
+    const sortOrder = await this.productDescriptionImagesRepository.countBy({
+      productId,
+    });
+
+    const image = this.productDescriptionImagesRepository.create({
+      productId,
+      imageUrl,
+      sortOrder,
+    });
+
+    return this.productDescriptionImagesRepository.save(image);
+  }
+
+  async deleteDescriptionImage(productId: string, imageId: string) {
+    await this.ensureProductExists(productId);
+
+    const image = await this.productDescriptionImagesRepository.findOneBy({
+      productDescriptionImageId: imageId,
+      productId,
+    });
+    if (!image) {
+      throw new NotFoundException('Description image not found for this product');
+    }
+
+    await this.productDescriptionImagesRepository.remove(image);
+    return { success: true };
+  }
+
+  // ─── INVENTORY ───────────────────────────────────────────────────────────────
 
   async importInventory(
     performedBy: string,
@@ -271,13 +492,12 @@ export class ProductsService {
       relatedOrderId: null,
     });
 
-    const savedTransaction =
-      await this.inventoryTransactionsRepository.save(transaction);
+    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       quantityAvailable: product.quantityAvailable,
-      transactionId: savedTransaction.transactionId,
+      transactionId: saved.transactionId,
     };
   }
 
@@ -310,7 +530,6 @@ export class ProductsService {
       if (adjustInventoryDto.quantity > product.quantityAvailable) {
         throw new BadRequestException('Quantity exceeds available stock');
       }
-
       quantityChange = -adjustInventoryDto.quantity;
       product.quantityAvailable -= adjustInventoryDto.quantity;
     }
@@ -328,15 +547,80 @@ export class ProductsService {
       relatedOrderId: null,
     });
 
-    const savedTransaction =
-      await this.inventoryTransactionsRepository.save(transaction);
+    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       previousQuantity,
       currentQuantity: product.quantityAvailable,
       quantityChange,
-      transactionId: savedTransaction.transactionId,
+      transactionId: saved.transactionId,
+    };
+  }
+
+  async recordDamage(performedBy: string, dto: RecordDamageDto) {
+    await this.ensureUserExists(performedBy);
+    const product = await this.productsRepository.findOneBy({
+      productId: dto.productId,
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    if (dto.quantity > product.quantityAvailable) {
+      throw new BadRequestException(
+        'Damage quantity exceeds available stock',
+      );
+    }
+
+    product.quantityAvailable -= dto.quantity;
+    await this.productsRepository.save(product);
+
+    const transaction = this.inventoryTransactionsRepository.create({
+      productId: product.productId,
+      performedBy,
+      transactionType: InventoryTransactionType.DAMAGE,
+      quantityChange: -dto.quantity,
+      note: dto.note ?? 'Damage/expired goods recorded',
+      relatedOrderId: null,
+    });
+
+    const saved = await this.inventoryTransactionsRepository.save(transaction);
+
+    return {
+      productId: product.productId,
+      quantityAvailable: product.quantityAvailable,
+      transactionId: saved.transactionId,
+    };
+  }
+
+  async recordReturn(performedBy: string, dto: RecordReturnDto) {
+    await this.ensureUserExists(performedBy);
+    const product = await this.productsRepository.findOneBy({
+      productId: dto.productId,
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    product.quantityAvailable += dto.quantity;
+    await this.productsRepository.save(product);
+
+    const transaction = this.inventoryTransactionsRepository.create({
+      productId: product.productId,
+      performedBy,
+      transactionType: InventoryTransactionType.RETURN_IN,
+      quantityChange: dto.quantity,
+      note: dto.note ?? 'Return goods recorded',
+      relatedOrderId: dto.relatedOrderId ?? null,
+    });
+
+    const saved = await this.inventoryTransactionsRepository.save(transaction);
+
+    return {
+      productId: product.productId,
+      quantityAvailable: product.quantityAvailable,
+      transactionId: saved.transactionId,
     };
   }
 
@@ -381,6 +665,24 @@ export class ProductsService {
       });
     }
 
+    if (query.performedBy) {
+      queryBuilder.andWhere('transaction.performed_by = :performedBy', {
+        performedBy: query.performedBy,
+      });
+    }
+
+    if (query.dateFrom) {
+      queryBuilder.andWhere('transaction.created_at >= :dateFrom', {
+        dateFrom: new Date(query.dateFrom),
+      });
+    }
+
+    if (query.dateTo) {
+      const dateTo = new Date(query.dateTo);
+      dateTo.setHours(23, 59, 59, 999);
+      queryBuilder.andWhere('transaction.created_at <= :dateTo', { dateTo });
+    }
+
     queryBuilder
       .orderBy('transaction.created_at', 'DESC')
       .offset((page - 1) * limit)
@@ -392,15 +694,64 @@ export class ProductsService {
     ]);
 
     return {
-      meta: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
       items,
     };
   }
+
+  async getInventorySummary() {
+    const results = await this.productsRepository
+      .createQueryBuilder('product')
+      .select([
+        'product.product_id AS productId',
+        'product.product_name AS productName',
+        'product.quantity_available AS quantityAvailable',
+        'product.barcode AS barcode',
+        'product.unit AS unit',
+      ])
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN t.transaction_type = 'import' THEN t.quantity_change ELSE 0 END), 0)`,
+        'totalImported',
+      )
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN t.transaction_type = 'damage' THEN ABS(t.quantity_change) ELSE 0 END), 0)`,
+        'totalDamaged',
+      )
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN t.transaction_type = 'export' THEN ABS(t.quantity_change) ELSE 0 END), 0)`,
+        'totalExported',
+      )
+      .leftJoin(
+        'inventory_transactions',
+        't',
+        't.product_id = product.product_id',
+      )
+      .where('product.is_show = :isShow', { isShow: true })
+      .groupBy('product.product_id')
+      .orderBy('product.product_name', 'ASC')
+      .getRawMany();
+
+    return results;
+  }
+
+  async getLowStockProducts(threshold = 10) {
+    const products = await this.productsRepository
+      .createQueryBuilder('product')
+      .where('product.quantity_available <= :threshold', { threshold })
+      .andWhere('product.is_show = :isShow', { isShow: true })
+      .orderBy('product.quantity_available', 'ASC')
+      .getMany();
+
+    return products.map((p) => ({
+      productId: p.productId,
+      productName: p.productName,
+      quantityAvailable: p.quantityAvailable,
+      unit: p.unit,
+      barcode: p.barcode,
+    }));
+  }
+
+  // ─── WISHLIST ─────────────────────────────────────────────────────────────────
 
   async findWishlist(userId: string) {
     await this.ensureUserExists(userId);
@@ -429,25 +780,17 @@ export class ProductsService {
 
   async addWishlistItem(userId: string, productId: string) {
     await this.ensureUserExists(userId);
-    await this.findOne(productId);
+    await this.ensureProductExists(productId);
 
     const existingItem = await this.wishlistRepository.findOneBy({
       userId,
       productId,
     });
     if (existingItem) {
-      return {
-        userId,
-        productId,
-        createdAt: existingItem.createdAt,
-      };
+      return { userId, productId, createdAt: existingItem.createdAt };
     }
 
-    const item = this.wishlistRepository.create({
-      userId,
-      productId,
-    });
-
+    const item = this.wishlistRepository.create({ userId, productId });
     return this.wishlistRepository.save(item);
   }
 
@@ -466,6 +809,16 @@ export class ProductsService {
     return { success: true };
   }
 
+  // ─── PRIVATE HELPERS ─────────────────────────────────────────────────────────
+
+  private async ensureProductExists(productId: string) {
+    const product = await this.productsRepository.findOneBy({ productId });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+    return product;
+  }
+
   private async ensureCategoryExists(categoryId: string) {
     const category = await this.categoriesRepository.findOneBy({ categoryId });
     if (!category) {
@@ -481,24 +834,18 @@ export class ProductsService {
 
     while (queue.length > 0) {
       const currentCategoryId = queue.shift();
-      if (!currentCategoryId) {
-        continue;
-      }
+      if (!currentCategoryId) continue;
 
       const childCategories = await this.categoriesRepository.find({
         where: { parentId: currentCategoryId },
-        select: {
-          categoryId: true,
-        },
+        select: { categoryId: true },
       });
 
-      for (const childCategory of childCategories) {
-        if (collectedIds.has(childCategory.categoryId)) {
-          continue;
+      for (const child of childCategories) {
+        if (!collectedIds.has(child.categoryId)) {
+          collectedIds.add(child.categoryId);
+          queue.push(child.categoryId);
         }
-
-        collectedIds.add(childCategory.categoryId);
-        queue.push(childCategory.categoryId);
       }
     }
 
@@ -512,6 +859,34 @@ export class ProductsService {
     }
   }
 
+  private async enrichProductWithFullDetails(product: ProductEntity) {
+    const [images, descriptionImages, tags, enriched] = await Promise.all([
+      this.productImagesRepository.find({
+        where: { productId: product.productId },
+        order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
+      }),
+      this.productDescriptionImagesRepository.find({
+        where: { productId: product.productId },
+        order: { sortOrder: 'ASC', createdAt: 'ASC' },
+      }),
+      this.getProductTagsInternal(product.productId),
+      this.enrichProductWithDiscount(product),
+    ]);
+
+    const [origin, subcategory] = await Promise.all([
+      product.originId
+        ? this.originsRepository.findOneBy({ originId: product.originId })
+        : Promise.resolve(null),
+      product.subcategoryId
+        ? this.subcategoriesRepository.findOneBy({
+            subcategoryId: product.subcategoryId,
+          })
+        : Promise.resolve(null),
+    ]);
+
+    return { ...enriched, images, descriptionImages, tags, origin, subcategory };
+  }
+
   private async enrichProductWithDiscount(product: ProductEntity) {
     const primaryImage =
       (await this.productImagesRepository.findOne({
@@ -522,6 +897,7 @@ export class ProductsService {
         where: { productId: product.productId },
         order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
       }));
+
     const appliedDiscount = await this.findApplicableDiscount(product);
     const basePrice = Number(product.productPriceSale ?? product.productPrice);
     const discountAmount = appliedDiscount
@@ -557,10 +933,10 @@ export class ProductsService {
       ? Number(discount.maxDiscountAmount)
       : null;
 
-    const cappedDiscount =
+    const capped =
       maxDiscount !== null ? Math.min(rawDiscount, maxDiscount) : rawDiscount;
 
-    return Math.min(cappedDiscount, amount);
+    return Math.min(capped, amount);
   }
 
   private async findApplicableDiscount(product: ProductEntity) {
@@ -571,59 +947,55 @@ export class ProductsService {
     });
 
     const validDiscounts = activeDiscounts.filter(
-      (discount) =>
-        discount.startAt.getTime() <= now.getTime() &&
-        discount.expireDate.getTime() >= now.getTime(),
+      (d) =>
+        d.startAt.getTime() <= now.getTime() &&
+        d.expireDate.getTime() >= now.getTime() &&
+        (d.usageLimit === null || d.usedCount < d.usageLimit),
     );
 
     let bestDiscount: DiscountEntity | null = null;
-    let bestDiscountValue = 0;
-    const productBasePrice = Number(
-      product.productPriceSale ?? product.productPrice,
-    );
+    let bestValue = 0;
+    const basePrice = Number(product.productPriceSale ?? product.productPrice);
 
     for (const discount of validDiscounts) {
-      let isApplicable = false;
+      let applicable = false;
 
       if (discount.appliesTo === DiscountApplyTarget.ORDER) {
-        isApplicable = true;
+        applicable = true;
       }
-
       if (discount.appliesTo === DiscountApplyTarget.CATEGORY) {
         const exists = await this.discountCategoriesRepository.findOneBy({
           discountId: discount.discountId,
           categoryId: product.categoryId,
         });
-        isApplicable = !!exists;
+        applicable = !!exists;
       }
-
       if (discount.appliesTo === DiscountApplyTarget.PRODUCT) {
         const exists = await this.discountProductsRepository.findOneBy({
           discountId: discount.discountId,
           productId: product.productId,
         });
-        isApplicable = !!exists;
+        applicable = !!exists;
       }
 
-      if (!isApplicable) {
-        continue;
-      }
+      if (!applicable) continue;
+      if (basePrice < Number(discount.minOrderValue)) continue;
 
-      if (productBasePrice < Number(discount.minOrderValue)) {
-        continue;
-      }
-
-      const discountValue = this.calculateDiscountAmount(
-        discount,
-        productBasePrice,
-      );
-      if (discountValue > bestDiscountValue) {
+      const value = this.calculateDiscountAmount(discount, basePrice);
+      if (value > bestValue) {
         bestDiscount = discount;
-        bestDiscountValue = discountValue;
+        bestValue = value;
       }
     }
 
     return bestDiscount;
+  }
+
+  private async getProductTagsInternal(productId: string) {
+    const productTags = await this.productTagsRepository.findBy({ productId });
+    if (productTags.length === 0) return [];
+    const tagIds = productTags.map((pt) => pt.tagId);
+    return this.tagsRepository.findBy(tagIds.map((tagId) => ({ tagId })));
   }
 
   private async ensureUniqueFields(
@@ -637,31 +1009,28 @@ export class ProductsService {
         : null;
 
     if (slug) {
-      const existedProduct = await this.productsRepository.findOneBy({
+      const existing = await this.productsRepository.findOneBy({
         productSlug: slug,
       });
-      if (existedProduct && existedProduct.productId !== excludeProductId) {
+      if (existing && existing.productId !== excludeProductId) {
         throw new ConflictException('Product slug already exists');
       }
     }
 
     if (payload.barcode) {
-      const existedBarcode = await this.productsRepository.findOneBy({
+      const existing = await this.productsRepository.findOneBy({
         barcode: payload.barcode,
       });
-      if (existedBarcode && existedBarcode.productId !== excludeProductId) {
+      if (existing && existing.productId !== excludeProductId) {
         throw new ConflictException('Barcode already exists');
       }
     }
 
     if (payload.boxBarcode) {
-      const existedBoxBarcode = await this.productsRepository.findOneBy({
+      const existing = await this.productsRepository.findOneBy({
         boxBarcode: payload.boxBarcode,
       });
-      if (
-        existedBoxBarcode &&
-        existedBoxBarcode.productId !== excludeProductId
-      ) {
+      if (existing && existing.productId !== excludeProductId) {
         throw new ConflictException('Box barcode already exists');
       }
     }
@@ -677,7 +1046,7 @@ export class ProductsService {
 
   private async uploadImageToCloudinary(
     file: UploadedImageFile,
-    productId: string,
+    publicIdPrefix: string,
   ) {
     const cloudName = process.env.CLOUD_NAME;
     const apiKey = process.env.API_KEY;
@@ -691,8 +1060,11 @@ export class ProductsService {
 
     const folder = 'agri_ecommerce/products';
     const timestamp = Math.floor(Date.now() / 1000);
+    const publicId = `${publicIdPrefix}-${Date.now()}`;
     const signature = createHash('sha1')
-      .update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`)
+      .update(
+        `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`,
+      )
       .digest('hex');
 
     const formData = new FormData();
@@ -705,14 +1077,11 @@ export class ProductsService {
     formData.append('timestamp', String(timestamp));
     formData.append('signature', signature);
     formData.append('folder', folder);
-    formData.append('public_id', `${productId}-${Date.now()}`);
+    formData.append('public_id', publicId);
 
     const response = await fetch(
       `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
-      {
-        method: 'POST',
-        body: formData,
-      },
+      { method: 'POST', body: formData },
     );
 
     const payload = (await response.json()) as {

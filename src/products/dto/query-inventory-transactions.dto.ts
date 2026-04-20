@@ -1,5 +1,13 @@
 import { Type } from 'class-transformer';
-import { IsEnum, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  IsDateString,
+  IsEnum,
+  IsInt,
+  IsOptional,
+  IsString,
+  Max,
+  Min,
+} from 'class-validator';
 import { InventoryTransactionType } from '../entities/inventory-transaction.entity';
 
 export class QueryInventoryTransactionsDto {
@@ -14,6 +22,18 @@ export class QueryInventoryTransactionsDto {
   @IsOptional()
   @IsString()
   relatedOrderId?: string;
+
+  @IsOptional()
+  @IsString()
+  performedBy?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  dateTo?: string;
 
   @IsOptional()
   @Type(() => Number)

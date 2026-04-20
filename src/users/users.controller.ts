@@ -14,9 +14,12 @@ import {
   User,
 } from '../decorator/customize';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { CreateAdminUserDto } from './dto/create-admin-user.dto';
 import { CreateShippingAddressDto } from './dto/create-shipping-address.dto';
 import { QueryAdminUsersDto } from './dto/query-admin-users.dto';
+import { ResetAdminUserPasswordDto } from './dto/reset-admin-user-password.dto';
 import { UpdateShippingAddressDto } from './dto/update-shipping-address.dto';
+import { UpdateAdminUserDto } from './dto/update-admin-user.dto';
 import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import type { IUser } from './users.interface';
 import { UsersService } from './users.service';
@@ -33,6 +36,16 @@ export class UsersController {
     return this.usersService.findAll(query);
   }
 
+  @Post('admin/customers')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Create customer account')
+  createCustomer(
+    @User() currentUser: IUser,
+    @Body() createAdminUserDto: CreateAdminUserDto,
+  ) {
+    return this.usersService.createAdminUser(currentUser._id, createAdminUserDto);
+  }
+
   @Get('admin/customers/:id')
   @RequirePermissions('manage_users')
   @ResponseMessage('Get customer detail')
@@ -40,17 +53,52 @@ export class UsersController {
     return this.usersService.findAdminUserDetail(id);
   }
 
+  @Patch('admin/customers/:id')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Update customer account')
+  updateCustomer(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @Body() updateAdminUserDto: UpdateAdminUserDto,
+  ) {
+    return this.usersService.updateAdminUser(currentUser._id, id, updateAdminUserDto);
+  }
+
   @Patch('admin/customers/:id/status')
   @RequirePermissions('manage_users')
   @ResponseMessage('Update customer status')
   updateCustomerStatus(
+    @User() currentUser: IUser,
     @Param('id') id: string,
     @Body() updateAdminUserStatusDto: UpdateAdminUserStatusDto,
   ) {
     return this.usersService.updateAdminUserStatus(
+      currentUser._id,
       id,
       updateAdminUserStatusDto,
     );
+  }
+
+  @Patch('admin/customers/:id/reset-password')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Reset customer password')
+  resetCustomerPassword(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @Body() resetAdminUserPasswordDto: ResetAdminUserPasswordDto,
+  ) {
+    return this.usersService.resetAdminUserPassword(
+      currentUser._id,
+      id,
+      resetAdminUserPasswordDto,
+    );
+  }
+
+  @Delete('admin/customers/:id')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Delete customer account')
+  deleteCustomer(@User() currentUser: IUser, @Param('id') id: string) {
+    return this.usersService.deleteAdminUser(currentUser._id, id);
   }
 
   @Get('me')
