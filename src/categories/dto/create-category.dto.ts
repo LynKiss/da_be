@@ -1,3 +1,4 @@
+import { ToBoolean } from '../../common/dto-transformers';
 import {
   IsBoolean,
   IsOptional,
@@ -26,6 +27,7 @@ export class CreateCategoryDto {
   parentId?: string | null;
 
   @IsOptional()
+  @ToBoolean()
   @IsBoolean()
   isActive?: boolean;
 }

@@ -30,34 +30,6 @@ export class TagsController {
   }
 
   @Public()
-  @Get(':id')
-  @ResponseMessage('Get tag detail')
-  getTag(@Param('id') id: string) {
-    return this.tagsService.findOne(id);
-  }
-
-  @Post()
-  @RequirePermissions('manage_products')
-  @ResponseMessage('Create tag')
-  createTag(@Body() dto: CreateTagDto) {
-    return this.tagsService.create(dto);
-  }
-
-  @Patch(':id')
-  @RequirePermissions('manage_products')
-  @ResponseMessage('Update tag')
-  updateTag(@Param('id') id: string, @Body() dto: UpdateTagDto) {
-    return this.tagsService.update(id, dto);
-  }
-
-  @Delete(':id')
-  @RequirePermissions('manage_products')
-  @ResponseMessage('Delete tag')
-  removeTag(@Param('id') id: string) {
-    return this.tagsService.remove(id);
-  }
-
-  @Public()
   @Get('products/:productId')
   @ResponseMessage('Get product tags')
   getProductTags(@Param('productId') productId: string) {
@@ -92,5 +64,33 @@ export class TagsController {
     @Param('tagId') tagId: string,
   ) {
     return this.tagsService.removeProductTag(productId, tagId);
+  }
+
+  @Public()
+  @Get(':id')
+  @ResponseMessage('Get tag detail')
+  getTag(@Param('id') id: string) {
+    return this.tagsService.findOne(id);
+  }
+
+  @Post()
+  @RequirePermissions('manage_products')
+  @ResponseMessage('Create tag')
+  createTag(@Body() dto: CreateTagDto) {
+    return this.tagsService.create(dto);
+  }
+
+  @Patch(':id')
+  @RequirePermissions('manage_products')
+  @ResponseMessage('Update tag')
+  updateTag(@Param('id') id: string, @Body() dto: UpdateTagDto) {
+    return this.tagsService.update(id, dto);
+  }
+
+  @Delete(':id')
+  @RequirePermissions('manage_products')
+  @ResponseMessage('Delete tag')
+  removeTag(@Param('id') id: string) {
+    return this.tagsService.remove(id);
   }
 }

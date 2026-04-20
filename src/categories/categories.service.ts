@@ -120,10 +120,14 @@ export class CategoriesService {
   async update(categoryId: string, updateCategoryDto: UpdateCategoryDto) {
     const category = await this.findOne(categoryId);
 
-    if (updateCategoryDto.categorySlug || updateCategoryDto.categoryName) {
-      const nextSlug = this.normalizeSlug(
-        updateCategoryDto.categorySlug ?? updateCategoryDto.categoryName ?? '',
-      );
+    if (updateCategoryDto.categorySlug !== undefined || updateCategoryDto.categoryName) {
+      const slugSource =
+        updateCategoryDto.categorySlug?.trim()
+          ? updateCategoryDto.categorySlug
+          : updateCategoryDto.categoryName
+            ? updateCategoryDto.categoryName
+            : category.categoryName;
+      const nextSlug = this.normalizeSlug(slugSource);
 
       const existedCategory = await this.categoriesRepository.findOneBy({
         categorySlug: nextSlug,
@@ -156,7 +160,9 @@ export class CategoriesService {
     category.categoryName =
       updateCategoryDto.categoryName ?? category.categoryName;
     category.categoryDescription =
-      updateCategoryDto.categoryDescription ?? category.categoryDescription;
+      updateCategoryDto.categoryDescription !== undefined
+        ? (updateCategoryDto.categoryDescription || null)
+        : category.categoryDescription;
     category.isActive = updateCategoryDto.isActive ?? category.isActive;
 
     return this.categoriesRepository.save(category);

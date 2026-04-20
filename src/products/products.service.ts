@@ -183,7 +183,17 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto) {
     await this.ensureCategoryExists(createProductDto.categoryId);
+    if (createProductDto.originId) {
+      await this.ensureOriginExists(createProductDto.originId);
+    }
     await this.ensureUniqueFields(createProductDto);
+
+    if (
+      createProductDto.productPriceSale != null &&
+      Number(createProductDto.productPriceSale) > Number(createProductDto.productPrice)
+    ) {
+      throw new BadRequestException('Sale price cannot exceed regular price');
+    }
 
     const product = this.productsRepository.create({
       productId: createProductDto.productId ?? randomUUID(),
@@ -222,8 +232,22 @@ export class ProductsService {
     if (updateProductDto.categoryId) {
       await this.ensureCategoryExists(updateProductDto.categoryId);
     }
+    if (updateProductDto.originId) {
+      await this.ensureOriginExists(updateProductDto.originId);
+    }
 
     await this.ensureUniqueFields(updateProductDto, product.productId);
+
+    const effectivePrice = updateProductDto.productPrice ?? product.productPrice;
+    const effectiveSalePrice = updateProductDto.productPriceSale !== undefined
+      ? updateProductDto.productPriceSale
+      : product.productPriceSale;
+    if (
+      effectiveSalePrice != null &&
+      Number(effectiveSalePrice) > Number(effectivePrice)
+    ) {
+      throw new BadRequestException('Sale price cannot exceed regular price');
+    }
 
     product.productName = updateProductDto.productName ?? product.productName;
     product.productSlug = updateProductDto.productSlug
@@ -635,17 +659,25 @@ export class ProductsService {
         'product',
         'product.product_id = transaction.product_id',
       )
+      .leftJoin(
+        UserEntity,
+        'user',
+        'user.user_id = transaction.performed_by',
+      )
       .select([
         'transaction.transactionId AS id',
         'transaction.productId AS productId',
-        'transaction.performedBy AS performedBy',
         'transaction.transactionType AS transactionType',
         'transaction.quantityChange AS quantityChange',
         'transaction.note AS note',
         'transaction.relatedOrderId AS relatedOrderId',
         'transaction.createdAt AS createdAt',
         'product.product_name AS productName',
-      ]);
+      ])
+      .addSelect(
+        'COALESCE(user.username, user.email, transaction.performed_by)',
+        'performedBy',
+      );
 
     if (query.productId) {
       queryBuilder.andWhere('transaction.product_id = :productId', {
@@ -823,6 +855,13 @@ export class ProductsService {
     const category = await this.categoriesRepository.findOneBy({ categoryId });
     if (!category) {
       throw new NotFoundException('Category not found');
+    }
+  }
+
+  private async ensureOriginExists(originId: string) {
+    const origin = await this.originsRepository.findOneBy({ originId });
+    if (!origin) {
+      throw new NotFoundException('Origin not found');
     }
   }
 

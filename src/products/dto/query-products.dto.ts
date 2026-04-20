@@ -1,4 +1,5 @@
 import { Type } from 'class-transformer';
+import { ToBoolean } from '../../common/dto-transformers';
 import {
   IsBoolean,
   IsEnum,
@@ -66,21 +67,21 @@ export class QueryProductsDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(500)
   limit?: number = 10;
 
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBoolean()
   @IsBoolean()
   includeHidden?: boolean = false;
 
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBoolean()
   @IsBoolean()
   expiredSoon?: boolean = false;
 
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBoolean()
   @IsBoolean()
   lowStock?: boolean = false;
 

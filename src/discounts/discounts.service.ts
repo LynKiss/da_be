@@ -80,6 +80,11 @@ export class DiscountsService {
       createDiscountDto.startAt,
       createDiscountDto.expireDate,
     );
+    this.validateDiscountValue(
+      createDiscountDto.discountType,
+      createDiscountDto.discountValue,
+      createDiscountDto.maxDiscountAmount,
+    );
     await this.validateDiscountTargets(createDiscountDto);
 
     const discount = this.discountsRepository.create({
@@ -120,6 +125,13 @@ export class DiscountsService {
       ? new Date(updateDiscountDto.expireDate)
       : discount.expireDate;
     this.validateDiscountDates(nextStartAt, nextExpireDate);
+    this.validateDiscountValue(
+      updateDiscountDto.discountType ?? discount.discountType,
+      updateDiscountDto.discountValue ?? discount.discountValue,
+      updateDiscountDto.maxDiscountAmount !== undefined
+        ? updateDiscountDto.maxDiscountAmount
+        : discount.maxDiscountAmount,
+    );
     await this.validateDiscountTargets({
       appliesTo: updateDiscountDto.appliesTo ?? discount.appliesTo,
       categoryIds: updateDiscountDto.categoryIds,
@@ -466,6 +478,26 @@ export class DiscountsService {
     });
     if (existing && existing.discountId !== excludeDiscountId) {
       throw new ConflictException('Discount code already exists');
+    }
+  }
+
+  private validateDiscountValue(
+    type: DiscountType | string,
+    value: string | number,
+    maxDiscountAmount?: string | number | null,
+  ) {
+    const numValue = Number(value);
+    if (isNaN(numValue) || numValue <= 0) {
+      throw new BadRequestException('Discount value must be greater than 0');
+    }
+    if (type === DiscountType.PERCENT && numValue > 100) {
+      throw new BadRequestException('Percent discount cannot exceed 100%');
+    }
+    if (maxDiscountAmount != null) {
+      const numMax = Number(maxDiscountAmount);
+      if (isNaN(numMax) || numMax <= 0) {
+        throw new BadRequestException('Max discount amount must be greater than 0');
+      }
     }
   }
 

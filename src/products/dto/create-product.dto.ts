@@ -1,3 +1,4 @@
+import { ToBoolean } from '../../common/dto-transformers';
 import {
   IsBoolean,
   IsInt,
@@ -53,6 +54,7 @@ export class CreateProductDto {
   description?: string;
 
   @IsOptional()
+  @ToBoolean()
   @IsBoolean()
   isShow?: boolean;
 
