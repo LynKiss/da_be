@@ -7,6 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { UserEntity } from '../users/entities/user.entity';
 import { AddCartItemDto } from './dto/add-cart-item.dto';
 import { UpdateCartItemDto } from './dto/update-cart-item.dto';
@@ -22,6 +23,8 @@ export class CartsService {
     private readonly cartItemsRepository: Repository<CartItemEntity>,
     @InjectRepository(ProductEntity)
     private readonly productsRepository: Repository<ProductEntity>,
+    @InjectRepository(ProductImageEntity)
+    private readonly productImagesRepository: Repository<ProductImageEntity>,
     @InjectRepository(UserEntity)
     private readonly usersRepository: Repository<UserEntity>,
   ) {}
@@ -40,6 +43,7 @@ export class CartsService {
   private toCartItemResponse(
     item: CartItemEntity,
     product?: ProductEntity | null,
+    primaryImageUrl?: string | null,
   ) {
     const unitPrice = item.priceAtAdded;
     const quantity = item.quantity;
@@ -49,6 +53,7 @@ export class CartsService {
       id: item.cartItemId,
       productId: item.productId,
       productName: product?.productName ?? null,
+      primaryImageUrl: primaryImageUrl ?? null,
       quantity,
       unitPrice,
       lineTotal,
@@ -100,16 +105,30 @@ export class CartsService {
     });
 
     const productIds = [...new Set(items.map((item) => item.productId))];
-    const products = productIds.length
-      ? await this.productsRepository.findBy(
-          productIds.map((productId) => ({ productId })),
-        )
-      : [];
+    const [products, primaryImages] = await Promise.all([
+      productIds.length
+        ? this.productsRepository.findBy(
+            productIds.map((productId) => ({ productId })),
+          )
+        : Promise.resolve([]),
+      productIds.length
+        ? this.productImagesRepository.findBy(
+            productIds.map((productId) => ({ productId, isPrimary: true })),
+          )
+        : Promise.resolve([]),
+    ]);
     const productsById = new Map(
       products.map((product) => [product.productId, product]),
     );
+    const primaryImageByProductId = new Map(
+      primaryImages.map((img) => [img.productId, img.imageUrl]),
+    );
     const mappedItems = items.map((item) =>
-      this.toCartItemResponse(item, productsById.get(item.productId)),
+      this.toCartItemResponse(
+        item,
+        productsById.get(item.productId),
+        primaryImageByProductId.get(item.productId),
+      ),
     );
     const totalQuantity = mappedItems.reduce(
       (sum, item) => sum + item.quantity,
@@ -159,8 +178,12 @@ export class CartsService {
     item.quantity = nextQuantity;
     item.priceAtAdded = this.getEffectivePrice(product);
 
+    const primaryImg = await this.productImagesRepository.findOneBy({
+      productId: product.productId,
+      isPrimary: true,
+    });
     const savedItem = await this.cartItemsRepository.save(item);
-    return this.toCartItemResponse(savedItem, product);
+    return this.toCartItemResponse(savedItem, product, primaryImg?.imageUrl);
   }
 
   async updateItem(
@@ -179,8 +202,12 @@ export class CartsService {
     item.quantity = updateCartItemDto.quantity;
     item.priceAtAdded = this.getEffectivePrice(product);
 
+    const primaryImg = await this.productImagesRepository.findOneBy({
+      productId: product.productId,
+      isPrimary: true,
+    });
     const savedItem = await this.cartItemsRepository.save(item);
-    return this.toCartItemResponse(savedItem, product);
+    return this.toCartItemResponse(savedItem, product, primaryImg?.imageUrl);
   }
 
   async deleteItem(userId: string, cartItemId: string) {

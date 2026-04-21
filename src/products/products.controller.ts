@@ -71,6 +71,13 @@ export class ProductsController {
     return this.productsService.toggleVisibility(id);
   }
 
+  @Patch(':id/toggle-featured')
+  @RequirePermissions('manage_products')
+  @ResponseMessage('Toggle product featured')
+  toggleProductFeatured(@Param('id') id: string) {
+    return this.productsService.toggleFeatured(id);
+  }
+
   @Delete(':id')
   @RequirePermissions('manage_products')
   @ResponseMessage('Delete product')

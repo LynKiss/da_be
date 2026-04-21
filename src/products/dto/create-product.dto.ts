@@ -81,4 +81,9 @@ export class CreateProductDto {
   @IsString()
   @MaxLength(100)
   boxBarcode?: string;
+
+  @IsOptional()
+  @ToBoolean()
+  @IsBoolean()
+  isFeatured?: boolean;
 }

@@ -1,14 +1,22 @@
 import {
   BadRequestException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
 } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { NewsStatusFilter, QueryNewsDto } from './dto/query-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
 import { NewsEntity } from './entities/news.entity';
+
+type UploadedImageFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+};
 
 @Injectable()
 export class NewsService {
@@ -135,6 +143,52 @@ export class NewsService {
     const article = await this.findOne(newsId);
     await this.newsRepository.remove(article);
     return { success: true };
+  }
+
+  async uploadCoverImage(newsId: string, file: UploadedImageFile) {
+    const article = await this.findOne(newsId);
+    const url = await this.uploadImageToCloudinary(file, `news-cover-${newsId}`);
+    article.titleImageUrl = url;
+    await this.newsRepository.save(article);
+    return { titleImageUrl: url };
+  }
+
+  private async uploadImageToCloudinary(file: UploadedImageFile, publicIdPrefix: string) {
+    const cloudName = process.env.CLOUD_NAME;
+    const apiKey = process.env.API_KEY;
+    const apiSecret = process.env.API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      throw new InternalServerErrorException('Cloudinary environment variables are missing');
+    }
+
+    const folder = 'agri_ecommerce/news';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const publicId = `${publicIdPrefix}-${Date.now()}`;
+    const signature = createHash('sha1')
+      .update(`folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`)
+      .digest('hex');
+
+    const formData = new FormData();
+    formData.append('file', new Blob([new Uint8Array(file.buffer)], { type: file.mimetype }), file.originalname);
+    formData.append('api_key', apiKey);
+    formData.append('timestamp', String(timestamp));
+    formData.append('signature', signature);
+    formData.append('folder', folder);
+    formData.append('public_id', publicId);
+
+    const response = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    const payload = (await response.json()) as { secure_url?: string; error?: { message?: string } };
+
+    if (!response.ok || !payload.secure_url) {
+      throw new InternalServerErrorException(payload.error?.message ?? 'Unable to upload image to Cloudinary');
+    }
+
+    return payload.secure_url;
   }
 
   private normalizeSlug(value: string) {

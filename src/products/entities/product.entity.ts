@@ -90,6 +90,14 @@ export class ProductEntity {
   })
   isShow!: boolean;
 
+  @Column({
+    name: 'is_featured',
+    type: 'tinyint',
+    width: 1,
+    default: 0,
+  })
+  isFeatured!: boolean;
+
   @Index('idx_products_expired_at')
   @Column({
     name: 'expired_at',

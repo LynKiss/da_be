@@ -90,4 +90,14 @@ export class QueryProductsDto {
   @IsInt()
   @Min(0)
   lowStockThreshold?: number = 10;
+
+  @IsOptional()
+  @ToBoolean()
+  @IsBoolean()
+  isFeatured?: boolean;
+
+  @IsOptional()
+  @ToBoolean()
+  @IsBoolean()
+  hasSalePrice?: boolean;
 }

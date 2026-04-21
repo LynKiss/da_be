@@ -157,6 +157,16 @@ export class ProductsService {
       queryBuilder.andWhere('product.is_show = :isShow', { isShow: true });
     }
 
+    if (query.isFeatured !== undefined) {
+      queryBuilder.andWhere('product.is_featured = :isFeatured', {
+        isFeatured: query.isFeatured,
+      });
+    }
+
+    if (query.hasSalePrice) {
+      queryBuilder.andWhere('product.product_price_sale IS NOT NULL');
+    }
+
     queryBuilder
       .orderBy(`product.${sortBy}`, sortOrder)
       .skip((page - 1) * limit)
@@ -211,6 +221,7 @@ export class ProductsService {
       ratingAverage: '0',
       ratingCount: 0,
       isShow: createProductDto.isShow ?? true,
+      isFeatured: createProductDto.isFeatured ?? false,
       expiredAt: createProductDto.expiredAt
         ? new Date(createProductDto.expiredAt)
         : null,
@@ -277,6 +288,9 @@ export class ProductsService {
         ? (updateProductDto.description ?? null)
         : product.description;
     product.isShow = updateProductDto.isShow ?? product.isShow;
+    if (updateProductDto.isFeatured !== undefined) {
+      product.isFeatured = updateProductDto.isFeatured;
+    }
     product.expiredAt = updateProductDto.expiredAt
       ? new Date(updateProductDto.expiredAt)
       : product.expiredAt;
@@ -315,6 +329,16 @@ export class ProductsService {
     product.isShow = !product.isShow;
     const saved = await this.productsRepository.save(product);
     return { productId: saved.productId, isShow: saved.isShow };
+  }
+
+  async toggleFeatured(productId: string) {
+    const product = await this.productsRepository.findOneBy({ productId });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+    product.isFeatured = !product.isFeatured;
+    const saved = await this.productsRepository.save(product);
+    return { productId: saved.productId, isFeatured: saved.isFeatured };
   }
 
   // ─── PRODUCT IMAGES ──────────────────────────────────────────────────────────
@@ -912,7 +936,7 @@ export class ProductsService {
       this.enrichProductWithDiscount(product),
     ]);
 
-    const [origin, subcategory] = await Promise.all([
+    const [origin, subcategory, category] = await Promise.all([
       product.originId
         ? this.originsRepository.findOneBy({ originId: product.originId })
         : Promise.resolve(null),
@@ -921,9 +945,10 @@ export class ProductsService {
             subcategoryId: product.subcategoryId,
           })
         : Promise.resolve(null),
+      this.categoriesRepository.findOneBy({ categoryId: product.categoryId }),
     ]);
 
-    return { ...enriched, images, descriptionImages, tags, origin, subcategory };
+    return { ...enriched, images, descriptionImages, tags, origin, subcategory, category };
   }
 
   private async enrichProductWithDiscount(product: ProductEntity) {

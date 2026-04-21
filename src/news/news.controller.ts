@@ -7,13 +7,22 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { RequirePermissions, ResponseMessage, User } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { QueryNewsDto } from './dto/query-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
 import { NewsService } from './news.service';
+
+type UploadedImageFile = {
+  buffer: Buffer;
+  originalname: string;
+  mimetype: string;
+};
 
 @Controller('news')
 export class NewsController {
@@ -59,6 +68,14 @@ export class NewsController {
   @ResponseMessage('Update news article')
   updateNews(@Param('id') id: string, @Body() updateNewsDto: UpdateNewsDto) {
     return this.newsService.update(id, updateNewsDto);
+  }
+
+  @Post(':id/cover-image')
+  @RequirePermissions('manage_news')
+  @ResponseMessage('Upload news cover image')
+  @UseInterceptors(FileInterceptor('file'))
+  uploadCoverImage(@Param('id') id: string, @UploadedFile() file: UploadedImageFile) {
+    return this.newsService.uploadCoverImage(id, file);
   }
 
   @Delete(':id')

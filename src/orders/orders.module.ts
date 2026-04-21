@@ -10,6 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { UserEntity } from '../users/entities/user.entity';
+import { DeliveryMethodsController } from './delivery-methods.controller';
 import { OrdersController } from './orders.controller';
 import { PaymentsController } from './payments.controller';
 import { ReturnsController } from './returns.controller';
@@ -44,7 +45,7 @@ import { OrdersService } from './orders.service';
       PaymentTransactionEntity,
     ]),
   ],
-  controllers: [OrdersController, PaymentsController, ReturnsController],
+  controllers: [OrdersController, PaymentsController, ReturnsController, DeliveryMethodsController],
   providers: [OrdersService],
   exports: [OrdersService, TypeOrmModule],
 })
