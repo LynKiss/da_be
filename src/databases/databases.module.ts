@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PermissionEntity } from '../permissions/entities/permission.entity';
+import { RolePermissionEntity } from '../roles/entities/role-permission.entity';
 import { RefreshTokenEntity } from '../users/entities/refresh-token.entity';
 import { UserEntity } from '../users/entities/user.entity';
 import { DatabasesController } from './databases.controller';
@@ -12,6 +13,7 @@ import { DatabasesService } from './databases.service';
       UserEntity,
       PermissionEntity,
       RefreshTokenEntity,
+      RolePermissionEntity,
     ]),
   ],
   controllers: [DatabasesController],

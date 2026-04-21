@@ -5,6 +5,7 @@ import {
   IsString,
   MaxLength,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateCategoryDto {
@@ -14,8 +15,9 @@ export class CreateCategoryDto {
   categoryName: string;
 
   @IsOptional()
+  @ValidateIf((o: { categoryDescription?: string | null }) => o.categoryDescription !== null)
   @IsString()
-  categoryDescription?: string;
+  categoryDescription?: string | null;
 
   @IsOptional()
   @IsString()
