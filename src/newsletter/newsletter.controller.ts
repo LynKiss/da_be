@@ -19,27 +19,23 @@ import { NewsletterService } from './newsletter.service';
 export class NewsletterController {
   constructor(private readonly newsletterService: NewsletterService) {}
 
-  // ─── PUBLIC ──────────────────────────────────────────────────────────────────
-
   @Public()
   @Post('subscribe')
-  @ResponseMessage('Đăng ký nhận tin thành công')
+  @ResponseMessage('Dang ky nhan tin thanh cong')
   subscribe(@Body() body: { email: string; name?: string }) {
     return this.newsletterService.subscribe(body.email, body.name);
   }
 
   @Public()
   @Get('unsubscribe')
-  @ResponseMessage('Hủy đăng ký thành công')
+  @ResponseMessage('Huy dang ky thanh cong')
   unsubscribe(@Query('token') token: string) {
     return this.newsletterService.unsubscribeByToken(token);
   }
 
-  // ─── ADMIN ────────────────────────────────────────────────────────────────────
-
   @RequirePermissions('manage_orders')
   @Get('subscribers')
-  @ResponseMessage('Danh sách người đăng ký')
+  @ResponseMessage('Danh sach nguoi dang ky')
   getSubscribers(
     @Query('page') page = '1',
     @Query('limit') limit = '50',
@@ -54,45 +50,76 @@ export class NewsletterController {
 
   @RequirePermissions('manage_orders')
   @Delete('subscribers/:id')
-  @ResponseMessage('Xóa người đăng ký thành công')
+  @ResponseMessage('Xoa nguoi dang ky thanh cong')
   deleteSubscriber(@Param('id') id: string) {
     return this.newsletterService.deleteSubscriber(id);
   }
 
   @RequirePermissions('manage_orders')
   @Get('campaigns')
-  @ResponseMessage('Danh sách chiến dịch')
+  @ResponseMessage('Danh sach chien dich')
   getCampaigns() {
     return this.newsletterService.findCampaigns();
   }
 
   @RequirePermissions('manage_orders')
+  @Get('automation')
+  @ResponseMessage('Cau hinh gui mail tu dong')
+  getAutomationSettings() {
+    return this.newsletterService.getAutomationSettings();
+  }
+
+  @RequirePermissions('manage_orders')
   @Post('campaigns')
-  @ResponseMessage('Tạo chiến dịch thành công')
-  createCampaign(@Body() body: { subject: string; body: string }) {
-    return this.newsletterService.createCampaign(body.subject, body.body);
+  @ResponseMessage('Tao chien dich thanh cong')
+  createCampaign(
+    @Body() body: { subject: string; body: string; scheduledAt?: string },
+  ) {
+    const scheduledAt = body.scheduledAt ? new Date(body.scheduledAt) : null;
+    return this.newsletterService.createCampaign(
+      body.subject,
+      body.body,
+      scheduledAt,
+    );
   }
 
   @RequirePermissions('manage_orders')
   @Put('campaigns/:id')
-  @ResponseMessage('Cập nhật chiến dịch thành công')
+  @ResponseMessage('Cap nhat chien dich thanh cong')
   updateCampaign(
     @Param('id') id: string,
-    @Body() body: { subject: string; body: string },
+    @Body() body: { subject: string; body: string; scheduledAt?: string },
   ) {
-    return this.newsletterService.updateCampaign(id, body.subject, body.body);
+    const scheduledAt = body.scheduledAt ? new Date(body.scheduledAt) : null;
+    return this.newsletterService.updateCampaign(
+      id,
+      body.subject,
+      body.body,
+      scheduledAt,
+    );
+  }
+
+  @RequirePermissions('manage_orders')
+  @Put('automation/smtp')
+  @ResponseMessage('Cap nhat cau hinh SMTP thanh cong')
+  updateAutomationSmtpSettings(
+    @Body() body: { smtp?: Record<string, unknown> },
+  ) {
+    return this.newsletterService.updateAutomationSmtpSettings(
+      body.smtp ?? {},
+    );
   }
 
   @RequirePermissions('manage_orders')
   @Delete('campaigns/:id')
-  @ResponseMessage('Xóa chiến dịch thành công')
+  @ResponseMessage('Xoa chien dich thanh cong')
   deleteCampaign(@Param('id') id: string) {
     return this.newsletterService.deleteCampaign(id);
   }
 
   @RequirePermissions('manage_orders')
   @Post('campaigns/:id/send')
-  @ResponseMessage('Gửi chiến dịch thành công')
+  @ResponseMessage('Gui chien dich thanh cong')
   sendCampaign(@Param('id') id: string) {
     return this.newsletterService.sendCampaign(id);
   }

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -18,12 +19,14 @@ import { ContactsModule } from './contacts/contacts.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ReportsModule } from './reports/reports.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
+import { SettingsModule } from './settings/settings.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync(typeOrmConfig),
     AuthModule,
     DatabasesModule,
@@ -39,6 +42,7 @@ import { NewsletterModule } from './newsletter/newsletter.module';
     NotificationsModule,
     ReportsModule,
     NewsletterModule,
+    SettingsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

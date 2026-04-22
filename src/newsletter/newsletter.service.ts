@@ -5,10 +5,12 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as crypto from 'crypto';
 import * as nodemailer from 'nodemailer';
-import { Repository } from 'typeorm';
+import { LessThanOrEqual, Repository } from 'typeorm';
+import { SettingsService } from '../settings/settings.service';
 import {
   CampaignStatus,
   NewsletterCampaignEntity,
@@ -28,20 +30,20 @@ export class NewsletterService {
     @InjectRepository(NewsletterCampaignEntity)
     private readonly campaignsRepository: Repository<NewsletterCampaignEntity>,
     private readonly configService: ConfigService,
+    private readonly settingsService: SettingsService,
   ) {}
-
-  // ─── PUBLIC ──────────────────────────────────────────────────────────────────
 
   async subscribe(email: string, name?: string) {
     const existing = await this.subscribersRepository.findOneBy({ email });
     if (existing) {
       if (existing.status === SubscriberStatus.ACTIVE) {
-        return { message: 'Email đã được đăng ký' };
+        return { message: 'Email da duoc dang ky' };
       }
+
       existing.status = SubscriberStatus.ACTIVE;
       existing.name = name ?? existing.name;
       await this.subscribersRepository.save(existing);
-      return { message: 'Đăng ký thành công' };
+      return { message: 'Dang ky thanh cong' };
     }
 
     const token = crypto.randomBytes(32).toString('hex');
@@ -52,20 +54,22 @@ export class NewsletterService {
       unsubscribeToken: token,
     });
     await this.subscribersRepository.save(subscriber);
-    return { message: 'Đăng ký thành công' };
+
+    return { message: 'Dang ky thanh cong' };
   }
 
   async unsubscribeByToken(token: string) {
     const subscriber = await this.subscribersRepository.findOneBy({
       unsubscribeToken: token,
     });
-    if (!subscriber) throw new NotFoundException('Token không hợp lệ');
+    if (!subscriber) {
+      throw new NotFoundException('Token khong hop le');
+    }
+
     subscriber.status = SubscriberStatus.UNSUBSCRIBED;
     await this.subscribersRepository.save(subscriber);
-    return { message: 'Hủy đăng ký thành công' };
+    return { message: 'Huy dang ky thanh cong' };
   }
-
-  // ─── ADMIN ────────────────────────────────────────────────────────────────────
 
   async findSubscribers(page: number, limit: number, status?: string) {
     const qb = this.subscribersRepository
@@ -74,11 +78,13 @@ export class NewsletterService {
       .skip((page - 1) * limit)
       .take(limit);
 
-    if (status) qb.andWhere('s.status = :status', { status });
+    if (status) {
+      qb.andWhere('s.status = :status', { status });
+    }
 
     const [items, total] = await qb.getManyAndCount();
     return {
-      items: items.map((s) => this.mapSubscriber(s)),
+      items: items.map((subscriber) => this.mapSubscriber(subscriber)),
       total,
       page,
       limit,
@@ -86,42 +92,71 @@ export class NewsletterService {
   }
 
   async deleteSubscriber(subscriberId: string) {
-    const subscriber = await this.subscribersRepository.findOneBy({ subscriberId });
-    if (!subscriber) throw new NotFoundException('Không tìm thấy người đăng ký');
+    const subscriber = await this.subscribersRepository.findOneBy({
+      subscriberId,
+    });
+    if (!subscriber) {
+      throw new NotFoundException('Khong tim thay nguoi dang ky');
+    }
+
     await this.subscribersRepository.delete({ subscriberId });
     return { success: true };
   }
 
-  async createCampaign(subject: string, body: string) {
+  async createCampaign(subject: string, body: string, scheduledAt?: Date | null) {
+    const nextScheduledAt = this.normalizeScheduledAt(scheduledAt);
+    const status = nextScheduledAt ? CampaignStatus.SCHEDULED : CampaignStatus.DRAFT;
+
     const campaign = this.campaignsRepository.create({
       subject,
       body,
-      status: CampaignStatus.DRAFT,
+      status,
       sentAt: null,
+      scheduledAt: nextScheduledAt,
       recipientCount: 0,
+      totalRecipientCount: 0,
     });
     const saved = await this.campaignsRepository.save(campaign);
     return this.mapCampaign(saved);
   }
 
-  async updateCampaign(campaignId: string, subject: string, body: string) {
+  async updateCampaign(
+    campaignId: string,
+    subject: string,
+    body: string,
+    scheduledAt?: Date | null,
+  ) {
     const campaign = await this.campaignsRepository.findOneBy({ campaignId });
-    if (!campaign) throw new NotFoundException('Không tìm thấy chiến dịch');
-    if (campaign.status === CampaignStatus.SENT) {
-      throw new BadRequestException('Không thể chỉnh sửa chiến dịch đã gửi');
+    if (!campaign) {
+      throw new NotFoundException('Khong tim thay chien dich');
     }
+
+    if (campaign.status === CampaignStatus.SENT) {
+      throw new BadRequestException('Khong the chinh sua chien dich da gui');
+    }
+
+    const nextScheduledAt = this.normalizeScheduledAt(scheduledAt);
     campaign.subject = subject;
     campaign.body = body;
+    campaign.scheduledAt = nextScheduledAt;
+    campaign.status = nextScheduledAt
+      ? CampaignStatus.SCHEDULED
+      : CampaignStatus.DRAFT;
+
     const saved = await this.campaignsRepository.save(campaign);
     return this.mapCampaign(saved);
   }
 
   async deleteCampaign(campaignId: string) {
     const campaign = await this.campaignsRepository.findOneBy({ campaignId });
-    if (!campaign) throw new NotFoundException('Không tìm thấy chiến dịch');
-    if (campaign.status === CampaignStatus.SENT) {
-      throw new BadRequestException('Không thể xóa chiến dịch đã gửi');
+    if (!campaign) {
+      throw new NotFoundException('Khong tim thay chien dich');
     }
+
+    if (campaign.status === CampaignStatus.SENT) {
+      throw new BadRequestException('Khong the xoa chien dich da gui');
+    }
+
     await this.campaignsRepository.delete({ campaignId });
     return { success: true };
   }
@@ -130,14 +165,52 @@ export class NewsletterService {
     const campaigns = await this.campaignsRepository.find({
       order: { createdAt: 'DESC' },
     });
-    return campaigns.map((c) => this.mapCampaign(c));
+    return campaigns.map((campaign) => this.mapCampaign(campaign));
+  }
+
+  async getAutomationSettings() {
+    const [storedSmtp, resolvedSmtp, totalScheduled, nextScheduledCampaign] =
+      await Promise.all([
+        this.settingsService.getSmtpSettings(),
+        this.settingsService.getResolvedSmtpConfig(),
+        this.campaignsRepository.count({
+          where: { status: CampaignStatus.SCHEDULED },
+        }),
+        this.campaignsRepository.findOne({
+          where: { status: CampaignStatus.SCHEDULED },
+          order: { scheduledAt: 'ASC' },
+        }),
+      ]);
+
+    return {
+      smtp: this.mapAutomationSmtp(storedSmtp, resolvedSmtp),
+      scheduler: {
+        isEnabled: true,
+        cron: '* * * * *',
+        intervalMinutes: 1,
+      },
+      scheduledCampaigns: {
+        total: totalScheduled,
+        nextScheduledAt: nextScheduledCampaign?.scheduledAt ?? null,
+      },
+    };
+  }
+
+  async updateAutomationSmtpSettings(value: unknown) {
+    const storedSmtp = await this.settingsService.saveSmtpSettings(value);
+    const resolvedSmtp = await this.settingsService.getResolvedSmtpConfig();
+
+    return this.mapAutomationSmtp(storedSmtp, resolvedSmtp);
   }
 
   async sendCampaign(campaignId: string) {
     const campaign = await this.campaignsRepository.findOneBy({ campaignId });
-    if (!campaign) throw new NotFoundException('Không tìm thấy chiến dịch');
+    if (!campaign) {
+      throw new NotFoundException('Khong tim thay chien dich');
+    }
+
     if (campaign.status === CampaignStatus.SENT) {
-      throw new BadRequestException('Chiến dịch đã được gửi');
+      throw new BadRequestException('Chien dich da duoc gui');
     }
 
     const subscribers = await this.subscribersRepository.find({
@@ -145,12 +218,12 @@ export class NewsletterService {
     });
 
     if (subscribers.length === 0) {
-      return { sent: 0, message: 'Không có người đăng ký nào' };
+      return { sent: 0, message: 'Khong co nguoi dang ky nao' };
     }
 
-    const transporter = this.createTransporter();
-    if (!transporter) {
-      throw new BadRequestException('SMTP chưa được cấu hình');
+    const mailer = await this.getMailer();
+    if (!mailer) {
+      throw new BadRequestException('SMTP chua duoc cau hinh');
     }
 
     const backendUrl =
@@ -158,19 +231,26 @@ export class NewsletterService {
     let sent = 0;
 
     await Promise.allSettled(
-      subscribers.map(async (sub) => {
+      subscribers.map(async (subscriber) => {
         try {
-          const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${sub.unsubscribeToken}`;
-          await transporter.sendMail({
-            from: this.configService.get<string>('SMTP_FROM') ?? 'no-reply@example.com',
-            to: sub.email,
+          const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${subscriber.unsubscribeToken}`;
+          await mailer.transporter.sendMail({
+            from: mailer.from,
+            to: subscriber.email,
             subject: campaign.subject,
-            html: this.wrapCampaignHtml(campaign.body, campaign.subject, unsubscribeUrl),
+            html: this.wrapCampaignHtml(
+              campaign.body,
+              campaign.subject,
+              unsubscribeUrl,
+            ),
           });
           sent++;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          this.logger.error(`Failed to send to ${sub.email}: ${msg}`);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.error(
+            `Failed to send campaign ${campaignId} to ${subscriber.email}: ${message}`,
+          );
         }
       }),
     );
@@ -178,20 +258,61 @@ export class NewsletterService {
     campaign.status = CampaignStatus.SENT;
     campaign.sentAt = new Date();
     campaign.recipientCount = sent;
+    campaign.totalRecipientCount = subscribers.length;
     await this.campaignsRepository.save(campaign);
 
     return { sent, total: subscribers.length };
   }
 
-  // Called from NewsService when an article is published
+  @Cron('* * * * *')
+  async checkScheduledCampaigns() {
+    const dueCampaigns = await this.campaignsRepository.find({
+      where: {
+        status: CampaignStatus.SCHEDULED,
+        scheduledAt: LessThanOrEqual(new Date()),
+      },
+    });
+
+    for (const campaign of dueCampaigns) {
+      const claimed = await this.campaignsRepository.update(
+        {
+          campaignId: campaign.campaignId,
+          status: CampaignStatus.SCHEDULED,
+        },
+        { status: CampaignStatus.DRAFT },
+      );
+
+      if ((claimed.affected ?? 0) === 0) {
+        continue;
+      }
+
+      try {
+        await this.sendCampaign(campaign.campaignId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `Scheduled send failed for ${campaign.campaignId}: ${message}`,
+        );
+        await this.campaignsRepository.update(
+          { campaignId: campaign.campaignId },
+          { status: CampaignStatus.SCHEDULED },
+        );
+      }
+    }
+  }
+
   async notifyNewArticle(title: string, slug: string, excerpt: string) {
     const subscribers = await this.subscribersRepository.find({
       where: { status: SubscriberStatus.ACTIVE },
     });
-    if (!subscribers.length) return;
+    if (!subscribers.length) {
+      return;
+    }
 
-    const transporter = this.createTransporter();
-    if (!transporter) return;
+    const mailer = await this.getMailer();
+    if (!mailer) {
+      return;
+    }
 
     const frontendUrl =
       this.configService.get<string>('FRONTEND_URL') ?? 'http://localhost:5173';
@@ -199,16 +320,16 @@ export class NewsletterService {
       this.configService.get<string>('BACKEND_URL') ?? 'http://localhost:8000';
 
     const articleUrl = `${frontendUrl}/client/news/${slug}`;
-    const subject = `Bài viết mới: ${title}`;
-    const body = `<p>${excerpt}</p><p><a href="${articleUrl}" style="color:#006241;font-weight:bold;">Đọc bài viết →</a></p>`;
+    const subject = `Bai viet moi: ${title}`;
+    const body = `<p>${excerpt}</p><p><a href="${articleUrl}" style="color:#006241;font-weight:bold;">Doc bai viet -></a></p>`;
 
     await Promise.allSettled(
-      subscribers.map(async (sub) => {
-        const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${sub.unsubscribeToken}`;
+      subscribers.map(async (subscriber) => {
+        const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${subscriber.unsubscribeToken}`;
         try {
-          await transporter.sendMail({
-            from: this.configService.get<string>('SMTP_FROM') ?? 'no-reply@example.com',
-            to: sub.email,
+          await mailer.transporter.sendMail({
+            from: mailer.from,
+            to: subscriber.email,
             subject,
             html: this.wrapCampaignHtml(body, subject, unsubscribeUrl),
           });
@@ -217,20 +338,24 @@ export class NewsletterService {
     );
   }
 
-  // ─── HELPERS ──────────────────────────────────────────────────────────────────
+  private async getMailer() {
+    const smtp = await this.settingsService.getResolvedSmtpConfig();
+    if (!smtp.host || !smtp.user || !smtp.pass) {
+      return null;
+    }
 
-  private createTransporter() {
-    const host = this.configService.get<string>('SMTP_HOST');
-    const port = Number(this.configService.get<string>('SMTP_PORT') ?? '587');
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    if (!host || !user || !pass) return null;
-    return nodemailer.createTransport({
-      host,
-      port,
-      secure: port === 465,
-      auth: { user, pass },
-    });
+    return {
+      from: smtp.from,
+      transporter: nodemailer.createTransport({
+        host: smtp.host,
+        port: smtp.port,
+        secure: smtp.secure,
+        auth: {
+          user: smtp.user,
+          pass: smtp.pass,
+        },
+      }),
+    };
   }
 
   private wrapCampaignHtml(body: string, subject: string, unsubscribeUrl: string) {
@@ -242,7 +367,7 @@ export class NewsletterService {
     <tr><td align="center">
       <table width="600" cellpadding="0" cellspacing="0" style="background:#fff;border-radius:12px;overflow:hidden;max-width:600px">
         <tr><td style="background:#1E3932;padding:24px 32px">
-          <p style="margin:0;color:#D4E9E2;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Nông nghiệp Việt</p>
+          <p style="margin:0;color:#D4E9E2;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase">Nong nghiep Viet</p>
           <h1 style="margin:4px 0 0;color:#fff;font-size:22px">${subject}</h1>
         </td></tr>
         <tr><td style="padding:32px;color:#374151;font-size:15px;line-height:1.7">
@@ -250,8 +375,8 @@ export class NewsletterService {
         </td></tr>
         <tr><td style="background:#f9f9f9;padding:20px 32px;text-align:center;border-top:1px solid #e5e7eb">
           <p style="margin:0;color:#9ca3af;font-size:12px">
-            Bạn nhận email này vì đã đăng ký nhận tin tức từ chúng tôi.<br>
-            <a href="${unsubscribeUrl}" style="color:#006241">Hủy đăng ký</a>
+            Ban nhan email nay vi da dang ky nhan tin tuc tu chung toi.<br>
+            <a href="${unsubscribeUrl}" style="color:#006241">Huy dang ky</a>
           </p>
         </td></tr>
       </table>
@@ -261,25 +386,63 @@ export class NewsletterService {
 </html>`;
   }
 
-  private mapSubscriber(s: NewsletterSubscriberEntity) {
+  private mapSubscriber(subscriber: NewsletterSubscriberEntity) {
     return {
-      id: s.subscriberId,
-      email: s.email,
-      name: s.name,
-      status: s.status,
-      createdAt: s.createdAt,
+      id: subscriber.subscriberId,
+      email: subscriber.email,
+      name: subscriber.name,
+      status: subscriber.status,
+      createdAt: subscriber.createdAt,
     };
   }
 
-  private mapCampaign(c: NewsletterCampaignEntity) {
+  private mapCampaign(campaign: NewsletterCampaignEntity) {
     return {
-      id: c.campaignId,
-      subject: c.subject,
-      body: c.body,
-      status: c.status,
-      sentAt: c.sentAt,
-      recipientCount: c.recipientCount,
-      createdAt: c.createdAt,
+      id: campaign.campaignId,
+      subject: campaign.subject,
+      body: campaign.body,
+      status: campaign.status,
+      sentAt: campaign.sentAt,
+      scheduledAt: campaign.scheduledAt,
+      recipientCount: campaign.recipientCount,
+      totalRecipientCount: campaign.totalRecipientCount,
+      createdAt: campaign.createdAt,
     };
+  }
+
+  private mapAutomationSmtp(
+    storedSmtp: Awaited<ReturnType<SettingsService['getSmtpSettings']>>,
+    resolvedSmtp: Awaited<ReturnType<SettingsService['getResolvedSmtpConfig']>>,
+  ) {
+    const hasStoredConfig = Boolean(
+      storedSmtp.host || storedSmtp.user || storedSmtp.pass || storedSmtp.from,
+    );
+    const hasResolvedConfig = Boolean(
+      resolvedSmtp.host && resolvedSmtp.user && resolvedSmtp.pass,
+    );
+
+    return {
+      ...storedSmtp,
+      isConfigured: hasResolvedConfig,
+      source: hasStoredConfig ? 'settings' : hasResolvedConfig ? 'env' : 'none',
+    };
+  }
+
+  private normalizeScheduledAt(scheduledAt?: Date | null) {
+    if (!scheduledAt) {
+      return null;
+    }
+
+    const nextDate =
+      scheduledAt instanceof Date ? scheduledAt : new Date(scheduledAt);
+    if (Number.isNaN(nextDate.getTime())) {
+      throw new BadRequestException('Thoi gian len lich khong hop le');
+    }
+
+    if (nextDate.getTime() <= Date.now()) {
+      throw new BadRequestException('Thoi gian len lich phai o tuong lai');
+    }
+
+    return nextDate;
   }
 }

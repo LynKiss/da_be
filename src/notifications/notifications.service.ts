@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as nodemailer from 'nodemailer';
 import { QueryFailedError, Repository } from 'typeorm';
 import { ProductEntity } from '../products/entities/product.entity';
+import { SettingsService } from '../settings/settings.service';
 import { UserEntity } from '../users/entities/user.entity';
 import {
   NotificationChannel,
@@ -31,7 +31,7 @@ export class NotificationsService {
     private readonly usersRepository: Repository<UserEntity>,
     @InjectRepository(ProductEntity)
     private readonly productsRepository: Repository<ProductEntity>,
-    private readonly configService: ConfigService,
+    private readonly settingsService: SettingsService,
   ) {}
 
   async createNotification(input: CreateNotificationInput) {
@@ -251,12 +251,8 @@ export class NotificationsService {
       );
     }
 
-    const host = this.configService.get<string>('SMTP_HOST');
-    const port = Number(this.configService.get<string>('SMTP_PORT') ?? '587');
-    const user = this.configService.get<string>('SMTP_USER');
-    const pass = this.configService.get<string>('SMTP_PASS');
-    const from =
-      this.configService.get<string>('SMTP_FROM') ?? 'no-reply@example.com';
+    const smtp = await this.settingsService.getResolvedSmtpConfig();
+    const { host, port, user, pass, from } = smtp;
 
     if (!host || !user || !pass || !notification.email) {
       notification.status = NotificationStatus.SKIPPED;
@@ -270,7 +266,7 @@ export class NotificationsService {
       const transporter = nodemailer.createTransport({
         host,
         port,
-        secure: port === 465,
+        secure: smtp.secure,
         auth: { user, pass },
       });
 

@@ -9,6 +9,7 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { SettingsModule } from '../settings/settings.module';
 import { UserEntity } from '../users/entities/user.entity';
 import { DeliveryMethodsController } from './delivery-methods.controller';
 import { OrdersController } from './orders.controller';
@@ -16,6 +17,7 @@ import { PaymentsController } from './payments.controller';
 import { ReturnsController } from './returns.controller';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
+import { OrderTrackingEntity } from './entities/order-tracking.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
 import { OrderEntity } from './entities/order.entity';
 import { PaymentTransactionEntity } from './entities/payment-transaction.entity';
@@ -26,10 +28,12 @@ import { OrdersService } from './orders.service';
 @Module({
   imports: [
     NotificationsModule,
+    SettingsModule,
     TypeOrmModule.forFeature([
       DeliveryMethodEntity,
       ShippingAddressEntity,
       OrderEntity,
+      OrderTrackingEntity,
       OrderItemEntity,
       OrderStatusHistoryEntity,
       ReturnEntity,

@@ -166,6 +166,46 @@ export class NewsController {
     return this.newsService.undislikeNewsComment(commentId);
   }
 
+  @Get('admin/comments')
+  @RequirePermissions('manage_news')
+  @ResponseMessage('Get admin news comments')
+  getAdminComments(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('status') status?: string,
+    @Query('newsId') newsId?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.newsService.findAdminComments({
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      status,
+      newsId,
+      search,
+    });
+  }
+
+  @Get('admin/comments/stats')
+  @RequirePermissions('manage_news')
+  @ResponseMessage('Get news comment stats')
+  getAdminCommentStats() {
+    return this.newsService.getAdminCommentStats();
+  }
+
+  @Patch('admin/comments/:commentId/hide')
+  @RequirePermissions('manage_news')
+  @ResponseMessage('Toggle comment visibility')
+  hideComment(@Param('commentId') commentId: string) {
+    return this.newsService.hideComment(commentId);
+  }
+
+  @Delete('admin/comments/:commentId')
+  @RequirePermissions('manage_news')
+  @ResponseMessage('Delete news comment')
+  deleteComment(@Param('commentId') commentId: string) {
+    return this.newsService.deleteAdminComment(commentId);
+  }
+
   @Delete(':id')
   @RequirePermissions('manage_news')
   @ResponseMessage('Delete news article')

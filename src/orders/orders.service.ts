@@ -24,6 +24,7 @@ import {
 } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SettingsService } from '../settings/settings.service';
 import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -31,10 +32,17 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { PaymentCallbackDto } from './dto/payment-callback.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
+import { UpdateOrderTrackingLiveDto } from './dto/update-order-tracking-live.dto';
+import { UpdateOrderTrackingManualDto } from './dto/update-order-tracking-manual.dto';
+import { UpdateOrderTrackingModeDto } from './dto/update-order-tracking-mode.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
+import {
+  OrderTrackingEntity,
+  OrderTrackingMode,
+} from './entities/order-tracking.entity';
 import {
   OrderEntity,
   OrderStatus,
@@ -51,6 +59,8 @@ import { ShippingAddressEntity } from './entities/shipping-address.entity';
 
 @Injectable()
 export class OrdersService {
+  private readonly liveTrackingFreshnessMs = 2 * 60 * 1000;
+
   constructor(
     @InjectRepository(DeliveryMethodEntity)
     private readonly deliveryMethodsRepository: Repository<DeliveryMethodEntity>,
@@ -58,6 +68,8 @@ export class OrdersService {
     private readonly shippingAddressesRepository: Repository<ShippingAddressEntity>,
     @InjectRepository(OrderEntity)
     private readonly ordersRepository: Repository<OrderEntity>,
+    @InjectRepository(OrderTrackingEntity)
+    private readonly orderTrackingRepository: Repository<OrderTrackingEntity>,
     @InjectRepository(OrderItemEntity)
     private readonly orderItemsRepository: Repository<OrderItemEntity>,
     @InjectRepository(OrderStatusHistoryEntity)
@@ -85,6 +97,7 @@ export class OrdersService {
     @InjectRepository(PaymentTransactionEntity)
     private readonly paymentTransactionsRepository: Repository<PaymentTransactionEntity>,
     private readonly notificationsService: NotificationsService,
+    private readonly settingsService: SettingsService,
   ) {}
 
   private async ensureUserExists(userId: string) {
@@ -120,12 +133,148 @@ export class OrdersService {
     );
   }
 
+  private async findAccessibleOrder(currentUser: IUser, orderId: string) {
+    return this.hasManageOrdersPermission(currentUser)
+      ? this.findAnyOrder(orderId)
+      : this.findOwnedOrder(currentUser._id, orderId);
+  }
+
+  private async findOrCreateOrderTracking(orderId: string) {
+    const existing = await this.orderTrackingRepository.findOneBy({ orderId });
+    if (existing) {
+      return existing;
+    }
+
+    const created = this.orderTrackingRepository.create({
+      orderId,
+      mode: OrderTrackingMode.AUTO_FALLBACK,
+      manualLatitude: null,
+      manualLongitude: null,
+      manualNote: null,
+      manualUpdatedAt: null,
+      manualUpdatedBy: null,
+      gpsLatitude: null,
+      gpsLongitude: null,
+      gpsHeading: null,
+      gpsSpeedKph: null,
+      gpsProvider: null,
+      gpsUpdatedAt: null,
+    });
+
+    return this.orderTrackingRepository.save(created);
+  }
+
+  private toNullableNumber(value: string | number | null | undefined) {
+    if (value === null || value === undefined || value === '') {
+      return null;
+    }
+
+    const next = Number(value);
+    return Number.isFinite(next) ? next : null;
+  }
+
+  private mapTrackingPoint(input: {
+    latitude: string | null;
+    longitude: string | null;
+    updatedAt: Date | null;
+    note?: string | null;
+    updatedBy?: string | null;
+    heading?: string | null;
+    speedKph?: string | null;
+    provider?: string | null;
+  }) {
+    const latitude = this.toNullableNumber(input.latitude);
+    const longitude = this.toNullableNumber(input.longitude);
+
+    if (latitude === null || longitude === null) {
+      return null;
+    }
+
+    return {
+      latitude,
+      longitude,
+      updatedAt: input.updatedAt,
+      note: input.note ?? null,
+      updatedBy: input.updatedBy ?? null,
+      heading: this.toNullableNumber(input.heading),
+      speedKph: this.toNullableNumber(input.speedKph),
+      provider: input.provider ?? null,
+    };
+  }
+
+  private mapOrderTracking(tracking: OrderTrackingEntity) {
+    const manualLocation = this.mapTrackingPoint({
+      latitude: tracking.manualLatitude,
+      longitude: tracking.manualLongitude,
+      updatedAt: tracking.manualUpdatedAt,
+      note: tracking.manualNote,
+      updatedBy: tracking.manualUpdatedBy,
+    });
+    const gpsLocation = this.mapTrackingPoint({
+      latitude: tracking.gpsLatitude,
+      longitude: tracking.gpsLongitude,
+      updatedAt: tracking.gpsUpdatedAt,
+      heading: tracking.gpsHeading,
+      speedKph: tracking.gpsSpeedKph,
+      provider: tracking.gpsProvider,
+    });
+
+    const gpsSignalFresh = Boolean(
+      gpsLocation &&
+        tracking.gpsUpdatedAt &&
+        Date.now() - tracking.gpsUpdatedAt.getTime() <=
+          this.liveTrackingFreshnessMs,
+    );
+
+    let activeSource: 'manual' | 'gps' | 'none' = 'none';
+    let activeLocation: ReturnType<OrdersService['mapTrackingPoint']> = null;
+
+    if (tracking.mode === OrderTrackingMode.DEMO) {
+      activeSource = manualLocation ? 'manual' : 'none';
+      activeLocation = manualLocation;
+    } else if (tracking.mode === OrderTrackingMode.LIVE) {
+      activeSource = gpsLocation ? 'gps' : 'none';
+      activeLocation = gpsLocation;
+    } else if (gpsSignalFresh && gpsLocation) {
+      activeSource = 'gps';
+      activeLocation = gpsLocation;
+    } else if (manualLocation) {
+      activeSource = 'manual';
+      activeLocation = manualLocation;
+    } else if (gpsLocation) {
+      activeSource = 'gps';
+      activeLocation = gpsLocation;
+    }
+
+    return {
+      orderId: tracking.orderId,
+      mode: tracking.mode,
+      gpsSignalFresh,
+      activeSource,
+      activeLocation,
+      manualLocation,
+      gpsLocation,
+      updatedAt: tracking.updatedAt,
+    };
+  }
+
   private isOnlinePaymentMethod(method: PaymentMethod) {
     return [
       PaymentMethod.MOMO,
       PaymentMethod.VNPAY,
       PaymentMethod.ZALOPAY,
     ].includes(method);
+  }
+
+  private async ensurePaymentMethodEnabled(method: PaymentMethod) {
+    if (method === PaymentMethod.PAYPAL) {
+      throw new BadRequestException('Payment method is not supported');
+    }
+
+    const isActive = await this.settingsService.isPaymentMethodActive(method);
+    if (!isActive) {
+      throw new BadRequestException('Payment method is currently disabled');
+    }
   }
 
   private validateReturnStatusTransition(
@@ -411,6 +560,7 @@ export class OrdersService {
 
   async createOrder(userId: string, createOrderDto: CreateOrderDto) {
     await this.ensureUserExists(userId);
+    await this.ensurePaymentMethodEnabled(createOrderDto.paymentMethod);
 
     const cart = await this.cartsRepository.findOneBy({ userId });
     if (!cart) {
@@ -637,11 +787,76 @@ export class OrdersService {
 
   async findOrderDetail(currentUser: IUser, orderId: string) {
     await this.ensureUserExists(currentUser._id);
-    const order = this.hasManageOrdersPermission(currentUser)
-      ? await this.findAnyOrder(orderId)
-      : await this.findOwnedOrder(currentUser._id, orderId);
+    const order = await this.findAccessibleOrder(currentUser, orderId);
 
     return this.buildOrderDetail(order);
+  }
+
+  async findOrderTracking(currentUser: IUser, orderId: string) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAccessibleOrder(currentUser, orderId);
+    const tracking = await this.findOrCreateOrderTracking(order.orderId);
+
+    return this.mapOrderTracking(tracking);
+  }
+
+  async updateOrderTrackingMode(
+    currentUser: IUser,
+    orderId: string,
+    updateOrderTrackingModeDto: UpdateOrderTrackingModeDto,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(orderId);
+    const tracking = await this.findOrCreateOrderTracking(order.orderId);
+
+    tracking.mode = updateOrderTrackingModeDto.mode;
+    const saved = await this.orderTrackingRepository.save(tracking);
+    return this.mapOrderTracking(saved);
+  }
+
+  async updateManualOrderTracking(
+    currentUser: IUser,
+    orderId: string,
+    updateOrderTrackingManualDto: UpdateOrderTrackingManualDto,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(orderId);
+    const tracking = await this.findOrCreateOrderTracking(order.orderId);
+
+    tracking.manualLatitude = updateOrderTrackingManualDto.latitude.toFixed(7);
+    tracking.manualLongitude = updateOrderTrackingManualDto.longitude.toFixed(7);
+    tracking.manualNote = updateOrderTrackingManualDto.note?.trim() || null;
+    tracking.manualUpdatedBy = currentUser._id;
+    tracking.manualUpdatedAt = new Date();
+
+    const saved = await this.orderTrackingRepository.save(tracking);
+    return this.mapOrderTracking(saved);
+  }
+
+  async updateLiveOrderTracking(
+    currentUser: IUser,
+    orderId: string,
+    updateOrderTrackingLiveDto: UpdateOrderTrackingLiveDto,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(orderId);
+    const tracking = await this.findOrCreateOrderTracking(order.orderId);
+
+    tracking.gpsLatitude = updateOrderTrackingLiveDto.latitude.toFixed(7);
+    tracking.gpsLongitude = updateOrderTrackingLiveDto.longitude.toFixed(7);
+    tracking.gpsHeading =
+      updateOrderTrackingLiveDto.heading !== undefined
+        ? updateOrderTrackingLiveDto.heading.toFixed(2)
+        : null;
+    tracking.gpsSpeedKph =
+      updateOrderTrackingLiveDto.speedKph !== undefined
+        ? updateOrderTrackingLiveDto.speedKph.toFixed(2)
+        : null;
+    tracking.gpsProvider = updateOrderTrackingLiveDto.provider?.trim() || null;
+    tracking.gpsUpdatedAt = new Date();
+
+    const saved = await this.orderTrackingRepository.save(tracking);
+    return this.mapOrderTracking(saved);
   }
 
   async cancelOrder(userId: string, orderId: string) {
@@ -930,9 +1145,8 @@ export class OrdersService {
     amount: number,
     redirectUrl: string,
   ): Promise<string | null> {
-    const partnerCode = process.env.MOMO_PARTNER_CODE;
-    const accessKey = process.env.MOMO_ACCESS_KEY;
-    const secretKey = process.env.MOMO_SECRET_KEY;
+    const { partnerCode, accessKey, secretKey } =
+      await this.settingsService.getMomoConfig();
 
     if (!partnerCode || !accessKey || !secretKey) return null;
 
@@ -997,7 +1211,7 @@ export class OrdersService {
   }
 
   async handleMomoIpn(body: Record<string, unknown>) {
-    const secretKey = process.env.MOMO_SECRET_KEY;
+    const { secretKey } = await this.settingsService.getMomoConfig();
     if (!secretKey) return { message: 'ignored' };
 
     console.log('[MoMo IPN] Received:', JSON.stringify(body));

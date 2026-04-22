@@ -8,6 +8,7 @@ import {
 
 export enum CampaignStatus {
   DRAFT = 'draft',
+  SCHEDULED = 'scheduled',
   SENT = 'sent',
 }
 
@@ -28,8 +29,14 @@ export class NewsletterCampaignEntity {
   @Column({ name: 'sent_at', nullable: true, type: 'datetime' })
   sentAt: Date | null;
 
+  @Column({ name: 'scheduled_at', nullable: true, type: 'datetime' })
+  scheduledAt: Date | null;
+
   @Column({ name: 'recipient_count', type: 'int', default: 0 })
   recipientCount: number;
+
+  @Column({ name: 'total_recipient_count', type: 'int', default: 0 })
+  totalRecipientCount: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

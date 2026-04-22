@@ -271,6 +271,141 @@ export class NewsService {
     return { likeCount: updated?.likeCount ?? 0 };
   }
 
+  async findAdminComments(params: {
+    page?: number;
+    limit?: number;
+    status?: string;
+    newsId?: string;
+    search?: string;
+  }) {
+    const page = params.page ?? 1;
+    const limit = Math.min(params.limit ?? 12, 100);
+    const skip = (page - 1) * limit;
+
+    const qb = this.newsCommentRepository
+      .createQueryBuilder('comment')
+      .leftJoin(UserEntity, 'user', 'user.user_id = comment.user_id')
+      .leftJoin(NewsEntity, 'article', 'article.news_id = comment.news_id')
+      .orderBy('comment.createdAt', 'DESC')
+      .skip(skip)
+      .take(limit);
+
+    if (params.status && params.status !== 'all') {
+      qb.andWhere('comment.status = :status', { status: params.status });
+    }
+
+    if (params.newsId) {
+      qb.andWhere('comment.news_id = :newsId', { newsId: params.newsId });
+    }
+
+    if (params.search?.trim()) {
+      qb.andWhere(
+        '(comment.content LIKE :search OR user.username LIKE :search OR article.title LIKE :search)',
+        { search: `%${params.search.trim()}%` },
+      );
+    }
+
+    const [comments, total] = await qb.getManyAndCount();
+
+    const userIds = [...new Set(comments.map((comment) => comment.userId))];
+    const newsIds = [...new Set(comments.map((comment) => comment.newsId))];
+
+    const [users, articles] = await Promise.all([
+      userIds.length ? this.usersRepository.createQueryBuilder('u').select(['u.userId', 'u.username']).whereInIds(userIds).getMany() : [],
+      newsIds.length ? this.newsRepository.createQueryBuilder('n').select(['n.newsId', 'n.title']).where('n.newsId IN (:...ids)', { ids: newsIds }).getMany() : [],
+    ]);
+
+    const userMap = new Map<string, string>(
+      users.map((user) => [user.userId, user.username] as const),
+    );
+    const articleMap = new Map<string, string>(
+      articles.map((article) => [article.newsId, article.title] as const),
+    );
+
+    return {
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+      items: comments.map((c) => ({
+        id: c.commentId,
+        content: c.content,
+        status: c.status,
+        likeCount: c.likeCount,
+        dislikeCount: c.dislikeCount,
+        createdAt: c.createdAt,
+        author: { username: userMap.get(c.userId) ?? 'Độc giả' },
+        article: { newsId: c.newsId, title: articleMap.get(c.newsId) ?? '' },
+      })),
+    };
+  }
+
+  async getAdminCommentStats() {
+    const [totalVisible, totalHidden, totalDeleted, reactionsRow] =
+      await Promise.all([
+        this.newsCommentRepository.count({
+          where: { status: NewsCommentStatus.VISIBLE },
+        }),
+        this.newsCommentRepository.count({
+          where: { status: NewsCommentStatus.HIDDEN },
+        }),
+        this.newsCommentRepository.count({
+          where: { status: NewsCommentStatus.DELETED },
+        }),
+        this.newsCommentRepository
+          .createQueryBuilder('comment')
+          .select(
+            'COALESCE(SUM(comment.like_count + comment.dislike_count), 0)',
+            'totalReactions',
+          )
+          .getRawOne<{ totalReactions?: string | number }>(),
+      ]);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const commentsToday = await this.newsCommentRepository
+      .createQueryBuilder('comment')
+      .where('comment.created_at >= :today', { today })
+      .andWhere('comment.created_at < :tomorrow', { tomorrow })
+      .getCount();
+
+    return {
+      total: totalVisible + totalHidden + totalDeleted,
+      totalVisible,
+      totalHidden,
+      totalDeleted,
+      totalReactions: Number(reactionsRow?.totalReactions ?? 0),
+      commentsToday,
+    };
+  }
+
+  async hideComment(commentId: string) {
+    const comment = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!comment) throw new NotFoundException('Bình luận không tìm thấy');
+    if (comment.status === NewsCommentStatus.DELETED) {
+      throw new BadRequestException('Khong the thay doi comment da xoa');
+    }
+    comment.status =
+      comment.status === NewsCommentStatus.VISIBLE
+        ? NewsCommentStatus.HIDDEN
+        : NewsCommentStatus.VISIBLE;
+    await this.newsCommentRepository.save(comment);
+    return { id: comment.commentId, status: comment.status };
+  }
+
+  async deleteAdminComment(commentId: string) {
+    const comment = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!comment) throw new NotFoundException('Bình luận không tìm thấy');
+    comment.status = NewsCommentStatus.DELETED;
+    await this.newsCommentRepository.save(comment);
+    return { id: comment.commentId, status: comment.status };
+  }
+
   async remove(newsId: string) {
     const article = await this.findOne(newsId);
     await this.newsRepository.remove(article);
