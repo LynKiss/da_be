@@ -9,6 +9,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { NotificationChannel } from '../notifications/entities/notification.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CategoryEntity } from '../categories/entities/category.entity';
 import { DiscountCategoryEntity } from '../discounts/entities/discount-category.entity';
 import {
@@ -87,6 +89,7 @@ export class ProductsService {
     private readonly discountCategoriesRepository: Repository<DiscountCategoryEntity>,
     @InjectRepository(DiscountProductEntity)
     private readonly discountProductsRepository: Repository<DiscountProductEntity>,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // ─── PRODUCTS ────────────────────────────────────────────────────────────────
@@ -123,6 +126,16 @@ export class ProductsService {
       queryBuilder.andWhere('product.origin_id = :originId', {
         originId: query.originId,
       });
+    }
+
+    if (query.tagId) {
+      queryBuilder
+        .innerJoin(
+          'product_tags',
+          'pt',
+          'pt.product_id = product.product_id AND pt.tag_id = :tagId',
+          { tagId: query.tagId },
+        );
     }
 
     if (query.priceMin) {
@@ -231,7 +244,14 @@ export class ProductsService {
       boxBarcode: createProductDto.boxBarcode ?? null,
     });
 
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    void this.notificationsService.createNotification({
+      channel: NotificationChannel.SYSTEM,
+      title: 'Sản phẩm mới được thêm',
+      message: `Sản phẩm "${saved.productName}" đã được thêm vào hệ thống.`,
+      metadata: { productId: saved.productId, type: 'product_created' },
+    });
+    return saved;
   }
 
   async update(productId: string, updateProductDto: UpdateProductDto) {
@@ -309,7 +329,14 @@ export class ProductsService {
         ? (updateProductDto.boxBarcode ?? null)
         : product.boxBarcode;
 
-    return this.productsRepository.save(product);
+    const updated = await this.productsRepository.save(product);
+    void this.notificationsService.createNotification({
+      channel: NotificationChannel.SYSTEM,
+      title: 'Sản phẩm được cập nhật',
+      message: `Sản phẩm "${updated.productName}" đã được cập nhật.`,
+      metadata: { productId: updated.productId, type: 'product_updated' },
+    });
+    return updated;
   }
 
   async remove(productId: string) {
@@ -317,7 +344,14 @@ export class ProductsService {
     if (!product) {
       throw new NotFoundException('Product not found');
     }
+    const name = product.productName;
     await this.productsRepository.remove(product);
+    void this.notificationsService.createNotification({
+      channel: NotificationChannel.SYSTEM,
+      title: 'Sản phẩm bị xóa',
+      message: `Sản phẩm "${name}" đã bị xóa khỏi hệ thống.`,
+      metadata: { type: 'product_deleted' },
+    });
     return { success: true };
   }
 

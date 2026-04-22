@@ -55,6 +55,9 @@ export class NewsEntity {
   @Column({ name: 'views', type: 'int', default: 0 })
   views: number;
 
+  @Column({ name: 'like_count', type: 'int', default: 0 })
+  likeCount: number;
+
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;
 

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { CategoryEntity } from '../categories/entities/category.entity';
 import { DiscountCategoryEntity } from '../discounts/entities/discount-category.entity';
 import { DiscountProductEntity } from '../discounts/entities/discount-product.entity';
@@ -27,6 +28,7 @@ import { WishlistController } from './wishlist.controller';
 
 @Module({
   imports: [
+    NotificationsModule,
     TypeOrmModule.forFeature([
       ProductEntity,
       CategoryEntity,

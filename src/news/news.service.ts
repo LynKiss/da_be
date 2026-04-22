@@ -48,6 +48,33 @@ export class NewsService {
     return this.newsRepository.save(article);
   }
 
+  async findPublishedList(params: { page?: number; limit?: number; search?: string }) {
+    const page = params.page ?? 1;
+    const limit = Math.min(params.limit ?? 9, 50);
+    const skip = (page - 1) * limit;
+
+    const qb = this.newsRepository
+      .createQueryBuilder('news')
+      .where('news.is_published = 1');
+
+    if (params.search?.trim()) {
+      qb.andWhere('(news.title LIKE :s OR news.sub_title LIKE :s)', {
+        s: `%${params.search.trim()}%`,
+      });
+    }
+
+    qb.orderBy('news.created_at', 'DESC').skip(skip).take(limit);
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  async findBySlug(slug: string) {
+    const article = await this.newsRepository.findOneBy({ slug, isPublished: true });
+    if (!article) throw new NotFoundException('Bài viết không tìm thấy');
+    return article;
+  }
+
   async findAll(query: QueryNewsDto) {
     const { search, status = NewsStatusFilter.ALL, page = 1, limit = 20 } = query;
     const skip = (page - 1) * limit;
@@ -137,6 +164,28 @@ export class NewsService {
     article.isDraft = true;
     article.isPublished = false;
     return this.newsRepository.save(article);
+  }
+
+  async incrementView(newsId: string): Promise<{ views: number }> {
+    await this.newsRepository.increment({ newsId }, 'views', 1);
+    const article = await this.newsRepository.findOneBy({ newsId });
+    return { views: article?.views ?? 0 };
+  }
+
+  async likeArticle(newsId: string): Promise<{ likeCount: number }> {
+    await this.newsRepository.increment({ newsId }, 'likeCount', 1);
+    const article = await this.newsRepository.findOneBy({ newsId });
+    return { likeCount: article?.likeCount ?? 0 };
+  }
+
+  async unlikeArticle(newsId: string): Promise<{ likeCount: number }> {
+    const article = await this.newsRepository.findOneBy({ newsId });
+    if (!article) return { likeCount: 0 };
+    if (article.likeCount > 0) {
+      await this.newsRepository.decrement({ newsId }, 'likeCount', 1);
+    }
+    const updated = await this.newsRepository.findOneBy({ newsId });
+    return { likeCount: updated?.likeCount ?? 0 };
   }
 
   async remove(newsId: string) {

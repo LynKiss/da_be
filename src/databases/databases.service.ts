@@ -9,9 +9,20 @@ import { UserEntity, UserRole } from '../users/entities/user.entity';
 const CORE_PERMISSIONS = [
   { permissionKey: 'manage_products', permissionName: 'Quản lý sản phẩm' },
   { permissionKey: 'manage_orders', permissionName: 'Quản lý đơn hàng' },
+  { permissionKey: 'view_orders', permissionName: 'Xem đơn hàng' },
   { permissionKey: 'manage_permissions', permissionName: 'Quản lý phân quyền' },
   { permissionKey: 'manage_news', permissionName: 'Quản lý bài viết' },
+  { permissionKey: 'manage_inventory', permissionName: 'Quản lý kho hàng' },
+  { permissionKey: 'manage_users', permissionName: 'Quản lý người dùng' },
+  { permissionKey: 'manage_discounts', permissionName: 'Quản lý khuyến mãi' },
+  { permissionKey: 'manage_reports', permissionName: 'Quản lý báo cáo' },
   { permissionKey: 'view_reports', permissionName: 'Xem báo cáo' },
+  { permissionKey: 'manage_settings', permissionName: 'Quản lý cài đặt hệ thống' },
+  { permissionKey: 'manage_delivery', permissionName: 'Quản lý vận chuyển' },
+  { permissionKey: 'manage_interface', permissionName: 'Quản lý giao diện' },
+  { permissionKey: 'manage_reviews', permissionName: 'Quản lý đánh giá sản phẩm' },
+  { permissionKey: 'manage_categories', permissionName: 'Quản lý danh mục' },
+  { permissionKey: 'manage_customers', permissionName: 'Quản lý khách hàng' },
 ];
 
 @Injectable()

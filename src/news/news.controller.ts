@@ -11,7 +11,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { RequirePermissions, ResponseMessage, User } from '../decorator/customize';
+import { Public, RequirePermissions, ResponseMessage, User } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { QueryNewsDto } from './dto/query-news.dto';
@@ -27,6 +27,28 @@ type UploadedImageFile = {
 @Controller('news')
 export class NewsController {
   constructor(private readonly newsService: NewsService) {}
+
+  @Get('public/list')
+  @Public()
+  @ResponseMessage('Get published news list')
+  getPublishedNews(
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.newsService.findPublishedList({
+      page: page ? parseInt(page, 10) : undefined,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      search,
+    });
+  }
+
+  @Get('public/by-slug/:slug')
+  @Public()
+  @ResponseMessage('Get news by slug')
+  getNewsBySlug(@Param('slug') slug: string) {
+    return this.newsService.findBySlug(slug);
+  }
 
   @Get()
   @RequirePermissions('manage_news')
@@ -76,6 +98,27 @@ export class NewsController {
   @UseInterceptors(FileInterceptor('file'))
   uploadCoverImage(@Param('id') id: string, @UploadedFile() file: UploadedImageFile) {
     return this.newsService.uploadCoverImage(id, file);
+  }
+
+  @Patch('public/:id/view')
+  @Public()
+  @ResponseMessage('Increment view count')
+  incrementView(@Param('id') id: string) {
+    return this.newsService.incrementView(id);
+  }
+
+  @Post('public/:id/like')
+  @Public()
+  @ResponseMessage('Like article')
+  likeArticle(@Param('id') id: string) {
+    return this.newsService.likeArticle(id);
+  }
+
+  @Delete('public/:id/like')
+  @Public()
+  @ResponseMessage('Unlike article')
+  unlikeArticle(@Param('id') id: string) {
+    return this.newsService.unlikeArticle(id);
   }
 
   @Delete(':id')

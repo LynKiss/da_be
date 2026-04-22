@@ -43,6 +43,63 @@ export const INIT_PERMISSIONS = [
     method: 'GET',
     module: 'COMPANIES',
   },
+  // --- Permissions cho he thong quan ly noi bo ---
+  {
+    name: 'Quản lý kho hàng',
+    apiPath: '/api/v1/inventory',
+    method: 'GET',
+    module: 'INVENTORY',
+    key: 'manage_inventory',
+  },
+  {
+    name: 'Xem báo cáo',
+    apiPath: '/api/v1/reports',
+    method: 'GET',
+    module: 'REPORTS',
+    key: 'manage_reports',
+  },
+  {
+    name: 'Cài đặt hệ thống',
+    apiPath: '/api/v1/settings',
+    method: 'GET',
+    module: 'SETTINGS',
+    key: 'manage_settings',
+  },
+  {
+    name: 'Quản lý giao diện',
+    apiPath: '/api/v1/interface',
+    method: 'GET',
+    module: 'INTERFACE',
+    key: 'manage_interface',
+  },
+  {
+    name: 'Quản lý bài viết',
+    apiPath: '/api/v1/news',
+    method: 'GET',
+    module: 'NEWS',
+    key: 'manage_news',
+  },
+  {
+    name: 'Quản lý khuyến mãi',
+    apiPath: '/api/v1/discounts',
+    method: 'GET',
+    module: 'DISCOUNTS',
+    key: 'manage_discounts',
+  },
+  {
+    name: 'Xem đơn hàng',
+    apiPath: '/api/v1/orders',
+    method: 'GET',
+    module: 'ORDERS',
+    key: 'view_orders',
+  },
+  {
+    name: 'Quản lý vận chuyển',
+    apiPath: '/api/v1/delivery-methods',
+    method: 'GET',
+    module: 'DELIVERY',
+    key: 'manage_delivery',
+  },
 ];
 
 // Danh sach user mau se duoc tao neu chua ton tai trong database.

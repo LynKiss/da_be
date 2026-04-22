@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import {
   BadRequestException,
   Injectable,
@@ -894,15 +895,134 @@ export class OrdersService {
 
     await this.paymentTransactionsRepository.save(paymentTransaction);
 
+    let paymentUrl = `${
+      initiatePaymentDto.returnUrl ?? 'https://payment-gateway.local'
+    }?provider=${order.paymentMethod}&transactionRef=${transactionRef}&orderId=${orderId}`;
+
+    if (order.paymentMethod === PaymentMethod.MOMO) {
+      const momoUrl = await this.buildMomoPaymentUrl(
+        orderId,
+        transactionRef,
+        Number(order.totalPayment),
+        initiatePaymentDto.returnUrl ?? `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/client/payment`,
+      ).catch(() => null);
+      if (momoUrl) paymentUrl = momoUrl;
+    }
+
     return {
       orderId,
       provider: order.paymentMethod,
       transactionRef,
-      paymentUrl: `${
-        initiatePaymentDto.returnUrl ?? 'https://payment-gateway.local'
-      }?provider=${order.paymentMethod}&transactionRef=${transactionRef}&orderId=${orderId}`,
+      paymentUrl,
       expiresAt: new Date(Date.now() + 15 * 60 * 1000),
     };
+  }
+
+  private async buildMomoPaymentUrl(
+    orderId: string,
+    requestId: string,
+    amount: number,
+    redirectUrl: string,
+  ): Promise<string | null> {
+    const partnerCode = process.env.MOMO_PARTNER_CODE;
+    const accessKey = process.env.MOMO_ACCESS_KEY;
+    const secretKey = process.env.MOMO_SECRET_KEY;
+
+    if (!partnerCode || !accessKey || !secretKey) return null;
+
+    const ipnUrl = `${process.env.BACKEND_URL ?? 'http://localhost:8000'}/api/v1/payments/momo/ipn`;
+    const orderInfo = `Thanh toan don hang ${orderId}`;
+    const requestType = 'payWithMethod';
+    const extraData = '';
+    const lang = 'vi';
+
+    const rawSignature = [
+      `accessKey=${accessKey}`,
+      `amount=${amount}`,
+      `extraData=${extraData}`,
+      `ipnUrl=${ipnUrl}`,
+      `orderId=${orderId}`,
+      `orderInfo=${orderInfo}`,
+      `partnerCode=${partnerCode}`,
+      `redirectUrl=${redirectUrl}`,
+      `requestId=${requestId}`,
+      `requestType=${requestType}`,
+    ].join('&');
+
+    const signature = createHmac('sha256', secretKey).update(rawSignature).digest('hex');
+
+    const body = {
+      partnerCode,
+      accessKey,
+      requestId,
+      amount,
+      orderId,
+      orderInfo,
+      redirectUrl,
+      ipnUrl,
+      requestType,
+      extraData,
+      lang,
+      signature,
+    };
+
+    const response = await fetch('https://payment.momo.vn/v2/gateway/api/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const data = (await response.json()) as { resultCode?: number; payUrl?: string; message?: string };
+    if (data.resultCode === 0 && data.payUrl) return data.payUrl;
+    return null;
+  }
+
+  async handleMomoIpn(body: Record<string, unknown>) {
+    const secretKey = process.env.MOMO_SECRET_KEY;
+    if (!secretKey) return { message: 'ignored' };
+
+    const { orderId, requestId, amount, resultCode, transId, message: gwMessage } = body as {
+      orderId?: string;
+      requestId?: string;
+      amount?: number;
+      resultCode?: number;
+      transId?: string;
+      message?: string;
+    };
+
+    if (!orderId) return { message: 'missing orderId' };
+
+    const order = await this.ordersRepository.findOneBy({ orderId }).catch(() => null);
+    if (!order) return { message: 'order not found' };
+
+    const success = resultCode === 0;
+    const paymentStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
+
+    const transaction = this.paymentTransactionsRepository.create({
+      orderId,
+      userId: order.userId,
+      provider: PaymentMethod.MOMO,
+      transactionRef: (requestId as string) ?? `momo-${Date.now()}`,
+      transactionStatus: success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED,
+      paymentStatus,
+      amount: String(amount ?? order.totalPayment),
+      gatewayCode: String(resultCode ?? ''),
+      gatewayMessage: (gwMessage as string) ?? null,
+      rawPayload: body,
+    });
+    await this.paymentTransactionsRepository.save(transaction);
+
+    order.paymentStatus = paymentStatus;
+    await this.ordersRepository.save(order);
+
+    await this.notificationsService.sendPaymentNotification(
+      order.userId,
+      orderId,
+      paymentStatus,
+      PaymentMethod.MOMO,
+    );
+
+    return { message: 'ok', transId };
   }
 
   async handlePaymentCallback(
@@ -979,6 +1099,50 @@ export class OrdersService {
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
     }));
+  }
+
+  async findAllPaymentTransactions(params: {
+    page: number;
+    limit: number;
+    provider?: string;
+    status?: string;
+  }) {
+    const { page, limit, provider, status } = params;
+    const skip = (page - 1) * limit;
+
+    const query = this.paymentTransactionsRepository.createQueryBuilder('pt');
+    if (provider) query.andWhere('pt.provider = :provider', { provider });
+    if (status) query.andWhere('pt.transactionStatus = :status', { status });
+    query.orderBy('pt.createdAt', 'DESC').skip(skip).take(limit);
+
+    const [items, total] = await query.getManyAndCount();
+
+    // Fetch user info in bulk
+    const userIds = [...new Set(items.map((i) => i.userId))];
+    const users = userIds.length > 0
+      ? await this.usersRepository.createQueryBuilder('u').select(['u.userId', 'u.username', 'u.email']).whereInIds(userIds).getMany()
+      : [];
+    const userMap = new Map(users.map((u) => [u.userId, u]));
+
+    return {
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      items: items.map((i) => ({
+        id: i.paymentTransactionId,
+        orderId: i.orderId,
+        provider: i.provider,
+        transactionRef: i.transactionRef,
+        transactionStatus: i.transactionStatus,
+        paymentStatus: i.paymentStatus,
+        amount: i.amount,
+        gatewayCode: i.gatewayCode,
+        gatewayMessage: i.gatewayMessage,
+        createdAt: i.createdAt,
+        user: userMap.get(i.userId) ? {
+          username: userMap.get(i.userId)!.username,
+          email: userMap.get(i.userId)!.email,
+        } : null,
+      })),
+    };
   }
 
   async createReturn(userId: string, createReturnDto: CreateReturnDto) {

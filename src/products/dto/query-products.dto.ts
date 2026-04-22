@@ -42,6 +42,10 @@ export class QueryProductsDto {
   originId?: string;
 
   @IsOptional()
+  @IsString()
+  tagId?: string;
+
+  @IsOptional()
   @IsNumberString()
   priceMin?: string;
 
