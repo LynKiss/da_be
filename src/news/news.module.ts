@@ -5,6 +5,7 @@ import { NewsImageEntity } from './entities/news-image.entity';
 import { NewsTagOfNewsEntity } from './entities/news-tag-of-news.entity';
 import { NewsTagEntity } from './entities/news-tag.entity';
 import { NewsEntity } from './entities/news.entity';
+import { UserEntity } from '../users/entities/user.entity';
 import { NewsController } from './news.controller';
 import { NewsService } from './news.service';
 
@@ -16,6 +17,7 @@ import { NewsService } from './news.service';
       NewsImageEntity,
       NewsTagEntity,
       NewsTagOfNewsEntity,
+      UserEntity,
     ]),
   ],
   controllers: [NewsController],

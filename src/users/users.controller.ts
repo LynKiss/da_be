@@ -174,8 +174,17 @@ export class UsersController {
 
   @Get('me/orders')
   @ResponseMessage('Get my orders')
-  getMyOrders(@User() currentUser: IUser) {
-    return this.usersService.findMyOrders(currentUser._id);
+  getMyOrders(
+    @User() currentUser: IUser,
+    @Query('page') page = '1',
+    @Query('limit') limit = '10',
+    @Query('status') status?: string,
+  ) {
+    return this.usersService.findMyOrders(currentUser._id, {
+      page: Math.max(1, parseInt(page, 10) || 1),
+      limit: Math.min(50, Math.max(1, parseInt(limit, 10) || 10)),
+      status,
+    });
   }
 
   @Get('me/orders/:id')

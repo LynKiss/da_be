@@ -857,15 +857,32 @@ export class ProductsService {
           productIds.map((productId) => ({ productId })),
         )
       : [];
-    const productsById = new Map(
-      products.map((product) => [product.productId, product]),
-    );
 
-    return items.map((item) => ({
-      productId: item.productId,
-      createdAt: item.createdAt,
-      product: productsById.get(item.productId) ?? null,
-    }));
+    const categoryIds = [...new Set(products.map((p) => p.categoryId).filter(Boolean))];
+    const categories = categoryIds.length
+      ? await this.categoriesRepository.findBy(categoryIds.map((id) => ({ categoryId: id })))
+      : [];
+    const categoriesById = new Map(categories.map((c) => [c.categoryId, c]));
+
+    const enrichedEntries = await Promise.all(
+      products.map(async (p) => [p.productId, await this.enrichProductWithDiscount(p)] as const),
+    );
+    const enrichedById = new Map(enrichedEntries);
+
+    return items.map((item) => {
+      const enriched = enrichedById.get(item.productId) ?? null;
+      const cat = enriched ? (categoriesById.get(enriched.categoryId) ?? null) : null;
+      return {
+        productId: item.productId,
+        createdAt: item.createdAt,
+        product: enriched
+          ? {
+              ...enriched,
+              category: cat ? { categoryId: cat.categoryId, categoryName: cat.categoryName } : null,
+            }
+          : null,
+      };
+    });
   }
 
   async addWishlistItem(userId: string, productId: string) {

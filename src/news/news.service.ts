@@ -10,7 +10,9 @@ import { Repository } from 'typeorm';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { NewsStatusFilter, QueryNewsDto } from './dto/query-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
+import { NewsCommentEntity, NewsCommentStatus } from './entities/news-comment.entity';
 import { NewsEntity } from './entities/news.entity';
+import { UserEntity } from '../users/entities/user.entity';
 
 type UploadedImageFile = {
   buffer: Buffer;
@@ -23,7 +25,29 @@ export class NewsService {
   constructor(
     @InjectRepository(NewsEntity)
     private readonly newsRepository: Repository<NewsEntity>,
+    @InjectRepository(NewsCommentEntity)
+    private readonly newsCommentRepository: Repository<NewsCommentEntity>,
+    @InjectRepository(UserEntity)
+    private readonly usersRepository: Repository<UserEntity>,
   ) {}
+
+  private mapArticle(article: NewsEntity, author?: { username?: string } | null) {
+    return {
+      _id: article.newsId,
+      newsId: article.newsId,
+      title: article.title,
+      subTitle: article.subTitle,
+      slug: article.slug,
+      titleImageUrl: article.titleImageUrl,
+      content: article.content,
+      isPublished: article.isPublished,
+      views: article.views,
+      likeCount: article.likeCount,
+      createdAt: article.createdAt,
+      updatedAt: article.updatedAt,
+      author: author ?? undefined,
+    };
+  }
 
   async create(userId: string, createNewsDto: CreateNewsDto) {
     const slug = this.normalizeSlug(createNewsDto.slug ?? createNewsDto.title);
@@ -65,14 +89,73 @@ export class NewsService {
 
     qb.orderBy('news.created_at', 'DESC').skip(skip).take(limit);
 
-    const [items, total] = await qb.getManyAndCount();
+    const [rows, total] = await qb.getManyAndCount();
+    const items = rows.map((a) => this.mapArticle(a));
     return { items, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
   async findBySlug(slug: string) {
     const article = await this.newsRepository.findOneBy({ slug, isPublished: true });
     if (!article) throw new NotFoundException('Bài viết không tìm thấy');
-    return article;
+    const author = await this.usersRepository.findOneBy({ userId: article.userId }).catch(() => null);
+    return this.mapArticle(article, author ? { username: author.username } : null);
+  }
+
+  async getNewsComments(newsId: string) {
+    const comments = await this.newsCommentRepository.find({
+      where: { newsId, status: NewsCommentStatus.VISIBLE },
+      order: { createdAt: 'DESC' },
+    });
+    const userIds = [...new Set(comments.map((c) => c.userId))];
+    const users = userIds.length > 0
+      ? await this.usersRepository.createQueryBuilder('u').select(['u.userId', 'u.username']).whereInIds(userIds).getMany()
+      : [];
+    const userMap = new Map(users.map((u) => [u.userId, u.username]));
+    return comments.map((c) => ({
+      id: c.commentId,
+      content: c.content,
+      likeCount: c.likeCount,
+      dislikeCount: c.dislikeCount,
+      createdAt: c.createdAt,
+      author: { username: userMap.get(c.userId) ?? 'Độc giả' },
+    }));
+  }
+
+  async addNewsComment(newsId: string, userId: string, content: string) {
+    const article = await this.newsRepository.findOneBy({ newsId, isPublished: true });
+    if (!article) throw new NotFoundException('Bài viết không tìm thấy');
+    const comment = this.newsCommentRepository.create({ newsId, userId, content, likeCount: 0, dislikeCount: 0, status: NewsCommentStatus.VISIBLE });
+    const saved = await this.newsCommentRepository.save(comment);
+    const user = await this.usersRepository.findOneBy({ userId }).catch(() => null);
+    return { id: saved.commentId, content: saved.content, likeCount: 0, dislikeCount: 0, createdAt: saved.createdAt, author: { username: user?.username ?? 'Độc giả' } };
+  }
+
+  async likeNewsComment(commentId: string) {
+    const c = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!c) throw new NotFoundException('Bình luận không tìm thấy');
+    await this.newsCommentRepository.increment({ commentId }, 'likeCount', 1);
+    return { likeCount: c.likeCount + 1, dislikeCount: c.dislikeCount };
+  }
+
+  async unlikeNewsComment(commentId: string) {
+    const c = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!c) throw new NotFoundException('Bình luận không tìm thấy');
+    if (c.likeCount > 0) await this.newsCommentRepository.decrement({ commentId }, 'likeCount', 1);
+    return { likeCount: Math.max(0, c.likeCount - 1), dislikeCount: c.dislikeCount };
+  }
+
+  async dislikeNewsComment(commentId: string) {
+    const c = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!c) throw new NotFoundException('Bình luận không tìm thấy');
+    await this.newsCommentRepository.increment({ commentId }, 'dislikeCount', 1);
+    return { likeCount: c.likeCount, dislikeCount: c.dislikeCount + 1 };
+  }
+
+  async undislikeNewsComment(commentId: string) {
+    const c = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!c) throw new NotFoundException('Bình luận không tìm thấy');
+    if (c.dislikeCount > 0) await this.newsCommentRepository.decrement({ commentId }, 'dislikeCount', 1);
+    return { likeCount: c.likeCount, dislikeCount: Math.max(0, c.dislikeCount - 1) };
   }
 
   async findAll(query: QueryNewsDto) {

@@ -121,6 +121,51 @@ export class NewsController {
     return this.newsService.unlikeArticle(id);
   }
 
+  @Get('public/:id/comments')
+  @Public()
+  @ResponseMessage('Get news comments')
+  getComments(@Param('id') id: string) {
+    return this.newsService.getNewsComments(id);
+  }
+
+  @Post('public/:id/comments')
+  @ResponseMessage('Add news comment')
+  addComment(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @Body() body: { content: string },
+  ) {
+    return this.newsService.addNewsComment(id, currentUser._id, body.content);
+  }
+
+  @Public()
+  @Post('public/comments/:commentId/like')
+  @ResponseMessage('Like news comment')
+  likeComment(@Param('commentId') commentId: string) {
+    return this.newsService.likeNewsComment(commentId);
+  }
+
+  @Public()
+  @Delete('public/comments/:commentId/like')
+  @ResponseMessage('Unlike news comment')
+  unlikeComment(@Param('commentId') commentId: string) {
+    return this.newsService.unlikeNewsComment(commentId);
+  }
+
+  @Public()
+  @Post('public/comments/:commentId/dislike')
+  @ResponseMessage('Dislike news comment')
+  dislikeComment(@Param('commentId') commentId: string) {
+    return this.newsService.dislikeNewsComment(commentId);
+  }
+
+  @Public()
+  @Delete('public/comments/:commentId/dislike')
+  @ResponseMessage('Undislike news comment')
+  undislikeComment(@Param('commentId') commentId: string) {
+    return this.newsService.undislikeNewsComment(commentId);
+  }
+
   @Delete(':id')
   @RequirePermissions('manage_news')
   @ResponseMessage('Delete news article')

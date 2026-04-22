@@ -52,6 +52,14 @@ export class PaymentsController {
     return this.ordersService.handleMomoIpn(body);
   }
 
+  @Public()
+  @Post('momo/verify')
+  @ResponseMessage('MoMo payment verified')
+  verifyMomoRedirect(@Body() body: Record<string, unknown>) {
+    // Reuse IPN handler — same payload shape from MoMo redirect params
+    return this.ordersService.handleMomoIpn(body);
+  }
+
   @RequirePermissions('manage_orders')
   @Get('admin/transactions')
   @ResponseMessage('Get all payment transactions')

@@ -561,15 +561,29 @@ export class UsersService {
     return this.toShippingAddressResponse(savedAddress);
   }
 
-  async findMyOrders(userId: string) {
+  async findMyOrders(
+    userId: string,
+    opts: { page: number; limit: number; status?: string },
+  ) {
     await this.ensureUserExists(userId);
 
-    const orders = await this.ordersRepository.find({
-      where: { userId },
+    const where: Record<string, unknown> = { userId };
+    if (opts.status && opts.status !== 'all') where.status = opts.status;
+
+    const [orders, total] = await this.ordersRepository.findAndCount({
+      where,
       order: { createdAt: 'DESC' },
+      skip: (opts.page - 1) * opts.limit,
+      take: opts.limit,
     });
 
-    return orders.map((order) => this.toOrderSummaryResponse(order));
+    return {
+      items: orders.map((order) => this.toOrderSummaryResponse(order)),
+      total,
+      page: opts.page,
+      limit: opts.limit,
+      totalPages: Math.ceil(total / opts.limit),
+    };
   }
 
   async findMyOrderDetail(userId: string, orderId: string) {

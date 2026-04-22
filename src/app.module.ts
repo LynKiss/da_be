@@ -17,6 +17,7 @@ import { CommentsModule } from './comments/comments.module';
 import { ContactsModule } from './contacts/contacts.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ReportsModule } from './reports/reports.module';
+import { NewsletterModule } from './newsletter/newsletter.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { ReportsModule } from './reports/reports.module';
     ContactsModule,
     NotificationsModule,
     ReportsModule,
+    NewsletterModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -895,18 +895,24 @@ export class OrdersService {
 
     await this.paymentTransactionsRepository.save(paymentTransaction);
 
-    let paymentUrl = `${
-      initiatePaymentDto.returnUrl ?? 'https://payment-gateway.local'
-    }?provider=${order.paymentMethod}&transactionRef=${transactionRef}&orderId=${orderId}`;
+    // Sentinel value — frontend detects this and shows simulation modal
+    let paymentUrl = `https://payment-gateway.local?provider=${order.paymentMethod}&transactionRef=${transactionRef}&orderId=${orderId}`;
 
     if (order.paymentMethod === PaymentMethod.MOMO) {
       const momoUrl = await this.buildMomoPaymentUrl(
         orderId,
         transactionRef,
-        Number(order.totalPayment),
+        Math.round(Number(order.totalPayment)),
         initiatePaymentDto.returnUrl ?? `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/client/payment`,
-      ).catch(() => null);
-      if (momoUrl) paymentUrl = momoUrl;
+      ).catch((err: unknown) => {
+        console.error('[MoMo] buildMomoPaymentUrl error:', err);
+        return null;
+      });
+      if (momoUrl) {
+        paymentUrl = momoUrl;
+      } else {
+        console.warn('[MoMo] Không lấy được paymentUrl — kiểm tra credentials và BACKEND_URL trong .env');
+      }
     }
 
     return {
@@ -919,7 +925,7 @@ export class OrdersService {
   }
 
   private async buildMomoPaymentUrl(
-    orderId: string,
+    internalOrderId: string,
     requestId: string,
     amount: number,
     redirectUrl: string,
@@ -930,8 +936,10 @@ export class OrdersService {
 
     if (!partnerCode || !accessKey || !secretKey) return null;
 
+    // Use requestId as MoMo orderId to guarantee uniqueness per request
+    const momoOrderId = requestId;
     const ipnUrl = `${process.env.BACKEND_URL ?? 'http://localhost:8000'}/api/v1/payments/momo/ipn`;
-    const orderInfo = `Thanh toan don hang ${orderId}`;
+    const orderInfo = `Thanh toan don hang ${internalOrderId}`;
     const requestType = 'payWithMethod';
     const extraData = '';
     const lang = 'vi';
@@ -941,7 +949,7 @@ export class OrdersService {
       `amount=${amount}`,
       `extraData=${extraData}`,
       `ipnUrl=${ipnUrl}`,
-      `orderId=${orderId}`,
+      `orderId=${momoOrderId}`,
       `orderInfo=${orderInfo}`,
       `partnerCode=${partnerCode}`,
       `redirectUrl=${redirectUrl}`,
@@ -956,7 +964,7 @@ export class OrdersService {
       accessKey,
       requestId,
       amount,
-      orderId,
+      orderId: momoOrderId,
       orderInfo,
       redirectUrl,
       ipnUrl,
@@ -966,14 +974,25 @@ export class OrdersService {
       signature,
     };
 
-    const response = await fetch('https://payment.momo.vn/v2/gateway/api/create', {
+    // Use sandbox endpoint when partner code is the MoMo test value
+    const isSandbox = partnerCode === 'MOMO' || process.env.MOMO_SANDBOX === 'true';
+    const endpoint = isSandbox
+      ? 'https://test-payment.momo.vn/v2/gateway/api/create'
+      : 'https://payment.momo.vn/v2/gateway/api/create';
+
+    console.log(`[MoMo] Calling ${isSandbox ? 'SANDBOX' : 'PRODUCTION'} endpoint`);
+    console.log('[MoMo] orderId:', momoOrderId, '| amount:', amount, '| ipnUrl:', ipnUrl);
+
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
 
     const data = (await response.json()) as { resultCode?: number; payUrl?: string; message?: string };
+    console.log('[MoMo] Response:', JSON.stringify(data));
     if (data.resultCode === 0 && data.payUrl) return data.payUrl;
+    console.error(`[MoMo] resultCode=${data.resultCode ?? 'N/A'} message=${data.message ?? 'N/A'}`);
     return null;
   }
 
@@ -981,7 +1000,9 @@ export class OrdersService {
     const secretKey = process.env.MOMO_SECRET_KEY;
     if (!secretKey) return { message: 'ignored' };
 
-    const { orderId, requestId, amount, resultCode, transId, message: gwMessage } = body as {
+    console.log('[MoMo IPN] Received:', JSON.stringify(body));
+
+    const { orderId: momoOrderId, requestId, amount, resultCode, transId, message: gwMessage } = body as {
       orderId?: string;
       requestId?: string;
       amount?: number;
@@ -990,34 +1011,53 @@ export class OrdersService {
       message?: string;
     };
 
-    if (!orderId) return { message: 'missing orderId' };
+    // momoOrderId = transactionRef (requestId) — look up the real order via transactions table
+    const txRef = momoOrderId ?? requestId;
+    if (!txRef) return { message: 'missing orderId' };
 
-    const order = await this.ordersRepository.findOneBy({ orderId }).catch(() => null);
+    const transaction = await this.paymentTransactionsRepository.findOne({
+      where: { transactionRef: txRef },
+    }).catch(() => null);
+
+    const internalOrderId = transaction?.orderId;
+    if (!internalOrderId) return { message: 'transaction not found' };
+
+    const order = await this.ordersRepository.findOneBy({ orderId: internalOrderId }).catch(() => null);
     if (!order) return { message: 'order not found' };
 
     const success = resultCode === 0;
     const paymentStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
 
-    const transaction = this.paymentTransactionsRepository.create({
-      orderId,
-      userId: order.userId,
-      provider: PaymentMethod.MOMO,
-      transactionRef: (requestId as string) ?? `momo-${Date.now()}`,
-      transactionStatus: success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED,
-      paymentStatus,
-      amount: String(amount ?? order.totalPayment),
-      gatewayCode: String(resultCode ?? ''),
-      gatewayMessage: (gwMessage as string) ?? null,
-      rawPayload: body,
-    });
-    await this.paymentTransactionsRepository.save(transaction);
+    // Update existing transaction status if found, or create a new one
+    if (transaction) {
+      transaction.transactionStatus = success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED;
+      transaction.paymentStatus = paymentStatus;
+      transaction.gatewayCode = String(resultCode ?? '');
+      transaction.gatewayMessage = (gwMessage as string) ?? null;
+      transaction.rawPayload = body;
+      await this.paymentTransactionsRepository.save(transaction);
+    } else {
+      const newTx = this.paymentTransactionsRepository.create({
+        orderId: internalOrderId,
+        userId: order.userId,
+        provider: PaymentMethod.MOMO,
+        transactionRef: txRef,
+        transactionStatus: success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED,
+        paymentStatus,
+        amount: String(amount ?? order.totalPayment),
+        gatewayCode: String(resultCode ?? ''),
+        gatewayMessage: (gwMessage as string) ?? null,
+        rawPayload: body,
+      });
+      await this.paymentTransactionsRepository.save(newTx);
+    }
 
     order.paymentStatus = paymentStatus;
     await this.ordersRepository.save(order);
 
     await this.notificationsService.sendPaymentNotification(
       order.userId,
-      orderId,
+      internalOrderId,
       paymentStatus,
       PaymentMethod.MOMO,
     );
