@@ -20,6 +20,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { ReportsModule } from './reports/reports.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
 import { SettingsModule } from './settings/settings.module';
+import { SupportChatModule } from './support-chat/support-chat.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { SettingsModule } from './settings/settings.module';
     ReportsModule,
     NewsletterModule,
     SettingsModule,
+    SupportChatModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -23,6 +23,7 @@ const CORE_PERMISSIONS = [
   { permissionKey: 'manage_reviews', permissionName: 'Quản lý đánh giá sản phẩm' },
   { permissionKey: 'manage_categories', permissionName: 'Quản lý danh mục' },
   { permissionKey: 'manage_customers', permissionName: 'Quản lý khách hàng' },
+  { permissionKey: 'manage_support', permissionName: 'Quan ly chat ho tro' },
 ];
 
 @Injectable()
