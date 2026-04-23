@@ -8,7 +8,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { NotificationChannel } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CategoryEntity } from '../categories/entities/category.entity';
@@ -202,6 +202,91 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
     return this.enrichProductWithFullDetails(product);
+  }
+
+  async getRecommendationCards(options: {
+    productIds?: string[];
+    keywordHints?: string[];
+    limit?: number;
+  }) {
+    const limit = Math.max(1, Math.min(options.limit ?? 4, 12));
+    const explicitIds = [...new Set((options.productIds ?? []).filter(Boolean))];
+    const normalizedHints = [...new Set((options.keywordHints ?? []).map((item) => item.trim()).filter(Boolean))].slice(0, 8);
+
+    const products: ProductEntity[] = [];
+
+    if (explicitIds.length > 0) {
+      const explicitProducts = await this.productsRepository.find({
+        where: { productId: In(explicitIds), isShow: true },
+      });
+      explicitProducts.sort(
+        (left, right) =>
+          explicitIds.indexOf(left.productId) - explicitIds.indexOf(right.productId),
+      );
+      products.push(...explicitProducts);
+    }
+
+    if (products.length < limit && normalizedHints.length > 0) {
+      const queryBuilder = this.productsRepository.createQueryBuilder('product');
+      queryBuilder.andWhere('product.is_show = :isShow', { isShow: true });
+      queryBuilder.andWhere('product.quantity_available > 0');
+
+      if (explicitIds.length > 0) {
+        queryBuilder.andWhere('product.product_id NOT IN (:...explicitIds)', {
+          explicitIds,
+        });
+      }
+
+      const hintClauses = normalizedHints.map((_, index) =>
+        `(product.product_name LIKE :hint${index} OR product.description LIKE :hint${index})`,
+      );
+      queryBuilder.andWhere(`(${hintClauses.join(' OR ')})`);
+      normalizedHints.forEach((hint, index) => {
+        queryBuilder.setParameter(`hint${index}`, `%${hint}%`);
+      });
+
+      queryBuilder
+        .orderBy('product.is_featured', 'DESC')
+        .addOrderBy('product.quantity_available', 'DESC')
+        .addOrderBy('product.rating_average', 'DESC')
+        .addOrderBy('product.created_at', 'DESC')
+        .take(limit - products.length);
+
+      const fallbackProducts = await queryBuilder.getMany();
+      products.push(...fallbackProducts);
+    }
+
+    const uniqueProducts = products
+      .filter(
+        (product, index, current) =>
+          current.findIndex((item) => item.productId === product.productId) === index,
+      )
+      .slice(0, limit);
+
+    return Promise.all(uniqueProducts.map((product) => this.mapRecommendationCard(product)));
+  }
+
+  async getAdminProductOptions(search?: string, limit = 24) {
+    const safeLimit = Math.max(1, Math.min(limit, 50));
+    const queryBuilder = this.productsRepository.createQueryBuilder('product');
+
+    if (search?.trim()) {
+      queryBuilder.andWhere(
+        '(product.product_name LIKE :search OR product.product_slug LIKE :search OR product.description LIKE :search)',
+        {
+          search: `%${search.trim()}%`,
+        },
+      );
+    }
+
+    queryBuilder
+      .orderBy('product.is_show', 'DESC')
+      .addOrderBy('product.quantity_available', 'DESC')
+      .addOrderBy('product.created_at', 'DESC')
+      .take(safeLimit);
+
+    const products = await queryBuilder.getMany();
+    return Promise.all(products.map((product) => this.mapRecommendationCard(product)));
   }
 
   async create(createProductDto: CreateProductDto) {
@@ -1035,6 +1120,44 @@ export class ProductsService {
             appliesTo: appliedDiscount.appliesTo,
           }
         : null,
+    };
+  }
+
+  private async mapRecommendationCard(product: ProductEntity) {
+    const [origin, category, enriched] = await Promise.all([
+      product.originId
+        ? this.originsRepository.findOneBy({ originId: product.originId })
+        : Promise.resolve(null),
+      this.categoriesRepository.findOneBy({ categoryId: product.categoryId }),
+      this.enrichProductWithDiscount(product),
+    ]);
+
+    return {
+      productId: product.productId,
+      productName: product.productName,
+      productSlug: product.productSlug,
+      quantityAvailable: product.quantityAvailable,
+      unit: product.unit,
+      isShow: product.isShow,
+      basePrice: enriched.basePrice,
+      effectivePrice: enriched.effectivePrice,
+      primaryImageUrl: enriched.primaryImageUrl,
+      appliedDiscount: enriched.appliedDiscount,
+      category: category
+        ? {
+            categoryId: category.categoryId,
+            categoryName: category.categoryName,
+            categorySlug: category.categorySlug,
+          }
+        : null,
+      origin: origin
+        ? {
+            originId: origin.originId,
+            originName: origin.originName,
+          }
+        : null,
+      ratingAverage: product.ratingAverage,
+      ratingCount: product.ratingCount,
     };
   }
 

@@ -24,6 +24,7 @@ const CORE_PERMISSIONS = [
   { permissionKey: 'manage_categories', permissionName: 'Quản lý danh mục' },
   { permissionKey: 'manage_customers', permissionName: 'Quản lý khách hàng' },
   { permissionKey: 'manage_support', permissionName: 'Quan ly chat ho tro' },
+  { permissionKey: 'manage_ai_diagnosis', permissionName: 'Quan ly chan doan benh lua bang AI' },
 ];
 
 @Injectable()

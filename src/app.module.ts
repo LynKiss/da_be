@@ -19,6 +19,7 @@ import { ContactsModule } from './contacts/contacts.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ReportsModule } from './reports/reports.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
+import { RiceDiagnosisModule } from './rice-diagnosis/rice-diagnosis.module';
 import { SettingsModule } from './settings/settings.module';
 import { SupportChatModule } from './support-chat/support-chat.module';
 
@@ -43,6 +44,7 @@ import { SupportChatModule } from './support-chat/support-chat.module';
     NotificationsModule,
     ReportsModule,
     NewsletterModule,
+    RiceDiagnosisModule,
     SettingsModule,
     SupportChatModule,
   ],
