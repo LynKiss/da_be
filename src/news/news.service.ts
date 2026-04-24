@@ -388,7 +388,7 @@ export class NewsService {
     const comment = await this.newsCommentRepository.findOneBy({ commentId });
     if (!comment) throw new NotFoundException('Bình luận không tìm thấy');
     if (comment.status === NewsCommentStatus.DELETED) {
-      throw new BadRequestException('Khong the thay doi comment da xoa');
+      throw new BadRequestException('Không thể thay đổi bình luận đã xóa');
     }
     comment.status =
       comment.status === NewsCommentStatus.VISIBLE
