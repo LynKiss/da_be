@@ -34,14 +34,21 @@ type UploadedImageFile = {
 
 type InferencePrediction = {
   label: string;
+  canonicalLabel: string;
   normalizedKey: string;
   confidence: number;
 };
 
 type InferenceResult = {
   predictedLabel: string;
+  rawPredictedLabel: string;
   predictedKey: string;
   confidence: number;
+  confidenceMargin: number | null;
+  lowConfidence: boolean;
+  ambiguousPrediction: boolean;
+  lowQuality: boolean;
+  qualityIssues: string[];
   topPredictions: InferencePrediction[];
   modelVersion: string | null;
   modelTask: string | null;
@@ -80,6 +87,7 @@ export class RiceDiagnosisService {
     const recommendationLevel = this.resolveRecommendationLevel(
       disease,
       inference.confidence,
+      inference,
     );
 
     const topPredictions = inference.topPredictions.map((prediction) => {
@@ -91,12 +99,13 @@ export class RiceDiagnosisService {
 
       return {
         label: prediction.label,
+        canonicalLabel: prediction.canonicalLabel,
         normalizedKey: prediction.normalizedKey,
         confidence: prediction.confidence,
         diseaseId: matchedDisease?.diseaseId ?? null,
         diseaseName:
           matchedDisease?.diseaseName ??
-          this.humanizePredictionLabel(prediction.label),
+          this.humanizePredictionLabel(prediction.canonicalLabel),
         diseaseSlug: matchedDisease?.diseaseSlug ?? null,
       };
     });
@@ -152,9 +161,16 @@ export class RiceDiagnosisService {
         task: inference.modelTask,
       },
       disease: disease ? this.mapDisease(disease) : null,
+      inferenceFlags: {
+        lowConfidence: inference.lowConfidence,
+        ambiguousPrediction: inference.ambiguousPrediction,
+        lowQuality: inference.lowQuality,
+        confidenceMargin: inference.confidenceMargin,
+        qualityIssues: inference.qualityIssues,
+      },
       topPredictions,
       recommendedProducts,
-      advisory: this.buildAdvisory(disease, recommendationLevel),
+      advisory: this.buildAdvisory(disease, recommendationLevel, inference),
     };
   }
 
@@ -476,12 +492,26 @@ export class RiceDiagnosisService {
 
     const source = payload as Record<string, unknown>;
     const predictedLabel =
+      this.readString(source.canonical_predicted_class) ??
       this.readString(source.predicted_class) ??
       this.readString(source.class_name) ??
       this.readString(source.label) ??
       this.readString(source.prediction);
+    const rawPredictedLabel =
+      this.readString(source.raw_predicted_class) ??
+      this.readString(source.canonical_raw_predicted_class) ??
+      predictedLabel;
 
     const confidence = this.readNumber(source.confidence);
+    const confidenceMargin = this.readNumber(source.confidence_margin);
+    const lowConfidence = Boolean(source.low_confidence);
+    const ambiguousPrediction = Boolean(source.ambiguous_prediction);
+    const lowQuality = Boolean(source.low_quality);
+    const qualityIssues = Array.isArray(source.quality_issues)
+      ? source.quality_issues.filter(
+          (item): item is string => typeof item === 'string' && item.trim().length > 0,
+        )
+      : [];
 
     if (!predictedLabel || confidence === null) {
       throw new InternalServerErrorException(
@@ -503,6 +533,7 @@ export class RiceDiagnosisService {
 
         const label =
           this.readString((item as Record<string, unknown>).label) ??
+          this.readString((item as Record<string, unknown>).canonical_label) ??
           this.readString((item as Record<string, unknown>).class_name) ??
           this.readString((item as Record<string, unknown>).predicted_class);
         const itemConfidence = this.readNumber(
@@ -513,9 +544,13 @@ export class RiceDiagnosisService {
           return null;
         }
 
+        const canonicalLabel =
+          this.readString((item as Record<string, unknown>).canonical_label) ?? label;
+
         return {
           label,
-          normalizedKey: this.normalizeModelLabel(label),
+          canonicalLabel,
+          normalizedKey: this.normalizeModelLabel(canonicalLabel),
           confidence: itemConfidence,
         };
       })
@@ -524,6 +559,7 @@ export class RiceDiagnosisService {
     if (topPredictions.length === 0) {
       topPredictions.push({
         label: predictedLabel,
+        canonicalLabel: predictedLabel,
         normalizedKey: this.normalizeModelLabel(predictedLabel),
         confidence,
       });
@@ -531,8 +567,14 @@ export class RiceDiagnosisService {
 
     return {
       predictedLabel,
+      rawPredictedLabel: rawPredictedLabel ?? predictedLabel,
       predictedKey: this.normalizeModelLabel(predictedLabel),
       confidence,
+      confidenceMargin,
+      lowConfidence,
+      ambiguousPrediction,
+      lowQuality,
+      qualityIssues,
       topPredictions,
       modelVersion: this.readString(source.model_version) ?? 'yolov9c-cls.pt',
       modelTask: this.readString(source.model_task) ?? 'classification',
@@ -543,6 +585,10 @@ export class RiceDiagnosisService {
   private resolveRecommendationLevel(
     disease: RiceDiseaseEntity | null,
     confidence: number,
+    inference: Pick<
+      InferenceResult,
+      'lowConfidence' | 'ambiguousPrediction' | 'lowQuality'
+    >,
   ) {
     const reviewThreshold = Number(
       this.configService.get<string>('RICE_AI_MIN_CONFIDENCE') ?? '0.75',
@@ -551,7 +597,11 @@ export class RiceDiagnosisService {
       ? Number(disease.confidenceThreshold)
       : Number(this.configService.get<string>('RICE_AI_HIGH_CONFIDENCE') ?? '0.9');
 
-    if (confidence < reviewThreshold) {
+    if (inference.lowConfidence || confidence < reviewThreshold) {
+      return RiceDiagnosisRecommendationLevel.LOW;
+    }
+
+    if (inference.lowQuality || inference.ambiguousPrediction) {
       return RiceDiagnosisRecommendationLevel.LOW;
     }
 
@@ -565,7 +615,32 @@ export class RiceDiagnosisService {
   private buildAdvisory(
     disease: RiceDiseaseEntity | null,
     recommendationLevel: RiceDiagnosisRecommendationLevel,
+    inference: Pick<
+      InferenceResult,
+      'lowQuality' | 'ambiguousPrediction' | 'qualityIssues'
+    >,
   ) {
+    if (inference.lowQuality) {
+      const issues = inference.qualityIssues.length
+        ? ` Van de phat hien: ${inference.qualityIssues.join(', ')}.`
+        : '';
+      return {
+        headline:
+          'Anh tai len chua dat chat luong de dua ra chan doan on dinh.',
+        disclaimer:
+          `Hay chup lai la lua ro hon, du sang, can hon vung ton thuong va tranh rung tay.${issues}`,
+      };
+    }
+
+    if (inference.ambiguousPrediction) {
+      return {
+        headline:
+          'AI dang phan van giua nhieu nhan benh gan nhau, nen chua nen de xuat xu ly tu dong.',
+        disclaimer:
+          'Hay doi chieu them top du doan, chup them 1-2 anh khac, hoac nhan vien ky thuat xem lai truoc khi mua thuoc.',
+      };
+    }
+
     if (!disease) {
       return {
         headline: 'AI da nhan dang du lieu, nhung chua doi chieu duoc voi danh muc benh noi bo.',
@@ -807,12 +882,21 @@ export class RiceDiagnosisService {
   }
 
   private normalizeModelLabel(value: string) {
-    return value
+    const normalized = value
       .normalize('NFKD')
       .replace(/[^\w\s-]/g, '')
       .trim()
       .toLowerCase()
       .replace(/[\s-]+/g, '_');
+
+    const aliases: Record<string, string> = {
+      blast: 'leaf_blast',
+      hispa: 'rice_hispa',
+      normal: 'healthy_rice_leaf',
+      healthy: 'healthy_rice_leaf',
+    };
+
+    return aliases[normalized] ?? normalized;
   }
 
   private normalizeSlug(value: string) {

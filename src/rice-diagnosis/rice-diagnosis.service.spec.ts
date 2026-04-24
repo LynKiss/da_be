@@ -101,11 +101,21 @@ describe('RiceDiagnosisService', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        predicted_class: 'brown_spot',
+        canonical_predicted_class: 'brown_spot',
+        raw_predicted_class: 'brown_spot',
         confidence: 0.94,
+        confidence_margin: 0.9,
         top_predictions: [
-          { label: 'brown_spot', confidence: 0.94 },
-          { label: 'leaf_blast', confidence: 0.04 },
+          {
+            label: 'brown_spot',
+            canonical_label: 'brown_spot',
+            confidence: 0.94,
+          },
+          {
+            label: 'leaf_blast',
+            canonical_label: 'leaf_blast',
+            confidence: 0.04,
+          },
         ],
         model_version: 'yolov9c-cls.pt',
         model_task: 'classification',
@@ -129,6 +139,7 @@ describe('RiceDiagnosisService', () => {
         productIds: ['prod-1'],
       }),
     );
+    expect(result.inferenceFlags.lowQuality).toBe(false);
   });
 
   it('does not suggest products when confidence is below review threshold', async () => {
@@ -160,9 +171,18 @@ describe('RiceDiagnosisService', () => {
       ok: true,
       status: 200,
       json: async () => ({
-        predicted_class: 'leaf_blast',
+        canonical_predicted_class: 'leaf_blast',
+        raw_predicted_class: 'blast',
         confidence: 0.62,
-        top_predictions: [{ label: 'leaf_blast', confidence: 0.62 }],
+        confidence_margin: 0.2,
+        low_confidence: true,
+        top_predictions: [
+          {
+            label: 'blast',
+            canonical_label: 'leaf_blast',
+            confidence: 0.62,
+          },
+        ],
         model_version: 'yolov9c-cls.pt',
       }),
     });
@@ -179,5 +199,66 @@ describe('RiceDiagnosisService', () => {
     );
     expect(result.recommendedProducts).toEqual([]);
     expect(productsService.getRecommendationCards).not.toHaveBeenCalled();
+  });
+
+  it('downgrades recommendation when AI marks image as low quality', async () => {
+    diseasesRepository.find.mockResolvedValue([
+      {
+        diseaseId: '3',
+        diseaseKey: 'healthy_rice_leaf',
+        diseaseSlug: 'healthy-rice-leaf',
+        diseaseName: 'Healthy Rice Leaf',
+        summary: 'summary',
+        symptoms: 'symptoms',
+        causes: 'causes',
+        treatmentGuidance: 'treatment',
+        preventionGuidance: 'prevention',
+        severity: RiceDiseaseSeverity.LOW,
+        recommendedIngredients: [],
+        searchKeywords: ['healthy'],
+        confidenceThreshold: '0.9300',
+        coverImageUrl: null,
+        isActive: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    recommendationsRepository.find.mockResolvedValue([]);
+    historyRepository.save.mockResolvedValue(undefined);
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        canonical_predicted_class: 'healthy_rice_leaf',
+        raw_predicted_class: 'normal',
+        confidence: 0.97,
+        confidence_margin: 0.85,
+        low_quality: true,
+        quality_issues: ['blurry', 'image_too_small'],
+        top_predictions: [
+          {
+            label: 'normal',
+            canonical_label: 'healthy_rice_leaf',
+            confidence: 0.97,
+          },
+        ],
+        model_version: 'best.pt',
+      }),
+    });
+
+    const result = await service.predict({
+      buffer: Buffer.from('fake'),
+      mimetype: 'image/jpeg',
+      originalname: 'leaf.jpg',
+      size: 128,
+    });
+
+    expect(result.recommendationLevel).toBe(
+      RiceDiagnosisRecommendationLevel.LOW,
+    );
+    expect(result.disease?.diseaseKey).toBe('healthy_rice_leaf');
+    expect(result.inferenceFlags.lowQuality).toBe(true);
+    expect(result.advisory.headline).toContain('chat luong');
   });
 });
