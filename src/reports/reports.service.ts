@@ -1,6 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
+import { Between, In, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
@@ -9,10 +9,12 @@ import {
   OrderStatus,
   PaymentStatus,
 } from '../orders/entities/order.entity';
+import { PurchaseOrderEntity, PurchaseOrderStatus } from '../procurement/entities/purchase-order.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { UserEntity } from '../users/entities/user.entity';
 import { QueryCouponUsageDto } from './dto/query-coupon-usage.dto';
+import { QueryInventoryLedgerDto, QueryProfitabilityDto, QueryAgingDebtDto, RecordPoPaymentDto } from './dto/query-inventory-ledger.dto';
 import { QuerySalesSummaryDto } from './dto/query-sales-summary.dto';
 
 @Injectable()
@@ -32,6 +34,9 @@ export class ReportsService {
     private readonly discountsRepository: Repository<DiscountEntity>,
     @InjectRepository(CouponUsageEntity)
     private readonly couponUsageRepository: Repository<CouponUsageEntity>,
+
+    @InjectRepository(PurchaseOrderEntity)
+    private readonly poRepository: Repository<PurchaseOrderEntity>,
   ) {}
 
   async getDashboard() {
@@ -315,6 +320,191 @@ export class ReportsService {
       summary,
       items,
     };
+  }
+
+  // ─── Sổ Kho Chi Tiết ──────────────────────────────────────────────────────
+
+  async getInventoryLedger(query: QueryInventoryLedgerDto) {
+    const { page = 1, limit = 30 } = query;
+
+    const qb = this.inventoryTransactionsRepository
+      .createQueryBuilder('tx')
+      .orderBy('tx.createdAt', 'DESC');
+
+    if (query.productId) qb.andWhere('tx.productId = :pid', { pid: query.productId });
+    if (query.transactionType) qb.andWhere('tx.transactionType = :tt', { tt: query.transactionType });
+    if (query.from) qb.andWhere('tx.createdAt >= :from', { from: query.from });
+    if (query.to) qb.andWhere('tx.createdAt <= :to', { to: query.to });
+
+    const total = await qb.getCount();
+    const txs = await qb.skip((page - 1) * limit).take(limit).getMany();
+
+    // Enrich with product names
+    const productIds = [...new Set(txs.map((t) => t.productId))];
+    let productMap: Record<string, string> = {};
+    if (productIds.length > 0) {
+      const products = await this.productsRepository.findBy({ productId: In(productIds) });
+      productMap = Object.fromEntries(products.map((p) => [p.productId, p.productName]));
+    }
+
+    const items = txs.map((tx) => ({
+      ...tx,
+      productName: productMap[tx.productId] ?? tx.productId,
+    }));
+
+    return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  }
+
+  // ─── Lợi Nhuận Thật ───────────────────────────────────────────────────────
+
+  async getProfitability(query: QueryProfitabilityDto) {
+    const { groupBy = 'product' } = query;
+
+    const completedStatuses = [
+      OrderStatus.CONFIRMED,
+      OrderStatus.PROCESSING,
+      OrderStatus.SHIPPING,
+      OrderStatus.DELIVERED,
+    ];
+
+    const qb = this.orderItemsRepository
+      .createQueryBuilder('item')
+      .innerJoin(OrderEntity, 'o', 'o.order_id = item.order_id')
+      .where('o.order_status IN (:...statuses)', { statuses: completedStatuses });
+
+    if (query.from) qb.andWhere('o.created_at >= :from', { from: query.from });
+    if (query.to) qb.andWhere('o.created_at <= :to', { to: query.to });
+
+    if (groupBy === 'product') {
+      const { page = 1, limit = 30 } = query;
+      qb
+        .select('item.product_id', 'productId')
+        .addSelect('item.product_name', 'productName')
+        .addSelect('SUM(item.quantity)', 'soldQty')
+        .addSelect('SUM(item.line_total)', 'revenue')
+        .groupBy('item.product_id')
+        .addGroupBy('item.product_name')
+        .orderBy('SUM(item.line_total)', 'DESC');
+
+      const total = await qb.getCount();
+      const rows = await qb.offset((page - 1) * limit).limit(limit).getRawMany<{
+        productId: string;
+        productName: string;
+        soldQty: string;
+        revenue: string;
+      }>();
+
+      const products = await this.productsRepository.findByIds(rows.map((r) => r.productId));
+      const costMap = Object.fromEntries(products.map((p) => [p.productId, Number(p.costPrice ?? 0)]));
+
+      const items = rows.map((r) => {
+        const revenue = Number(r.revenue);
+        const cogs = Number(r.soldQty) * (costMap[r.productId] ?? 0);
+        const grossProfit = revenue - cogs;
+        const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+        return {
+          productId: r.productId,
+          productName: r.productName,
+          soldQty: Number(r.soldQty),
+          revenue,
+          cogs,
+          grossProfit,
+          marginPct: Math.round(marginPct * 100) / 100,
+        };
+      });
+
+      return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    }
+
+    // Nhóm theo ngày hoặc tháng
+    const dateFormat = groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
+    qb
+      .select(`DATE_FORMAT(o.created_at, '${dateFormat}')`, 'period')
+      .addSelect('SUM(item.line_total)', 'revenue')
+      .addSelect('SUM(item.quantity)', 'soldQty')
+      .groupBy('period')
+      .orderBy('period', 'ASC');
+
+    const rows = await qb.getRawMany<{ period: string; revenue: string; soldQty: string }>();
+    return { items: rows.map((r) => ({ ...r, revenue: Number(r.revenue), soldQty: Number(r.soldQty) })) };
+  }
+
+  // ─── Báo Cáo Tuổi Nợ NCC ──────────────────────────────────────────────────
+
+  async getAgingDebt(query: QueryAgingDebtDto) {
+    const asOf = query.asOf ? new Date(query.asOf) : new Date();
+
+    const qb = this.poRepository
+      .createQueryBuilder('po')
+      .where('po.payment_status != :paid', { paid: 'paid' })
+      .andWhere('po.status NOT IN (:...excl)', {
+        excl: [PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.CANCELLED],
+      })
+      .orderBy('po.orderDate', 'ASC');
+
+    if (query.supplierId) qb.andWhere('po.supplierId = :sid', { sid: query.supplierId });
+
+    const pos = await qb.getMany();
+
+    const buckets = {
+      current: [] as typeof pos,
+      days1_7: [] as typeof pos,
+      days8_30: [] as typeof pos,
+      days31_60: [] as typeof pos,
+      days61_90: [] as typeof pos,
+      over90: [] as typeof pos,
+    };
+
+    for (const po of pos) {
+      const refDate = po.orderDate ? new Date(po.orderDate) : new Date(po.createdAt);
+      const diffDays = Math.floor((asOf.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
+      const outstanding = Number(po.totalAmount) - Number(po.paidAmount);
+
+      const enriched = { ...po, diffDays, outstanding };
+      if (diffDays <= 0) buckets.current.push(enriched as typeof po);
+      else if (diffDays <= 7) buckets.days1_7.push(enriched as typeof po);
+      else if (diffDays <= 30) buckets.days8_30.push(enriched as typeof po);
+      else if (diffDays <= 60) buckets.days31_60.push(enriched as typeof po);
+      else if (diffDays <= 90) buckets.days61_90.push(enriched as typeof po);
+      else buckets.over90.push(enriched as typeof po);
+    }
+
+    const sumOutstanding = (arr: typeof pos) =>
+      arr.reduce((s, po) => s + Number((po as any).outstanding ?? Number(po.totalAmount) - Number(po.paidAmount)), 0);
+
+    const summary = {
+      asOf: asOf.toISOString().split('T')[0],
+      totalPos: pos.length,
+      totalOutstanding: sumOutstanding(pos),
+      buckets: {
+        current:    { count: buckets.current.length,    total: sumOutstanding(buckets.current) },
+        days1_7:    { count: buckets.days1_7.length,    total: sumOutstanding(buckets.days1_7) },
+        days8_30:   { count: buckets.days8_30.length,   total: sumOutstanding(buckets.days8_30) },
+        days31_60:  { count: buckets.days31_60.length,  total: sumOutstanding(buckets.days31_60) },
+        days61_90:  { count: buckets.days61_90.length,  total: sumOutstanding(buckets.days61_90) },
+        over90:     { count: buckets.over90.length,     total: sumOutstanding(buckets.over90) },
+      },
+    };
+
+    return { summary, items: pos };
+  }
+
+  async recordPoPayment(dto: RecordPoPaymentDto, userId?: string) {
+    const po = await this.poRepository.findOne({ where: { poId: dto.poId } });
+    if (!po) throw new NotFoundException('Không tìm thấy đơn đặt hàng');
+
+    const newPaid = Number(po.paidAmount) + Number(dto.amount);
+    const total = Number(po.totalAmount);
+    const paymentStatus = newPaid >= total ? 'paid' : newPaid > 0 ? 'partial' : 'unpaid';
+
+    await this.poRepository.update({ poId: dto.poId }, {
+      paidAmount: String(newPaid),
+      paidDate: new Date(),
+      paymentStatus: paymentStatus as 'unpaid' | 'partial' | 'paid',
+      paymentNotes: dto.notes ?? null,
+    });
+
+    return this.poRepository.findOne({ where: { poId: dto.poId } });
   }
 
   private buildDateRangeWhere(query: QuerySalesSummaryDto) {

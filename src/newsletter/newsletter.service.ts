@@ -230,8 +230,15 @@ export class NewsletterService {
       this.configService.get<string>('BACKEND_URL') ?? 'http://localhost:8000';
     let sent = 0;
 
-    await Promise.allSettled(
-      subscribers.map(async (subscriber) => {
+    // Send in batches to avoid spam filters — 10 mails per batch, 1.5s between batches
+    const BATCH_SIZE = 10;
+    const BATCH_DELAY_MS = 1500;
+    const INTER_EMAIL_DELAY_MS = 150;
+
+    for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
+      const batch = subscribers.slice(i, i + BATCH_SIZE);
+
+      for (const subscriber of batch) {
         try {
           const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${subscriber.unsubscribeToken}`;
           await mailer.transporter.sendMail({
@@ -252,8 +259,15 @@ export class NewsletterService {
             `Failed to send campaign ${campaignId} to ${subscriber.email}: ${message}`,
           );
         }
-      }),
-    );
+        // Small pause between individual emails within a batch
+        await new Promise((resolve) => setTimeout(resolve, INTER_EMAIL_DELAY_MS));
+      }
+
+      // Pause between batches (skip after the last batch)
+      if (i + BATCH_SIZE < subscribers.length) {
+        await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
+      }
+    }
 
     campaign.status = CampaignStatus.SENT;
     campaign.sentAt = new Date();
@@ -320,11 +334,16 @@ export class NewsletterService {
       this.configService.get<string>('BACKEND_URL') ?? 'http://localhost:8000';
 
     const articleUrl = `${frontendUrl}/client/news/${slug}`;
-    const subject = `Bai viet moi: ${title}`;
-    const body = `<p>${excerpt}</p><p><a href="${articleUrl}" style="color:#006241;font-weight:bold;">Doc bai viet -></a></p>`;
+    const subject = `Bài viết mới: ${title}`;
+    const body = `<p>${excerpt}</p><p><a href="${articleUrl}" style="color:#006241;font-weight:bold;">Đọc bài viết →</a></p>`;
 
-    await Promise.allSettled(
-      subscribers.map(async (subscriber) => {
+    const BATCH_SIZE = 10;
+    const BATCH_DELAY_MS = 1500;
+    const INTER_EMAIL_DELAY_MS = 150;
+
+    for (let i = 0; i < subscribers.length; i += BATCH_SIZE) {
+      const batch = subscribers.slice(i, i + BATCH_SIZE);
+      for (const subscriber of batch) {
         const unsubscribeUrl = `${backendUrl}/api/v1/newsletter/unsubscribe?token=${subscriber.unsubscribeToken}`;
         try {
           await mailer.transporter.sendMail({
@@ -334,8 +353,12 @@ export class NewsletterService {
             html: this.wrapCampaignHtml(body, subject, unsubscribeUrl),
           });
         } catch {}
-      }),
-    );
+        await new Promise((resolve) => setTimeout(resolve, INTER_EMAIL_DELAY_MS));
+      }
+      if (i + BATCH_SIZE < subscribers.length) {
+        await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
+      }
+    }
   }
 
   private async getMailer() {

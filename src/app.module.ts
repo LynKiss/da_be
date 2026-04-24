@@ -22,6 +22,12 @@ import { NewsletterModule } from './newsletter/newsletter.module';
 import { RiceDiagnosisModule } from './rice-diagnosis/rice-diagnosis.module';
 import { SettingsModule } from './settings/settings.module';
 import { SupportChatModule } from './support-chat/support-chat.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
+import { ProcurementModule } from './procurement/procurement.module';
+import { PricingModule } from './pricing/pricing.module';
+import { WarehousesModule } from './warehouses/warehouses.module';
+import { CreditLimitsModule } from './credit-limits/credit-limits.module';
+import { AuditLogsModule } from './audit-logs/audit-logs.module';
 
 @Module({
   imports: [
@@ -47,6 +53,12 @@ import { SupportChatModule } from './support-chat/support-chat.module';
     RiceDiagnosisModule,
     SettingsModule,
     SupportChatModule,
+    SuppliersModule,
+    ProcurementModule,
+    PricingModule,
+    WarehousesModule,
+    CreditLimitsModule,
+    AuditLogsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

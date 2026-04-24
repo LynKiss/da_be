@@ -139,6 +139,24 @@ export class ProductEntity {
   })
   boxBarcode!: string | null;
 
+  @Column({
+    name: 'cost_price',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+  })
+  costPrice!: string | null;
+
+  @Column({
+    name: 'bulk_price',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+  })
+  bulkPrice!: string | null;
+
   @CreateDateColumn({
     name: 'created_at',
     type: 'datetime',
