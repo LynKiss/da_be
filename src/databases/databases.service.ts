@@ -23,8 +23,8 @@ const CORE_PERMISSIONS = [
   { permissionKey: 'manage_reviews', permissionName: 'Quản lý đánh giá sản phẩm' },
   { permissionKey: 'manage_categories', permissionName: 'Quản lý danh mục' },
   { permissionKey: 'manage_customers', permissionName: 'Quản lý khách hàng' },
-  { permissionKey: 'manage_support', permissionName: 'Quan ly chat ho tro' },
-  { permissionKey: 'manage_ai_diagnosis', permissionName: 'Quan ly chan doan benh lua bang AI' },
+  { permissionKey: 'manage_support', permissionName: 'Quản lý chatbox' },
+  { permissionKey: 'manage_ai_diagnosis', permissionName: 'Quản lý chuẩn đoán bệnh lúa bằng AI' },
 ];
 
 @Injectable()
@@ -40,7 +40,7 @@ export class DatabasesService implements OnModuleInit {
     private readonly refreshTokensRepository: Repository<RefreshTokenEntity>,
     @InjectRepository(RolePermissionEntity)
     private readonly rolePermissionsRepository: Repository<RolePermissionEntity>,
-  ) {}
+  ) { }
 
   async getSummary() {
     const [users, permissions, refreshTokens] = await Promise.all([
