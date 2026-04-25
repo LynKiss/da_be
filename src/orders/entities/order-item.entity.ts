@@ -27,6 +27,14 @@ export class OrderItemEntity {
   @Column({ name: 'quantity', type: 'int' })
   quantity: number;
 
+  /**
+   * Số lượng đã giao thực tế.
+   * = quantity → DELIVERED bình thường
+   * < quantity → PARTIAL_DELIVERED (số chênh lệch đã restock + revert reserved)
+   */
+  @Column({ name: 'quantity_delivered', type: 'int', default: 0 })
+  quantityDelivered: number;
+
   @Column({
     name: 'unit_price',
     type: 'decimal',

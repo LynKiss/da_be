@@ -5,9 +5,14 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+import { Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { SimpleCacheService } from '../common/simple-cache.service';
 import { withDeadlockRetry } from '../common/transaction.util';
+import { OrderEntity, OrderStatus } from '../orders/entities/order.entity';
+import { OrderItemEntity } from '../orders/entities/order-item.entity';
+import { OrderStatusHistoryEntity } from '../orders/entities/order-status-history.entity';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
@@ -112,37 +117,160 @@ export class ProcurementService {
 
     private readonly dataSource: DataSource,
     private readonly auditLogs: AuditLogsService,
+    private readonly cache: SimpleCacheService,
   ) {}
 
+  private readonly procurementLogger = new Logger(ProcurementService.name);
+
   /**
-   * Sau khi nhập kho, tìm các đơn BACKORDERED có sản phẩm vừa nhập
-   * và đánh dấu để admin duyệt fulfill (không tự động trừ kho — cần kiểm soát).
-   * Hiện tại chỉ ghi audit log để admin biết có đơn cần xử lý.
+   * Sau khi confirm GR thành công, tìm các đơn BACKORDERED có sản phẩm vừa nhập.
+   *
+   * Behavior phụ thuộc env BACKORDER_AUTO_FULFILL:
+   *   - 'true':  Tự động fulfill FIFO (theo thứ tự createdAt ASC).
+   *              Đơn nào có ĐỦ stock cho TẤT CẢ items → chuyển PENDING + trừ stock.
+   *              Đơn nào còn thiếu → giữ nguyên BACKORDERED.
+   *   - 'false' / không set: Chỉ ghi audit log để admin biết, KHÔNG tự fulfill.
+   *
+   * Auto-fulfill = "tin vào FIFO". Nếu cần kiểm soát (VIP, hold cho khách lớn),
+   * giữ default = false.
    */
   private async autoFulfillBackorders(productIds: string[]): Promise<void> {
     if (!productIds.length) return;
     try {
-      // Đếm số đơn BACKORDERED có sản phẩm vừa nhập (không tự fulfill, chỉ flag)
-      const count = await this.dataSource
+      const enabled =
+        (process.env.BACKORDER_AUTO_FULFILL ?? '').toLowerCase() === 'true';
+
+      // Tìm các đơn BACKORDERED có chứa SP vừa nhập
+      const orderIdsRaw = await this.dataSource
         .createQueryBuilder()
-        .select('COUNT(DISTINCT o.order_id)', 'cnt')
+        .select('DISTINCT o.order_id', 'orderId')
+        .addSelect('o.created_at', 'createdAt')
         .from('orders', 'o')
         .innerJoin('order_items', 'oi', 'oi.order_id = o.order_id')
         .where('o.order_status = :st', { st: 'backordered' })
         .andWhere('oi.product_id IN (:...pids)', { pids: productIds })
-        .getRawOne<{ cnt: string }>();
+        .orderBy('o.created_at', 'ASC')
+        .getRawMany<{ orderId: string; createdAt: Date }>();
 
-      if (count && Number(count.cnt) > 0) {
-        void this.auditLogs.log({
-          entityType: 'BACKORDER',
-          entityId: productIds.join(','),
-          action: 'STOCK_REPLENISHED',
-          afterData: { backorderedOrders: Number(count.cnt) },
-        });
+      if (!orderIdsRaw.length) return;
+
+      // Audit log để admin biết
+      void this.auditLogs.log({
+        entityType: 'BACKORDER',
+        entityId: productIds.join(','),
+        action: 'STOCK_REPLENISHED',
+        afterData: {
+          backorderedOrders: orderIdsRaw.length,
+          autoFulfillEnabled: enabled,
+        },
+      });
+
+      if (!enabled) return;
+
+      // FIFO auto-fulfill
+      let fulfilledCount = 0;
+      for (const { orderId } of orderIdsRaw) {
+        try {
+          const ok = await this.tryFulfillOneBackorder(orderId);
+          if (ok) fulfilledCount++;
+        } catch (err) {
+          this.procurementLogger.warn(
+            `[autoFulfillBackorders] Fail ${orderId}: ${err instanceof Error ? err.message : err}`,
+          );
+        }
       }
-    } catch {
-      // Không throw — auto-fulfill là tính năng phụ
+
+      if (fulfilledCount > 0) {
+        this.procurementLogger.log(
+          `[autoFulfillBackorders] Fulfilled ${fulfilledCount}/${orderIdsRaw.length} backorders`,
+        );
+      }
+    } catch (err) {
+      this.procurementLogger.error(
+        `[autoFulfillBackorders] Top-level error: ${err instanceof Error ? err.message : err}`,
+      );
     }
+  }
+
+  /**
+   * Thử fulfill 1 backorder cụ thể.
+   * Trả về true nếu fulfill thành công (chuyển sang PENDING).
+   * Trả về false nếu chưa đủ stock cho tất cả items.
+   *
+   * Atomic: tất cả items cùng có stock thì mới trừ và chuyển status.
+   */
+  private async tryFulfillOneBackorder(orderId: string): Promise<boolean> {
+    return withDeadlockRetry(() =>
+      this.dataSource.transaction(async (em) => {
+        const order = await em.findOne(OrderEntity, {
+          where: { orderId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!order || order.orderStatus !== OrderStatus.BACKORDERED) {
+          return false;
+        }
+
+        const items = await em.find(OrderItemEntity, {
+          where: { orderId: order.orderId },
+        });
+
+        // Pre-check: tất cả items đều có đủ stock
+        const productMap = new Map<string, ProductEntity>();
+        for (const item of items) {
+          const product = await em.findOne(ProductEntity, {
+            where: { productId: item.productId },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (!product || item.quantity > product.quantityAvailable) {
+            return false; // không đủ → giữ BACKORDERED
+          }
+          productMap.set(item.productId, product);
+        }
+
+        // Đủ stock → trừ + ghi inventory_transaction + chuyển PENDING
+        for (const item of items) {
+          const product = productMap.get(item.productId)!;
+          const qtyBefore = product.quantityAvailable;
+          product.quantityAvailable -= item.quantity;
+          product.quantityReserved =
+            (product.quantityReserved ?? 0) + item.quantity;
+          await em.save(ProductEntity, product);
+
+          await em.save(
+            InventoryTransactionEntity,
+            em.create(InventoryTransactionEntity, {
+              productId: item.productId,
+              performedBy: null,
+              transactionType: InventoryTransactionType.EXPORT,
+              quantityChange: -item.quantity,
+              quantityBefore: qtyBefore,
+              quantityAfter: product.quantityAvailable,
+              referenceType: 'ORDER',
+              referenceId: order.orderId,
+              unitCostAtTime: product.avgCost ?? null,
+              note: 'Auto-fulfill backorder by GR confirmation',
+              relatedOrderId: order.orderId,
+            }),
+          );
+        }
+
+        order.orderStatus = OrderStatus.PENDING;
+        await em.save(OrderEntity, order);
+
+        await em.save(
+          OrderStatusHistoryEntity,
+          em.create(OrderStatusHistoryEntity, {
+            orderId: order.orderId,
+            oldStatus: OrderStatus.BACKORDERED,
+            newStatus: OrderStatus.PENDING,
+            changedBy: null,
+            note: 'Auto-fulfilled by stock replenishment',
+          }),
+        );
+
+        return true;
+      }),
+    );
   }
 
   // ─── PURCHASE ORDERS ─────────────────────────────────────────────────────
@@ -465,6 +593,10 @@ export class ProcurementService {
 
     // Auto-fulfill backorders sau khi nhập kho thành công
     await this.autoFulfillBackorders(gr.items.map((it) => it.productId));
+
+    // Invalidate cache: tồn kho + giá vốn vừa thay đổi
+    this.cache.invalidatePrefix('reports:');
+    this.cache.invalidatePrefix('products:');
 
     void this.auditLogs.log({
       entityType: 'GR',

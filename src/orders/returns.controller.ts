@@ -6,6 +6,7 @@ import {
 } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
 import { CreateReturnDto } from './dto/create-return.dto';
+import { InspectReturnDto } from './dto/inspect-return.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { OrdersService } from './orders.service';
 
@@ -47,6 +48,22 @@ export class ReturnsController {
       currentUser,
       id,
       updateReturnStatusDto,
+    );
+  }
+
+  @Patch(':id/inspect')
+  @RequirePermissions('manage_orders')
+  @ResponseMessage('Inspect returned goods')
+  inspectReturn(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @Body() dto: InspectReturnDto,
+  ) {
+    return this.ordersService.inspectReturn(
+      currentUser,
+      id,
+      dto.decision,
+      dto.note,
     );
   }
 }

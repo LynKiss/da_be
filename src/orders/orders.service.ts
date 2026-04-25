@@ -3,11 +3,13 @@ import { createHmac } from 'node:crypto';
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, LessThan, Repository } from 'typeorm';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { CartItemEntity } from '../carts/entities/cart-item.entity';
@@ -30,6 +32,7 @@ import { SettingsService } from '../settings/settings.service';
 import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
 import { withDeadlockRetry } from '../common/transaction.util';
+import { verifyMomoSignature } from '../common/payment-signature.util';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
@@ -57,12 +60,18 @@ import {
   PaymentTransactionEntity,
   PaymentTransactionStatus,
 } from './entities/payment-transaction.entity';
-import { ReturnEntity, ReturnStatus } from './entities/return.entity';
+import {
+  ReturnEntity,
+  ReturnInspectionStatus,
+  ReturnStatus,
+} from './entities/return.entity';
 import { ShippingAddressEntity } from './entities/shipping-address.entity';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
   private readonly liveTrackingFreshnessMs = 2 * 60 * 1000;
+  private readonly stalePaymentTtlMs = 30 * 60 * 1000; // 30 phút
 
   constructor(
     @InjectRepository(DeliveryMethodEntity)
@@ -316,7 +325,9 @@ export class OrdersService {
       [ReturnStatus.REQUESTED]: [ReturnStatus.APPROVED, ReturnStatus.REJECTED],
       [ReturnStatus.APPROVED]: [ReturnStatus.RECEIVED, ReturnStatus.REJECTED],
       [ReturnStatus.REJECTED]: [],
-      [ReturnStatus.RECEIVED]: [ReturnStatus.REFUNDED],
+      // RECEIVED → INSPECTED (sau khi admin gọi inspect endpoint)
+      [ReturnStatus.RECEIVED]: [ReturnStatus.INSPECTED, ReturnStatus.REFUNDED],
+      [ReturnStatus.INSPECTED]: [ReturnStatus.REFUNDED],
       [ReturnStatus.REFUNDED]: [],
     };
 
@@ -539,7 +550,12 @@ export class OrdersService {
       [OrderStatus.PENDING]: [OrderStatus.CONFIRMED, OrderStatus.CANCELLED],
       [OrderStatus.CONFIRMED]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED],
       [OrderStatus.PROCESSING]: [OrderStatus.SHIPPING, OrderStatus.CANCELLED],
-      [OrderStatus.SHIPPING]: [OrderStatus.DELIVERED, OrderStatus.RETURNED],
+      [OrderStatus.SHIPPING]: [
+        OrderStatus.DELIVERED,
+        OrderStatus.PARTIAL_DELIVERED,
+        OrderStatus.RETURNED,
+      ],
+      [OrderStatus.PARTIAL_DELIVERED]: [OrderStatus.RETURNED],
       [OrderStatus.DELIVERED]: [OrderStatus.RETURNED],
       [OrderStatus.CANCELLED]: [],
       [OrderStatus.RETURNED]: [],
@@ -1114,7 +1130,12 @@ export class OrdersService {
     }
 
     if (
-      [OrderStatus.DELIVERED, OrderStatus.RETURNED].includes(previousStatus)
+      [
+        OrderStatus.DELIVERED,
+        OrderStatus.PARTIAL_DELIVERED,
+        OrderStatus.RETURNED,
+      ].includes(previousStatus) &&
+      nextStatus !== OrderStatus.RETURNED
     ) {
       throw new BadRequestException('Finalized order cannot change status');
     }
@@ -1227,47 +1248,75 @@ export class OrdersService {
           where: { orderId: order.orderId },
         });
 
-        await this.restockOrderItems(
-          order.orderId,
-          transactionalProductsRepository,
-          transactionalOrderItemsRepository,
-          entityManager,
-        );
-
-        for (const item of items) {
-          const product = await transactionalProductsRepository.findOneBy({
-            productId: item.productId,
-          });
-          const inventoryTransaction =
-            transactionalInventoryTransactionsRepository.create({
-              productId: item.productId,
-              performedBy: currentUser._id,
-              transactionType: InventoryTransactionType.RETURN_IN,
-              quantityChange: item.quantity,
-              quantityBefore: product
-                ? product.quantityAvailable - item.quantity
-                : null,
-              quantityAfter: product ? product.quantityAvailable : null,
-              referenceType: 'ORDER',
-              referenceId: order.orderId,
-              unitCostAtTime: product?.avgCost ?? null,
-              note:
-                nextStatus === OrderStatus.CANCELLED
-                  ? 'Restock by admin cancellation'
-                  : 'Restock by returned order',
-              relatedOrderId: order.orderId,
-            });
-          await transactionalInventoryTransactionsRepository.save(
-            inventoryTransaction,
-          );
-        }
-
+        // RETURNED: KHÔNG tự restock, chỉ giải phóng reserved (nếu chưa giao)
+        // → Hàng phải qua inspection trước. Stock chỉ được restock khi
+        //   admin inspect = USABLE.
+        // CANCELLED: vẫn restock bình thường (hàng chưa rời kho).
         if (nextStatus === OrderStatus.CANCELLED) {
+          await this.restockOrderItems(
+            order.orderId,
+            transactionalProductsRepository,
+            transactionalOrderItemsRepository,
+            entityManager,
+          );
+          for (const item of items) {
+            const product = await transactionalProductsRepository.findOneBy({
+              productId: item.productId,
+            });
+            const inventoryTransaction =
+              transactionalInventoryTransactionsRepository.create({
+                productId: item.productId,
+                performedBy: currentUser._id,
+                transactionType: InventoryTransactionType.RETURN_IN,
+                quantityChange: item.quantity,
+                quantityBefore: product
+                  ? product.quantityAvailable - item.quantity
+                  : null,
+                quantityAfter: product ? product.quantityAvailable : null,
+                referenceType: 'ORDER',
+                referenceId: order.orderId,
+                unitCostAtTime: product?.avgCost ?? null,
+                note: 'Restock by admin cancellation',
+                relatedOrderId: order.orderId,
+              });
+            await transactionalInventoryTransactionsRepository.save(
+              inventoryTransaction,
+            );
+          }
           await this.revertDiscountUsage(
             order,
             transactionalDiscountsRepository,
             transactionalCouponUsageRepository,
           );
+        } else if (nextStatus === OrderStatus.RETURNED) {
+          // Hàng trả về — giải phóng quantityReserved nếu có (đơn chưa DELIVERED)
+          // Stock physical KHÔNG cộng lại — chờ inspect.
+          // Nếu đơn đã DELIVERED rồi: reserved = 0, không có gì để release.
+          for (const item of items) {
+            const product = await transactionalProductsRepository.findOne({
+              where: { productId: item.productId },
+              lock: { mode: 'pessimistic_write' },
+            });
+            if (!product) continue;
+
+            // Tạo Return record với inspectionStatus = PENDING
+            const returnRecord = entityManager
+              .getRepository(ReturnEntity)
+              .create({
+                orderId: order.orderId,
+                orderItemId: item.orderItemId,
+                userId: order.userId,
+                reason:
+                  updateOrderStatusDto.note ?? 'Returned by admin',
+                description: null,
+                returnStatus: ReturnStatus.RECEIVED,
+                inspectionStatus: ReturnInspectionStatus.PENDING,
+                refundAmount: null,
+              });
+            await entityManager
+              .getRepository(ReturnEntity)
+              .save(returnRecord);
+          }
         }
       }
 
@@ -1464,12 +1513,22 @@ export class OrdersService {
   }
 
   async handleMomoIpn(body: Record<string, unknown>) {
-    const { secretKey } = await this.settingsService.getMomoConfig();
-    if (!secretKey) return { message: 'ignored' };
+    const { accessKey, secretKey } = await this.settingsService.getMomoConfig();
+    if (!secretKey || !accessKey) return { message: 'ignored' };
 
-    console.log('[MoMo IPN] Received:', JSON.stringify(body));
+    // 1. VERIFY HMAC SIGNATURE — chống fake callback
+    if (!verifyMomoSignature(body, accessKey, secretKey)) {
+      throw new UnauthorizedException('Invalid MoMo signature');
+    }
 
-    const { orderId: momoOrderId, requestId, amount, resultCode, transId, message: gwMessage } = body as {
+    const {
+      orderId: momoOrderId,
+      requestId,
+      amount,
+      resultCode,
+      transId,
+      message: gwMessage,
+    } = body as {
       orderId?: string;
       requestId?: string;
       amount?: number;
@@ -1482,22 +1541,56 @@ export class OrdersService {
     const txRef = momoOrderId ?? requestId;
     if (!txRef) return { message: 'missing orderId' };
 
-    const transaction = await this.paymentTransactionsRepository.findOne({
-      where: { transactionRef: txRef },
-    }).catch(() => null);
+    const transaction = await this.paymentTransactionsRepository
+      .findOne({ where: { transactionRef: txRef } })
+      .catch(() => null);
 
     const internalOrderId = transaction?.orderId;
     if (!internalOrderId) return { message: 'transaction not found' };
 
-    const order = await this.ordersRepository.findOneBy({ orderId: internalOrderId }).catch(() => null);
+    const order = await this.ordersRepository
+      .findOneBy({ orderId: internalOrderId })
+      .catch(() => null);
     if (!order) return { message: 'order not found' };
+
+    // 2. IDEMPOTENCY — Nếu đã xử lý transId này thành SUCCESS rồi thì return luôn
+    if (
+      transaction &&
+      transaction.transactionStatus === PaymentTransactionStatus.SUCCESS &&
+      transaction.gatewayCode === String(resultCode ?? '')
+    ) {
+      return { message: 'already processed', transId };
+    }
+
+    // 3. AMOUNT MISMATCH GUARD — Tránh fake amount nhỏ
+    if (amount !== undefined && amount !== null) {
+      const expectedAmount = Number(order.totalPayment);
+      const reportedAmount = Number(amount);
+      if (
+        Number.isFinite(expectedAmount) &&
+        Number.isFinite(reportedAmount) &&
+        Math.abs(expectedAmount - reportedAmount) > 0.01
+      ) {
+        // Lưu transaction là FAILED do amount mismatch — không update order
+        if (transaction) {
+          transaction.transactionStatus = PaymentTransactionStatus.FAILED;
+          transaction.gatewayCode = 'AMOUNT_MISMATCH';
+          transaction.gatewayMessage = `Expected ${expectedAmount}, got ${reportedAmount}`;
+          transaction.rawPayload = body;
+          await this.paymentTransactionsRepository.save(transaction);
+        }
+        throw new BadRequestException('Payment amount mismatch');
+      }
+    }
 
     const success = resultCode === 0;
     const paymentStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
 
     // Update existing transaction status if found, or create a new one
     if (transaction) {
-      transaction.transactionStatus = success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED;
+      transaction.transactionStatus = success
+        ? PaymentTransactionStatus.SUCCESS
+        : PaymentTransactionStatus.FAILED;
       transaction.paymentStatus = paymentStatus;
       transaction.gatewayCode = String(resultCode ?? '');
       transaction.gatewayMessage = (gwMessage as string) ?? null;
@@ -1509,7 +1602,9 @@ export class OrdersService {
         userId: order.userId,
         provider: PaymentMethod.MOMO,
         transactionRef: txRef,
-        transactionStatus: success ? PaymentTransactionStatus.SUCCESS : PaymentTransactionStatus.FAILED,
+        transactionStatus: success
+          ? PaymentTransactionStatus.SUCCESS
+          : PaymentTransactionStatus.FAILED,
         paymentStatus,
         amount: String(amount ?? order.totalPayment),
         gatewayCode: String(resultCode ?? ''),
@@ -1543,26 +1638,69 @@ export class OrdersService {
       throw new BadRequestException('Payment provider does not match order');
     }
 
+    // 1. IDEMPOTENCY — Tránh xử lý lại cùng transactionRef
+    const existingTx = await this.paymentTransactionsRepository.findOne({
+      where: { transactionRef: paymentCallbackDto.transactionRef },
+    });
+    if (
+      existingTx &&
+      existingTx.transactionStatus === PaymentTransactionStatus.SUCCESS &&
+      paymentCallbackDto.success
+    ) {
+      return {
+        orderId: order.orderId,
+        provider: normalizedProvider,
+        transactionRef: paymentCallbackDto.transactionRef,
+        paymentStatus: existingTx.paymentStatus,
+        message: 'already processed',
+      };
+    }
+
+    // 2. AMOUNT MISMATCH GUARD — Không cho fake amount nhỏ hơn
+    if (paymentCallbackDto.success) {
+      const expectedAmount = Number(order.totalPayment);
+      const reportedAmount = Number(paymentCallbackDto.amount);
+      if (
+        Number.isFinite(expectedAmount) &&
+        Number.isFinite(reportedAmount) &&
+        Math.abs(expectedAmount - reportedAmount) > 0.01
+      ) {
+        throw new BadRequestException(
+          `Payment amount mismatch: expected ${expectedAmount}, got ${reportedAmount}`,
+        );
+      }
+    }
+
     const paymentStatus = paymentCallbackDto.success
       ? PaymentStatus.PAID
       : PaymentStatus.FAILED;
 
-    const transaction = this.paymentTransactionsRepository.create({
-      orderId: order.orderId,
-      userId: order.userId,
-      provider: normalizedProvider,
-      transactionRef: paymentCallbackDto.transactionRef,
-      transactionStatus: paymentCallbackDto.success
+    if (existingTx) {
+      existingTx.transactionStatus = paymentCallbackDto.success
         ? PaymentTransactionStatus.SUCCESS
-        : PaymentTransactionStatus.FAILED,
-      paymentStatus,
-      amount: paymentCallbackDto.amount,
-      gatewayCode: paymentCallbackDto.gatewayCode ?? null,
-      gatewayMessage: paymentCallbackDto.gatewayMessage ?? null,
-      rawPayload: paymentCallbackDto.rawPayload ?? null,
-    });
-
-    await this.paymentTransactionsRepository.save(transaction);
+        : PaymentTransactionStatus.FAILED;
+      existingTx.paymentStatus = paymentStatus;
+      existingTx.gatewayCode = paymentCallbackDto.gatewayCode ?? null;
+      existingTx.gatewayMessage = paymentCallbackDto.gatewayMessage ?? null;
+      existingTx.rawPayload = paymentCallbackDto.rawPayload ?? null;
+      await this.paymentTransactionsRepository.save(existingTx);
+    } else {
+      const transaction = this.paymentTransactionsRepository.create({
+        orderId: order.orderId,
+        userId: order.userId,
+        provider: normalizedProvider,
+        transactionRef: paymentCallbackDto.transactionRef,
+        transactionStatus: paymentCallbackDto.success
+          ? PaymentTransactionStatus.SUCCESS
+          : PaymentTransactionStatus.FAILED,
+        paymentStatus,
+        amount: paymentCallbackDto.amount,
+        gatewayCode: paymentCallbackDto.gatewayCode ?? null,
+        gatewayMessage: paymentCallbackDto.gatewayMessage ?? null,
+        rawPayload: paymentCallbackDto.rawPayload ?? null,
+      });
+      await this.paymentTransactionsRepository.save(transaction);
+    }
 
     order.paymentStatus = paymentStatus;
     await this.ordersRepository.save(order);
@@ -1579,6 +1717,121 @@ export class OrdersService {
       transactionRef: paymentCallbackDto.transactionRef,
       paymentStatus,
     };
+  }
+
+  /**
+   * Cron reconciliation — chạy mỗi 15 phút.
+   * Tìm các đơn online (non-COD) đã PENDING + paymentStatus=UNPAID quá 30 phút
+   * → Đối soát với gateway hoặc tự cancel để giải phóng stock.
+   *
+   * Hiện tại: KHÔNG gọi MoMo query API thật (cần endpoint /v2/gateway/api/query
+   * + signature) — sẽ AUTO CANCEL đơn nếu quá 30 phút không thanh toán.
+   * Stock sẽ được restock thông qua updateOrderStatus → CANCELLED.
+   */
+  @Cron('*/15 * * * *') // mỗi 15 phút
+  async reconcileStalePayments() {
+    try {
+      const cutoff = new Date(Date.now() - this.stalePaymentTtlMs);
+      const stale = await this.ordersRepository.find({
+        where: {
+          orderStatus: OrderStatus.PENDING,
+          paymentStatus: PaymentStatus.UNPAID,
+          paymentMethod: In([
+            PaymentMethod.MOMO,
+            PaymentMethod.VNPAY,
+            PaymentMethod.ZALOPAY,
+            PaymentMethod.BANK_TRANSFER,
+            PaymentMethod.PAYPAL,
+          ]),
+          createdAt: LessThan(cutoff),
+        },
+        take: 100, // batch nhỏ để tránh nghẽn DB
+      });
+
+      if (stale.length === 0) return;
+
+      this.logger.log(
+        `[reconcileStalePayments] Found ${stale.length} stale unpaid orders`,
+      );
+
+      for (const order of stale) {
+        try {
+          // Kiểm tra có PaymentTransaction SUCCESS chưa (case race condition)
+          const succeeded = await this.paymentTransactionsRepository.findOne({
+            where: {
+              orderId: order.orderId,
+              transactionStatus: PaymentTransactionStatus.SUCCESS,
+            },
+          });
+          if (succeeded) {
+            order.paymentStatus = PaymentStatus.PAID;
+            await this.ordersRepository.save(order);
+            continue;
+          }
+
+          // Auto-cancel + restock
+          await this.ordersRepository.manager.transaction(async (em) => {
+            const items = await em.find(OrderItemEntity, {
+              where: { orderId: order.orderId },
+            });
+            // Restock từng item
+            for (const item of items) {
+              const product = await em.findOne(ProductEntity, {
+                where: { productId: item.productId },
+                lock: { mode: 'pessimistic_write' },
+              });
+              if (product) {
+                product.quantityAvailable += item.quantity;
+                product.quantityReserved = Math.max(
+                  0,
+                  (product.quantityReserved ?? 0) - item.quantity,
+                );
+                await em.save(ProductEntity, product);
+              }
+              await em.save(
+                InventoryTransactionEntity,
+                em.create(InventoryTransactionEntity, {
+                  productId: item.productId,
+                  performedBy: null,
+                  transactionType: InventoryTransactionType.RETURN_IN,
+                  quantityChange: item.quantity,
+                  referenceType: 'ORDER',
+                  referenceId: order.orderId,
+                  note: 'Auto-cancel by reconciliation (unpaid > 30min)',
+                  relatedOrderId: order.orderId,
+                }),
+              );
+            }
+            order.orderStatus = OrderStatus.CANCELLED;
+            order.paymentStatus = PaymentStatus.FAILED;
+            await em.save(OrderEntity, order);
+            await em.save(
+              OrderStatusHistoryEntity,
+              em.create(OrderStatusHistoryEntity, {
+                orderId: order.orderId,
+                oldStatus: OrderStatus.PENDING,
+                newStatus: OrderStatus.CANCELLED,
+                changedBy: null,
+                note: 'Auto-cancelled by reconciliation cron (unpaid > 30 min)',
+              }),
+            );
+          });
+          this.logger.log(
+            `[reconcileStalePayments] Cancelled order ${order.orderId}`,
+          );
+        } catch (err) {
+          this.logger.error(
+            `[reconcileStalePayments] Failed for order ${order.orderId}`,
+            err instanceof Error ? err.stack : String(err),
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.error(
+        '[reconcileStalePayments] Top-level error',
+        err instanceof Error ? err.stack : String(err),
+      );
+    }
   }
 
   async findPaymentTransactions(currentUser: IUser, orderId: string) {
@@ -1765,33 +2018,10 @@ export class OrdersService {
     }
 
     if (updateReturnStatusDto.status === ReturnStatus.RECEIVED) {
-      const product = await this.productsRepository.findOneBy({
-        productId: orderItem.productId,
-      });
-      if (product) {
-        await this.ordersRepository.manager.transaction(async (em) => {
-          product.quantityAvailable += orderItem.quantity;
-          await em.save(ProductEntity, product);
-
-          await em.save(
-            InventoryTransactionEntity,
-            em.create(InventoryTransactionEntity, {
-              productId: product.productId,
-              performedBy: currentUser._id,
-              transactionType: InventoryTransactionType.RETURN_IN,
-              quantityChange: orderItem.quantity,
-              note: updateReturnStatusDto.note ?? 'Return received by admin',
-              relatedOrderId: returnRequest.orderId,
-            }),
-          );
-
-          await this.syncDefaultWarehouseStock(
-            em,
-            product.productId,
-            orderItem.quantity,
-          );
-        });
-      }
+      // RECEIVED: chỉ đánh dấu đã nhận, KHÔNG tự restock.
+      // Hàng phải qua inspection (admin gọi PATCH /returns/:id/inspect)
+      // để quyết định nhập kho / báo hỏng / trả NCC.
+      returnRequest.inspectionStatus = ReturnInspectionStatus.PENDING;
     }
 
     returnRequest.returnStatus = updateReturnStatusDto.status;
@@ -1820,5 +2050,269 @@ export class OrdersService {
     });
 
     return savedReturn;
+  }
+
+  /**
+   * Admin xác nhận giao một phần (partial delivery).
+   * Khách mua 10 → giao thực tế 6 → các bước:
+   *   1. Cập nhật order_items.quantity_delivered cho từng line
+   *   2. Phần chưa giao (4 cái) → cộng lại quantityAvailable, giảm reserved
+   *   3. Tạo inventory_transaction RETURN_IN cho phần thiếu
+   *   4. Giảm reserved cho phần đã giao (như delivered bình thường)
+   *   5. Đặt status = PARTIAL_DELIVERED nếu còn thiếu, DELIVERED nếu đủ
+   *   6. Tính lại totalPayment theo phần đã giao thực tế
+   *
+   * Phải gọi từ status SHIPPING (chỉ giao được khi đang ship).
+   */
+  async partialDeliverOrder(
+    currentUser: IUser,
+    orderId: string,
+    items: { orderItemId: string; deliveredQty: number }[],
+    note?: string,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(orderId);
+
+    if (order.orderStatus !== OrderStatus.SHIPPING) {
+      throw new BadRequestException(
+        'Partial delivery chỉ thực hiện khi đơn đang SHIPPING',
+      );
+    }
+
+    const orderItems = await this.orderItemsRepository.find({
+      where: { orderId: order.orderId },
+    });
+    const itemMap = new Map(orderItems.map((it) => [it.orderItemId, it]));
+
+    // Validate: deliveredQty không được vượt qty đặt
+    for (const dto of items) {
+      const oi = itemMap.get(dto.orderItemId);
+      if (!oi) {
+        throw new BadRequestException(
+          `Order item ${dto.orderItemId} không thuộc đơn này`,
+        );
+      }
+      if (dto.deliveredQty > oi.quantity) {
+        throw new BadRequestException(
+          `Số lượng giao (${dto.deliveredQty}) không thể vượt số đặt (${oi.quantity}) của ${oi.productName}`,
+        );
+      }
+      if (dto.deliveredQty < 0) {
+        throw new BadRequestException('deliveredQty không được âm');
+      }
+    }
+
+    let totalDeliveredQty = 0;
+    let totalOrderedQty = 0;
+    let newSubtotal = 0;
+
+    await withDeadlockRetry(() =>
+      this.ordersRepository.manager.transaction(async (em) => {
+        for (const dto of items) {
+          const oi = itemMap.get(dto.orderItemId)!;
+          const undeliveredQty = oi.quantity - dto.deliveredQty;
+          totalDeliveredQty += dto.deliveredQty;
+          totalOrderedQty += oi.quantity;
+          newSubtotal += dto.deliveredQty * Number(oi.unitPrice);
+
+          oi.quantityDelivered = dto.deliveredQty;
+          await em.save(OrderItemEntity, oi);
+
+          // Phần đã giao: giảm reserved (hàng đã rời kho thật)
+          // Phần KHÔNG giao: cộng lại quantityAvailable + giảm reserved
+          if (oi.quantity > 0) {
+            const product = await em.findOne(ProductEntity, {
+              where: { productId: oi.productId },
+              lock: { mode: 'pessimistic_write' },
+            });
+            if (!product) continue;
+
+            const releaseReserved = oi.quantity; // toàn bộ qty của line
+            product.quantityReserved = Math.max(
+              0,
+              (product.quantityReserved ?? 0) - releaseReserved,
+            );
+            // Cộng lại phần thiếu vào available
+            if (undeliveredQty > 0) {
+              const qtyBefore = product.quantityAvailable;
+              product.quantityAvailable += undeliveredQty;
+              await em.save(ProductEntity, product);
+
+              await em.save(
+                InventoryTransactionEntity,
+                em.create(InventoryTransactionEntity, {
+                  productId: product.productId,
+                  performedBy: currentUser._id,
+                  transactionType: InventoryTransactionType.RETURN_IN,
+                  quantityChange: undeliveredQty,
+                  quantityBefore: qtyBefore,
+                  quantityAfter: product.quantityAvailable,
+                  referenceType: 'ORDER',
+                  referenceId: order.orderId,
+                  unitCostAtTime: product.avgCost ?? null,
+                  note: `Partial delivery: ${dto.deliveredQty}/${oi.quantity} delivered, ${undeliveredQty} restocked`,
+                  relatedOrderId: order.orderId,
+                }),
+              );
+              await this.syncDefaultWarehouseStock(
+                em,
+                product.productId,
+                undeliveredQty,
+              );
+            } else {
+              await em.save(ProductEntity, product);
+            }
+          }
+        }
+
+        // Cập nhật order: status + total
+        const isFullyDelivered = totalDeliveredQty === totalOrderedQty;
+        order.orderStatus = isFullyDelivered
+          ? OrderStatus.DELIVERED
+          : OrderStatus.PARTIAL_DELIVERED;
+        order.totalQuantity = totalDeliveredQty;
+        // Recalc totalPayment = subtotal mới - discount + delivery
+        const newTotalPayment =
+          newSubtotal -
+          Number(order.discountAmount) +
+          Number(order.deliveryCost);
+        order.subtotalAmount = newSubtotal.toFixed(2);
+        order.totalPayment = Math.max(0, newTotalPayment).toFixed(2);
+
+        // COD: chỉ PAID nếu giao đủ
+        if (
+          isFullyDelivered &&
+          order.paymentMethod === PaymentMethod.COD
+        ) {
+          order.paymentStatus = PaymentStatus.PAID;
+        }
+
+        await em.save(OrderEntity, order);
+        await em.save(
+          OrderStatusHistoryEntity,
+          em.create(OrderStatusHistoryEntity, {
+            orderId: order.orderId,
+            oldStatus: OrderStatus.SHIPPING,
+            newStatus: order.orderStatus,
+            changedBy: currentUser._id,
+            note:
+              note ??
+              `Partial delivery: ${totalDeliveredQty}/${totalOrderedQty}`,
+          }),
+        );
+      }),
+    );
+
+    await this.notificationsService.sendOrderStatusNotification(
+      order.userId,
+      order.orderId,
+      order.orderStatus,
+    );
+
+    return this.findAnyOrder(order.orderId);
+  }
+
+  /**
+   * Admin kiểm tra hàng trả về và quyết định:
+   *   USABLE             → nhập lại kho chính
+   *   DAMAGED            → ghi DAMAGE adjustment, KHÔNG nhập kho (loss)
+   *   RETURN_TO_SUPPLIER → đánh dấu để admin tạo Supplier Return riêng
+   *
+   * Chỉ chạy được khi return đã RECEIVED + inspectionStatus = PENDING.
+   */
+  async inspectReturn(
+    currentUser: IUser,
+    returnId: string,
+    decision: ReturnInspectionStatus,
+    note?: string,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    if (decision === ReturnInspectionStatus.PENDING) {
+      throw new BadRequestException('Decision không thể là PENDING');
+    }
+
+    const returnRequest = await this.returnsRepository.findOneBy({ returnId });
+    if (!returnRequest) {
+      throw new NotFoundException('Return request not found');
+    }
+    if (returnRequest.returnStatus !== ReturnStatus.RECEIVED) {
+      throw new BadRequestException(
+        'Chỉ có thể inspect return đã RECEIVED',
+      );
+    }
+    if (returnRequest.inspectionStatus !== ReturnInspectionStatus.PENDING) {
+      throw new BadRequestException(
+        `Return này đã được inspect (${returnRequest.inspectionStatus})`,
+      );
+    }
+
+    const orderItem = await this.orderItemsRepository.findOneBy({
+      orderItemId: returnRequest.orderItemId,
+    });
+    if (!orderItem) throw new NotFoundException('Order item not found');
+
+    await this.ordersRepository.manager.transaction(async (em) => {
+      const product = await em.findOne(ProductEntity, {
+        where: { productId: orderItem.productId },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (decision === ReturnInspectionStatus.USABLE && product) {
+        // Nhập lại kho chính
+        const qtyBefore = product.quantityAvailable;
+        product.quantityAvailable += orderItem.quantity;
+        await em.save(ProductEntity, product);
+
+        await em.save(
+          InventoryTransactionEntity,
+          em.create(InventoryTransactionEntity, {
+            productId: product.productId,
+            performedBy: currentUser._id,
+            transactionType: InventoryTransactionType.RETURN_IN,
+            quantityChange: orderItem.quantity,
+            quantityBefore: qtyBefore,
+            quantityAfter: product.quantityAvailable,
+            referenceType: 'RETURN',
+            referenceId: String(returnRequest.returnId),
+            unitCostAtTime: product.avgCost ?? null,
+            note: note ?? 'Return inspection: USABLE — restocked',
+            relatedOrderId: returnRequest.orderId,
+          }),
+        );
+        await this.syncDefaultWarehouseStock(
+          em,
+          product.productId,
+          orderItem.quantity,
+        );
+      } else if (decision === ReturnInspectionStatus.DAMAGED && product) {
+        // Hỏng — KHÔNG nhập kho. Ghi DAMAGE inventory_transaction (loss).
+        await em.save(
+          InventoryTransactionEntity,
+          em.create(InventoryTransactionEntity, {
+            productId: product.productId,
+            performedBy: currentUser._id,
+            transactionType: InventoryTransactionType.DAMAGE,
+            quantityChange: 0, // không thay đổi tồn (vì chưa nhập)
+            quantityBefore: product.quantityAvailable,
+            quantityAfter: product.quantityAvailable,
+            referenceType: 'RETURN',
+            referenceId: String(returnRequest.returnId),
+            unitCostAtTime: product.avgCost ?? null,
+            note: note ?? `Return inspection: DAMAGED — written off ${orderItem.quantity} unit(s)`,
+            relatedOrderId: returnRequest.orderId,
+          }),
+        );
+      }
+      // RETURN_TO_SUPPLIER: không động vào kho. Admin sẽ tạo Supplier Return riêng.
+
+      returnRequest.inspectionStatus = decision;
+      returnRequest.inspectionNote = note ?? null;
+      returnRequest.inspectedBy = currentUser._id;
+      returnRequest.inspectedAt = new Date();
+      returnRequest.returnStatus = ReturnStatus.INSPECTED;
+      await em.save(ReturnEntity, returnRequest);
+    });
+
+    return this.returnsRepository.findOneBy({ returnId });
   }
 }

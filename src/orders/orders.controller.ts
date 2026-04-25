@@ -15,6 +15,7 @@ import {
 } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { PartialDeliverDto } from './dto/partial-deliver.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
 import { UpdateOrderTrackingLiveDto } from './dto/update-order-tracking-live.dto';
 import { UpdateOrderTrackingManualDto } from './dto/update-order-tracking-manual.dto';
@@ -77,6 +78,22 @@ export class OrdersController {
       currentUser,
       id,
       updateOrderStatusDto,
+    );
+  }
+
+  @Patch(':id/partial-deliver')
+  @RequirePermissions('manage_orders')
+  @ResponseMessage('Partial deliver order')
+  partialDeliver(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @Body() dto: PartialDeliverDto,
+  ) {
+    return this.ordersService.partialDeliverOrder(
+      currentUser,
+      id,
+      dto.items,
+      dto.note,
     );
   }
 

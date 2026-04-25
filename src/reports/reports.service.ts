@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, In, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
+import { SimpleCacheService } from '../common/simple-cache.service';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
@@ -37,6 +38,8 @@ export class ReportsService {
 
     @InjectRepository(PurchaseOrderEntity)
     private readonly poRepository: Repository<PurchaseOrderEntity>,
+
+    private readonly cache: SimpleCacheService,
   ) {}
 
   async getDashboard() {
@@ -330,6 +333,14 @@ export class ReportsService {
    * Dùng cho báo cáo tài chính, kiểm kê tài sản, đối soát kho.
    */
   async getInventoryValuation() {
+    return this.cache.getOrCompute(
+      'reports:inventory-valuation',
+      120, // TTL 2 phút — không cần realtime tuyệt đối
+      () => this.computeInventoryValuation(),
+    );
+  }
+
+  private async computeInventoryValuation() {
     const products = await this.productsRepository
       .createQueryBuilder('p')
       .select([
