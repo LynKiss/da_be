@@ -322,6 +322,85 @@ export class ReportsService {
     };
   }
 
+  // ─── Báo Cáo Giá Trị Tồn Kho ──────────────────────────────────────────────
+  /**
+   * Tổng giá trị tồn kho theo Moving Average Cost.
+   * Mỗi sản phẩm: totalValue = quantityAvailable × avgCost
+   * Total inventory value = SUM(qty × cost) trên toàn bộ catalog có tồn > 0
+   * Dùng cho báo cáo tài chính, kiểm kê tài sản, đối soát kho.
+   */
+  async getInventoryValuation() {
+    const products = await this.productsRepository
+      .createQueryBuilder('p')
+      .select([
+        'p.product_id AS productId',
+        'p.product_name AS productName',
+        'p.quantity_available AS qtyAvailable',
+        'p.quantity_reserved AS qtyReserved',
+        'p.avg_cost AS avgCost',
+        'p.cost_price AS lastCost',
+        'p.product_price AS retailPrice',
+      ])
+      .where('p.quantity_available > 0 OR p.quantity_reserved > 0')
+      .orderBy('p.quantity_available', 'DESC')
+      .getRawMany<{
+        productId: string;
+        productName: string;
+        qtyAvailable: number;
+        qtyReserved: number;
+        avgCost: string;
+        lastCost: string | null;
+        retailPrice: string;
+      }>();
+
+    const items = products.map((p) => {
+      const qtyAvail = Number(p.qtyAvailable) || 0;
+      const qtyResv = Number(p.qtyReserved) || 0;
+      const avgCost = Number(p.avgCost) || 0;
+      const retail = Number(p.retailPrice) || 0;
+      const totalQty = qtyAvail + qtyResv;
+      const totalValue = totalQty * avgCost;
+      const potentialRevenue = totalQty * retail;
+      const potentialProfit = potentialRevenue - totalValue;
+      return {
+        productId: p.productId,
+        productName: p.productName,
+        qtyAvailable: qtyAvail,
+        qtyReserved: qtyResv,
+        totalQty,
+        avgCost,
+        lastCost: Number(p.lastCost ?? 0),
+        retailPrice: retail,
+        totalValue,
+        potentialRevenue,
+        potentialProfit,
+      };
+    });
+
+    const summary = items.reduce(
+      (acc, it) => ({
+        totalProducts: acc.totalProducts + 1,
+        totalQty: acc.totalQty + it.totalQty,
+        totalValue: acc.totalValue + it.totalValue,
+        potentialRevenue: acc.potentialRevenue + it.potentialRevenue,
+        potentialProfit: acc.potentialProfit + it.potentialProfit,
+      }),
+      {
+        totalProducts: 0,
+        totalQty: 0,
+        totalValue: 0,
+        potentialRevenue: 0,
+        potentialProfit: 0,
+      },
+    );
+
+    return {
+      asOf: new Date(),
+      summary,
+      items,
+    };
+  }
+
   // ─── Sổ Kho Chi Tiết ──────────────────────────────────────────────────────
 
   async getInventoryLedger(query: QueryInventoryLedgerDto) {
@@ -394,18 +473,75 @@ export class ReportsService {
         revenue: string;
       }>();
 
-      const products = await this.productsRepository.findByIds(rows.map((r) => r.productId));
-      const costMap = Object.fromEntries(products.map((p) => [p.productId, Number(p.costPrice ?? 0)]));
+      const productIds = rows.map((r) => r.productId);
+      const products = productIds.length
+        ? await this.productsRepository.findByIds(productIds)
+        : [];
+
+      // COGS chính xác: tính từ inventory_transactions với unit_cost_at_time của từng lần xuất
+      // Fallback: avgCost (moving average) hoặc costPrice (last cost) trên ProductEntity
+      const txCogsRows = productIds.length
+        ? await this.inventoryTransactionsRepository
+            .createQueryBuilder('tx')
+            .select('tx.product_id', 'productId')
+            .addSelect(
+              'SUM(ABS(tx.quantity_change) * COALESCE(tx.unit_cost_at_time, 0))',
+              'totalCogs',
+            )
+            .addSelect(
+              'SUM(CASE WHEN tx.unit_cost_at_time IS NOT NULL THEN ABS(tx.quantity_change) ELSE 0 END)',
+              'qtyWithCost',
+            )
+            .where('tx.transaction_type = :type', { type: 'export' })
+            .andWhere('tx.product_id IN (:...pids)', { pids: productIds })
+            .andWhere('tx.related_order_id IS NOT NULL')
+            .groupBy('tx.product_id')
+            .getRawMany<{
+              productId: string;
+              totalCogs: string;
+              qtyWithCost: string;
+            }>()
+        : [];
+
+      const cogsMap = Object.fromEntries(
+        txCogsRows.map((r) => [
+          r.productId,
+          {
+            totalCogs: Number(r.totalCogs ?? 0),
+            qtyWithCost: Number(r.qtyWithCost ?? 0),
+          },
+        ]),
+      );
+
+      const fallbackCostMap = Object.fromEntries(
+        products.map((p) => [
+          p.productId,
+          Number(p.avgCost ?? 0) || Number(p.costPrice ?? 0),
+        ]),
+      );
 
       const items = rows.map((r) => {
         const revenue = Number(r.revenue);
-        const cogs = Number(r.soldQty) * (costMap[r.productId] ?? 0);
+        const soldQty = Number(r.soldQty);
+        const txData = cogsMap[r.productId];
+        const fallbackCost = fallbackCostMap[r.productId] ?? 0;
+
+        // Nếu có dữ liệu unit_cost_at_time từ inventory_transactions → ưu tiên
+        // Nếu thiếu (đơn cũ trước khi feature có) → dùng avgCost làm fallback cho phần còn thiếu
+        let cogs: number;
+        if (txData && txData.qtyWithCost > 0) {
+          const qtyMissingCost = Math.max(0, soldQty - txData.qtyWithCost);
+          cogs = txData.totalCogs + qtyMissingCost * fallbackCost;
+        } else {
+          cogs = soldQty * fallbackCost;
+        }
+
         const grossProfit = revenue - cogs;
         const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
         return {
           productId: r.productId,
           productName: r.productName,
-          soldQty: Number(r.soldQty),
+          soldQty,
           revenue,
           cogs,
           grossProfit,

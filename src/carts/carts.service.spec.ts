@@ -56,18 +56,23 @@ describe('CartsService', () => {
     productPrice: '120000.00',
     productPriceSale: '99000.00',
     quantityAvailable: 5,
+    quantityReserved: 0,
+    avgCost: '0',
     description: null,
     ratingAverage: '0.00',
     ratingCount: 0,
     isShow: true,
+    isFeatured: false,
     expiredAt: null,
     unit: 'kg',
     quantityPerBox: null,
     barcode: null,
     boxBarcode: null,
+    costPrice: null,
+    bulkPrice: null,
     createdAt: now,
     updatedAt: now,
-  };
+  } as ProductEntity;
 
   beforeEach(() => {
     cartsRepository = createRepositoryMock();

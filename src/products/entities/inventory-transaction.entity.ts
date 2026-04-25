@@ -46,6 +46,15 @@ export class InventoryTransactionEntity {
   @Column({ name: 'quantity_after', type: 'int', nullable: true })
   quantityAfter: number | null;
 
+  @Column({
+    name: 'unit_cost_at_time',
+    type: 'decimal',
+    precision: 15,
+    scale: 4,
+    nullable: true,
+  })
+  unitCostAtTime: string | null;
+
   @Column({ name: 'reference_type', type: 'varchar', length: 50, nullable: true })
   referenceType: string | null;
 

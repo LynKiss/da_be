@@ -7,6 +7,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import { withDeadlockRetry } from '../common/transaction.util';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
@@ -112,6 +113,37 @@ export class ProcurementService {
     private readonly dataSource: DataSource,
     private readonly auditLogs: AuditLogsService,
   ) {}
+
+  /**
+   * Sau khi nhập kho, tìm các đơn BACKORDERED có sản phẩm vừa nhập
+   * và đánh dấu để admin duyệt fulfill (không tự động trừ kho — cần kiểm soát).
+   * Hiện tại chỉ ghi audit log để admin biết có đơn cần xử lý.
+   */
+  private async autoFulfillBackorders(productIds: string[]): Promise<void> {
+    if (!productIds.length) return;
+    try {
+      // Đếm số đơn BACKORDERED có sản phẩm vừa nhập (không tự fulfill, chỉ flag)
+      const count = await this.dataSource
+        .createQueryBuilder()
+        .select('COUNT(DISTINCT o.order_id)', 'cnt')
+        .from('orders', 'o')
+        .innerJoin('order_items', 'oi', 'oi.order_id = o.order_id')
+        .where('o.order_status = :st', { st: 'backordered' })
+        .andWhere('oi.product_id IN (:...pids)', { pids: productIds })
+        .getRawOne<{ cnt: string }>();
+
+      if (count && Number(count.cnt) > 0) {
+        void this.auditLogs.log({
+          entityType: 'BACKORDER',
+          entityId: productIds.join(','),
+          action: 'STOCK_REPLENISHED',
+          afterData: { backorderedOrders: Number(count.cnt) },
+        });
+      }
+    } catch {
+      // Không throw — auto-fulfill là tính năng phụ
+    }
+  }
 
   // ─── PURCHASE ORDERS ─────────────────────────────────────────────────────
 
@@ -317,7 +349,7 @@ export class ProcurementService {
       throw new BadRequestException('Phiếu nhận hàng đã được xử lý');
     }
 
-    await this.dataSource.transaction(async (em) => {
+    await withDeadlockRetry(() => this.dataSource.transaction(async (em) => {
       const defaultWarehouse = await em.findOne(WarehouseEntity, { where: { isDefault: true } });
 
       for (const item of gr.items) {
@@ -336,7 +368,21 @@ export class ProcurementService {
         product.quantityAvailable += qtyGood;
         const qtyAfter = product.quantityAvailable;
 
-        // 2. Cập nhật giá vốn (ghi đè bằng giá vốn nhập mới nhất)
+        // 2. Cập nhật giá vốn — Moving Average Cost
+        //    avgCost mới = (qtyHienTai × avgCostHienTai + qtyNhap × giaNhap) / tongQty
+        //    Giúp báo cáo lãi đúng khi sản phẩm có nhiều lần nhập với giá khác nhau.
+        const currentQty = qtyBefore;
+        const currentAvg = Number(product.avgCost ?? 0);
+        const incomingCost = Number(item.landedCost);
+        const incomingQty = qtyGood;
+        const newAvg =
+          currentQty + incomingQty <= 0
+            ? incomingCost
+            : (currentQty * currentAvg + incomingQty * incomingCost) /
+              (currentQty + incomingQty);
+
+        product.avgCost = newAvg.toFixed(4);
+        // costPrice giữ lại cho tương thích ngược (giá lần nhập cuối)
         product.costPrice = item.landedCost;
 
         await em.save(ProductEntity, product);
@@ -362,6 +408,7 @@ export class ProcurementService {
           quantityAfter: qtyAfter,
           referenceType: 'GR',
           referenceId: gr.grId,
+          unitCostAtTime: item.landedCost,
           note: `Nhập kho từ phiếu ${gr.grCode}`,
           relatedOrderId: gr.grId,
         });
@@ -414,7 +461,10 @@ export class ProcurementService {
 
         await em.update(PurchaseOrderEntity, { poId: gr.poId }, { status: newPoStatus });
       }
-    });
+    }));
+
+    // Auto-fulfill backorders sau khi nhập kho thành công
+    await this.autoFulfillBackorders(gr.items.map((it) => it.productId));
 
     void this.auditLogs.log({
       entityType: 'GR',

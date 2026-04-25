@@ -66,6 +66,18 @@ export class ProductEntity {
   @Column({ name: 'quantity_available', type: 'int', default: 0 })
   quantityAvailable!: number;
 
+  @Column({ name: 'quantity_reserved', type: 'int', default: 0 })
+  quantityReserved!: number;
+
+  @Column({
+    name: 'avg_cost',
+    type: 'decimal',
+    precision: 15,
+    scale: 4,
+    default: 0,
+  })
+  avgCost!: string;
+
   @Column({ name: 'description', type: 'longtext', nullable: true })
   description!: string | null;
 

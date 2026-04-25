@@ -158,6 +158,7 @@ describe('OrdersService', () => {
       fullName: 'Alice',
       phone: '0900000000',
       address: '123 Nguyen Trai',
+      idempotencyKey: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -191,6 +192,7 @@ describe('OrdersService', () => {
       fullName: 'Alice',
       phone: '0900000000',
       address: '123 Nguyen Trai',
+      idempotencyKey: null,
       createdAt: now,
       updatedAt: now,
     };

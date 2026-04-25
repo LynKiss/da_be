@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Patch,
   Post,
@@ -30,8 +31,13 @@ export class OrdersController {
   createOrder(
     @User() currentUser: IUser,
     @Body() createOrderDto: CreateOrderDto,
+    @Headers('x-idempotency-key') idempotencyKey?: string,
   ) {
-    return this.ordersService.createOrder(currentUser._id, createOrderDto);
+    return this.ordersService.createOrder(
+      currentUser._id,
+      createOrderDto,
+      idempotencyKey?.trim() || undefined,
+    );
   }
 
   @Get()

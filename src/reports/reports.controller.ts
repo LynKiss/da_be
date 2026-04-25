@@ -36,6 +36,12 @@ export class ReportsController {
     return this.reportsService.getInventoryLedger(query);
   }
 
+  @Get('inventory-valuation')
+  @ResponseMessage('Get inventory valuation')
+  getInventoryValuation() {
+    return this.reportsService.getInventoryValuation();
+  }
+
   @Get('profitability')
   @ResponseMessage('Get profitability report')
   getProfitability(@Query() query: QueryProfitabilityDto) {

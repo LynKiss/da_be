@@ -29,6 +29,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService } from '../settings/settings.service';
 import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
+import { withDeadlockRetry } from '../common/transaction.util';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
@@ -534,6 +535,7 @@ export class OrdersService {
     nextStatus: OrderStatus,
   ) {
     const allowedTransitions: Record<OrderStatus, OrderStatus[]> = {
+      [OrderStatus.BACKORDERED]: [OrderStatus.PENDING, OrderStatus.CANCELLED],
       [OrderStatus.PENDING]: [OrderStatus.CONFIRMED, OrderStatus.CANCELLED],
       [OrderStatus.CONFIRMED]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED],
       [OrderStatus.PROCESSING]: [OrderStatus.SHIPPING, OrderStatus.CANCELLED],
@@ -557,12 +559,18 @@ export class OrdersService {
     });
 
     for (const item of items) {
-      const product = await productRepository.findOneBy({
-        productId: item.productId,
+      // Lock pessimistic khi restock — tránh race condition khi cancel song song
+      const product = await productRepository.findOne({
+        where: { productId: item.productId },
+        lock: entityManager ? { mode: 'pessimistic_write' } : undefined,
       });
 
       if (product) {
         product.quantityAvailable += item.quantity;
+        product.quantityReserved = Math.max(
+          0,
+          (product.quantityReserved ?? 0) - item.quantity,
+        );
         await productRepository.save(product);
 
         if (entityManager) {
@@ -572,6 +580,31 @@ export class OrdersService {
             item.quantity,
           );
         }
+      }
+    }
+  }
+
+  /**
+   * Khi đơn DELIVERED — không restock, chỉ giải phóng quantityReserved
+   * (hàng đã thực sự rời kho, không trả về stock).
+   */
+  private async releaseReservedOnDelivered(
+    orderId: string,
+    productRepository: Repository<ProductEntity>,
+    orderItemsRepository: Repository<OrderItemEntity>,
+  ) {
+    const items = await orderItemsRepository.find({ where: { orderId } });
+    for (const item of items) {
+      const product = await productRepository.findOne({
+        where: { productId: item.productId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (product) {
+        product.quantityReserved = Math.max(
+          0,
+          (product.quantityReserved ?? 0) - item.quantity,
+        );
+        await productRepository.save(product);
       }
     }
   }
@@ -597,9 +630,24 @@ export class OrdersService {
     await couponUsageRepository.delete({ orderId: order.orderId });
   }
 
-  async createOrder(userId: string, createOrderDto: CreateOrderDto) {
+  async createOrder(
+    userId: string,
+    createOrderDto: CreateOrderDto,
+    idempotencyKey?: string,
+  ) {
     await this.ensureUserExists(userId);
     await this.ensurePaymentMethodEnabled(createOrderDto.paymentMethod);
+
+    if (idempotencyKey) {
+      const existing = await this.ordersRepository.findOne({
+        where: { idempotencyKey, userId },
+      });
+      if (existing) {
+        return this.buildOrderDetail(
+          await this.findOwnedOrder(userId, existing.orderId),
+        );
+      }
+    }
 
     const cart = await this.cartsRepository.findOneBy({ userId });
     if (!cart) {
@@ -642,17 +690,23 @@ export class OrdersService {
 
     let subtotalAmount = 0;
     let totalQuantity = 0;
+    let isBackorder = false;
 
     for (const cartItem of cartItems) {
       const product = productsById.get(cartItem.productId);
       if (!product || !product.isShow) {
         throw new BadRequestException('One or more products are unavailable');
       }
-
+      // Pre-check: nếu hết hàng và KHÔNG cho backorder → reject sớm
+      // (lock thật sự trong transaction phía dưới)
       if (cartItem.quantity > product.quantityAvailable) {
-        throw new BadRequestException('One or more cart items exceed stock');
+        if (!createOrderDto.allowBackorder) {
+          throw new BadRequestException(
+            `Sản phẩm ${product.productName} không đủ tồn kho`,
+          );
+        }
+        isBackorder = true;
       }
-
       subtotalAmount += Number(cartItem.priceAtAdded) * cartItem.quantity;
       totalQuantity += cartItem.quantity;
     }
@@ -679,115 +733,161 @@ export class OrdersService {
     const addressSnapshot = this.buildAddressSnapshot(shippingAddress);
     const orderId = randomUUID();
 
-    await this.ordersRepository.manager.transaction(async (entityManager) => {
-      const transactionalOrdersRepository =
-        entityManager.getRepository(OrderEntity);
-      const transactionalOrderItemsRepository =
-        entityManager.getRepository(OrderItemEntity);
-      const transactionalHistoryRepository = entityManager.getRepository(
-        OrderStatusHistoryEntity,
-      );
-      const transactionalProductsRepository =
-        entityManager.getRepository(ProductEntity);
-      const transactionalCartItemsRepository =
-        entityManager.getRepository(CartItemEntity);
-      const transactionalInventoryTransactionsRepository =
-        entityManager.getRepository(InventoryTransactionEntity);
-      const transactionalDiscountsRepository =
-        entityManager.getRepository(DiscountEntity);
-      const transactionalCouponUsageRepository =
-        entityManager.getRepository(CouponUsageEntity);
+    // Stock deduction inside a transaction with pessimistic_write lock per product
+    // → tránh oversell khi nhiều request đồng thời cùng mua sản phẩm cuối cùng.
+    // → tự retry tối đa 3 lần khi gặp deadlock MySQL.
+    await withDeadlockRetry(() =>
+      this.ordersRepository.manager.transaction(async (entityManager) => {
+        const transactionalOrdersRepository =
+          entityManager.getRepository(OrderEntity);
+        const transactionalOrderItemsRepository =
+          entityManager.getRepository(OrderItemEntity);
+        const transactionalHistoryRepository = entityManager.getRepository(
+          OrderStatusHistoryEntity,
+        );
+        const transactionalProductsRepository =
+          entityManager.getRepository(ProductEntity);
+        const transactionalCartItemsRepository =
+          entityManager.getRepository(CartItemEntity);
+        const transactionalInventoryTransactionsRepository =
+          entityManager.getRepository(InventoryTransactionEntity);
+        const transactionalDiscountsRepository =
+          entityManager.getRepository(DiscountEntity);
+        const transactionalCouponUsageRepository =
+          entityManager.getRepository(CouponUsageEntity);
 
-      const defaultWarehouse = await entityManager.findOne(WarehouseEntity, {
-        where: { isDefault: true },
-      });
-
-      const order = transactionalOrdersRepository.create({
-        orderId,
-        userId,
-        shippingAddressId: shippingAddress.shippingAddressId,
-        deliveryId: deliveryMethod.deliveryId,
-        discountId: discount?.discountId ?? null,
-        orderStatus: OrderStatus.PENDING,
-        paymentMethod: createOrderDto.paymentMethod,
-        paymentStatus: PaymentStatus.UNPAID,
-        subtotalAmount: subtotalAmount.toFixed(2),
-        discountAmount: discountAmount.toFixed(2),
-        deliveryCost: deliveryCost.toFixed(2),
-        totalPayment: totalPayment.toFixed(2),
-        totalQuantity,
-        note: createOrderDto.note ?? null,
-        fullName: shippingAddress.recipientName,
-        phone: shippingAddress.phone,
-        address: addressSnapshot,
-      });
-
-      await transactionalOrdersRepository.save(order);
-
-      for (const cartItem of cartItems) {
-        const product = productsById.get(cartItem.productId);
-        if (!product) {
-          throw new BadRequestException('One or more products are unavailable');
+        // Idempotency double-check inside transaction (race window protection)
+        if (idempotencyKey) {
+          const dup = await transactionalOrdersRepository.findOne({
+            where: { idempotencyKey, userId },
+          });
+          if (dup) {
+            return;
+          }
         }
 
-        const lineTotal = Number(cartItem.priceAtAdded) * cartItem.quantity;
-
-        const orderItem = transactionalOrderItemsRepository.create({
+        const order = transactionalOrdersRepository.create({
           orderId,
-          productId: cartItem.productId,
-          productName: product.productName,
-          quantity: cartItem.quantity,
-          unitPrice: cartItem.priceAtAdded,
-          lineTotal: lineTotal.toFixed(2),
-        });
-
-        product.quantityAvailable -= cartItem.quantity;
-        await transactionalProductsRepository.save(product);
-        await transactionalOrderItemsRepository.save(orderItem);
-
-        const inventoryTransaction =
-          transactionalInventoryTransactionsRepository.create({
-            productId: product.productId,
-            performedBy: userId,
-            transactionType: InventoryTransactionType.EXPORT,
-            quantityChange: -cartItem.quantity,
-            note: 'Export by order checkout',
-            relatedOrderId: orderId,
-          });
-        await transactionalInventoryTransactionsRepository.save(
-          inventoryTransaction,
-        );
-
-        await this.syncDefaultWarehouseStock(
-          entityManager,
-          product.productId,
-          -cartItem.quantity,
-        );
-      }
-
-      if (discount) {
-        discount.usedCount += 1;
-        await transactionalDiscountsRepository.save(discount);
-
-        const couponUsage = transactionalCouponUsageRepository.create({
-          discountId: discount.discountId,
           userId,
-          orderId,
+          shippingAddressId: shippingAddress.shippingAddressId,
+          deliveryId: deliveryMethod.deliveryId,
+          discountId: discount?.discountId ?? null,
+          orderStatus: isBackorder
+            ? OrderStatus.BACKORDERED
+            : OrderStatus.PENDING,
+          paymentMethod: createOrderDto.paymentMethod,
+          paymentStatus: PaymentStatus.UNPAID,
+          subtotalAmount: subtotalAmount.toFixed(2),
+          discountAmount: discountAmount.toFixed(2),
+          deliveryCost: deliveryCost.toFixed(2),
+          totalPayment: totalPayment.toFixed(2),
+          totalQuantity,
+          note: createOrderDto.note ?? null,
+          fullName: shippingAddress.recipientName,
+          phone: shippingAddress.phone,
+          address: addressSnapshot,
+          idempotencyKey: idempotencyKey ?? null,
         });
-        await transactionalCouponUsageRepository.save(couponUsage);
-      }
 
-      const history = transactionalHistoryRepository.create({
-        orderId,
-        oldStatus: null,
-        newStatus: OrderStatus.PENDING,
-        changedBy: userId,
-        note: 'Order created',
-      });
-      await transactionalHistoryRepository.save(history);
+        await transactionalOrdersRepository.save(order);
 
-      await transactionalCartItemsRepository.delete({ cartId: cart.cartId });
-    });
+        for (const cartItem of cartItems) {
+          // Lock row pessimistic — block các request khác đọc cùng product trong khi check + trừ stock
+          const product = await transactionalProductsRepository.findOne({
+            where: { productId: cartItem.productId },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (!product || !product.isShow) {
+            throw new BadRequestException(
+              'One or more products are unavailable',
+            );
+          }
+          // Re-check inside lock (race protection)
+          const isLineBackorder =
+            cartItem.quantity > product.quantityAvailable;
+          if (isLineBackorder && !createOrderDto.allowBackorder) {
+            throw new BadRequestException(
+              `Sản phẩm ${product.productName} không đủ tồn kho`,
+            );
+          }
+
+          const lineTotal = Number(cartItem.priceAtAdded) * cartItem.quantity;
+
+          const orderItem = transactionalOrderItemsRepository.create({
+            orderId,
+            productId: cartItem.productId,
+            productName: product.productName,
+            quantity: cartItem.quantity,
+            unitPrice: cartItem.priceAtAdded,
+            lineTotal: lineTotal.toFixed(2),
+          });
+          await transactionalOrderItemsRepository.save(orderItem);
+
+          // Backorder line: KHÔNG trừ stock, KHÔNG ghi inventory transaction
+          // (sẽ xử lý sau khi nhập hàng về và admin fulfill)
+          if (isLineBackorder) {
+            continue;
+          }
+
+          const qtyBefore = product.quantityAvailable;
+          product.quantityAvailable -= cartItem.quantity;
+          product.quantityReserved =
+            (product.quantityReserved ?? 0) + cartItem.quantity;
+          await transactionalProductsRepository.save(product);
+
+          const inventoryTransaction =
+            transactionalInventoryTransactionsRepository.create({
+              productId: product.productId,
+              performedBy: userId,
+              transactionType: InventoryTransactionType.EXPORT,
+              quantityChange: -cartItem.quantity,
+              quantityBefore: qtyBefore,
+              quantityAfter: product.quantityAvailable,
+              referenceType: 'ORDER',
+              referenceId: orderId,
+              unitCostAtTime: product.avgCost ?? null,
+              note: 'Export by order checkout',
+              relatedOrderId: orderId,
+            });
+          await transactionalInventoryTransactionsRepository.save(
+            inventoryTransaction,
+          );
+
+          await this.syncDefaultWarehouseStock(
+            entityManager,
+            product.productId,
+            -cartItem.quantity,
+          );
+        }
+
+        if (discount) {
+          discount.usedCount += 1;
+          await transactionalDiscountsRepository.save(discount);
+
+          const couponUsage = transactionalCouponUsageRepository.create({
+            discountId: discount.discountId,
+            userId,
+            orderId,
+          });
+          await transactionalCouponUsageRepository.save(couponUsage);
+        }
+
+        const history = transactionalHistoryRepository.create({
+          orderId,
+          oldStatus: null,
+          newStatus: isBackorder
+            ? OrderStatus.BACKORDERED
+            : OrderStatus.PENDING,
+          changedBy: userId,
+          note: isBackorder
+            ? 'Order created (backordered — chờ nhập kho)'
+            : 'Order created',
+        });
+        await transactionalHistoryRepository.save(history);
+
+        await transactionalCartItemsRepository.delete({ cartId: cart.cartId });
+      }),
+    );
 
     const createdOrder = await this.findOwnedOrder(userId, orderId);
     await this.notificationsService.sendOrderCreatedNotification(
@@ -947,12 +1047,22 @@ export class OrdersService {
       );
 
       for (const item of items) {
+        const product = await transactionalProductsRepository.findOneBy({
+          productId: item.productId,
+        });
         const inventoryTransaction =
           transactionalInventoryTransactionsRepository.create({
             productId: item.productId,
             performedBy: userId,
             transactionType: InventoryTransactionType.RETURN_IN,
             quantityChange: item.quantity,
+            quantityBefore: product
+              ? product.quantityAvailable - item.quantity
+              : null,
+            quantityAfter: product ? product.quantityAvailable : null,
+            referenceType: 'ORDER',
+            referenceId: order.orderId,
+            unitCostAtTime: product?.avgCost ?? null,
             note: 'Restock by order cancellation',
             relatedOrderId: order.orderId,
           });
@@ -1034,10 +1144,85 @@ export class OrdersService {
       const transactionalCouponUsageRepository =
         entityManager.getRepository(CouponUsageEntity);
 
+      // BACKORDERED → PENDING: fulfill backorder, trừ stock chính thức
+      if (
+        previousStatus === OrderStatus.BACKORDERED &&
+        nextStatus === OrderStatus.PENDING
+      ) {
+        const items = await transactionalOrderItemsRepository.find({
+          where: { orderId: order.orderId },
+        });
+        for (const item of items) {
+          const product = await transactionalProductsRepository.findOne({
+            where: { productId: item.productId },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (!product) {
+            throw new BadRequestException(
+              `Sản phẩm trong đơn không còn tồn tại`,
+            );
+          }
+          if (item.quantity > product.quantityAvailable) {
+            throw new BadRequestException(
+              `Sản phẩm ${product.productName} vẫn chưa đủ tồn kho để fulfill`,
+            );
+          }
+          const qtyBefore = product.quantityAvailable;
+          product.quantityAvailable -= item.quantity;
+          product.quantityReserved =
+            (product.quantityReserved ?? 0) + item.quantity;
+          await transactionalProductsRepository.save(product);
+
+          const tx = transactionalInventoryTransactionsRepository.create({
+            productId: item.productId,
+            performedBy: currentUser._id,
+            transactionType: InventoryTransactionType.EXPORT,
+            quantityChange: -item.quantity,
+            quantityBefore: qtyBefore,
+            quantityAfter: product.quantityAvailable,
+            referenceType: 'ORDER',
+            referenceId: order.orderId,
+            unitCostAtTime: product.avgCost ?? null,
+            note: 'Export by backorder fulfillment',
+            relatedOrderId: order.orderId,
+          });
+          await transactionalInventoryTransactionsRepository.save(tx);
+          await this.syncDefaultWarehouseStock(
+            entityManager,
+            item.productId,
+            -item.quantity,
+          );
+        }
+      }
+
       if (
         nextStatus === OrderStatus.CANCELLED ||
         nextStatus === OrderStatus.RETURNED
       ) {
+        // Backorder bị cancel: KHÔNG restock vì chưa từng trừ stock
+        const isBackorderCancel =
+          previousStatus === OrderStatus.BACKORDERED &&
+          nextStatus === OrderStatus.CANCELLED;
+
+        if (isBackorderCancel) {
+          await this.revertDiscountUsage(
+            order,
+            transactionalDiscountsRepository,
+            transactionalCouponUsageRepository,
+          );
+          order.orderStatus = nextStatus;
+          await transactionalOrdersRepository.save(order);
+          const history = transactionalHistoryRepository.create({
+            orderId: order.orderId,
+            oldStatus: previousStatus,
+            newStatus: nextStatus,
+            changedBy: currentUser._id,
+            note: updateOrderStatusDto.note ?? 'Backorder cancelled',
+          });
+          await transactionalHistoryRepository.save(history);
+          return;
+        }
+
         const items = await transactionalOrderItemsRepository.find({
           where: { orderId: order.orderId },
         });
@@ -1050,12 +1235,22 @@ export class OrdersService {
         );
 
         for (const item of items) {
+          const product = await transactionalProductsRepository.findOneBy({
+            productId: item.productId,
+          });
           const inventoryTransaction =
             transactionalInventoryTransactionsRepository.create({
               productId: item.productId,
               performedBy: currentUser._id,
               transactionType: InventoryTransactionType.RETURN_IN,
               quantityChange: item.quantity,
+              quantityBefore: product
+                ? product.quantityAvailable - item.quantity
+                : null,
+              quantityAfter: product ? product.quantityAvailable : null,
+              referenceType: 'ORDER',
+              referenceId: order.orderId,
+              unitCostAtTime: product?.avgCost ?? null,
               note:
                 nextStatus === OrderStatus.CANCELLED
                   ? 'Restock by admin cancellation'
@@ -1076,15 +1271,22 @@ export class OrdersService {
         }
       }
 
-      order.orderStatus = nextStatus;
-
-      if (
-        nextStatus === OrderStatus.CONFIRMED &&
-        order.paymentMethod !== PaymentMethod.COD
-      ) {
-        order.paymentStatus = PaymentStatus.PAID;
+      // Khi DELIVERED: giải phóng reserved (hàng đã rời kho thật sự)
+      if (nextStatus === OrderStatus.DELIVERED) {
+        await this.releaseReservedOnDelivered(
+          order.orderId,
+          transactionalProductsRepository,
+          transactionalOrderItemsRepository,
+        );
       }
 
+      order.orderStatus = nextStatus;
+
+      // Payment status logic:
+      // - COD + DELIVERED → PAID (khách trả tiền khi nhận hàng)
+      // - Online (non-COD) khi CONFIRMED: KHÔNG tự đặt PAID nữa.
+      //   Phải có PaymentTransaction từ gateway hoặc admin xác nhận thủ công.
+      //   (giữ nguyên paymentStatus hiện tại — thường là UNPAID)
       if (
         nextStatus === OrderStatus.DELIVERED &&
         order.paymentMethod === PaymentMethod.COD
