@@ -6,6 +6,8 @@ import { DiscountCategoryEntity } from '../discounts/entities/discount-category.
 import { DiscountProductEntity } from '../discounts/entities/discount-product.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { UserEntity } from '../users/entities/user.entity';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { InventoryTransactionEntity } from './entities/inventory-transaction.entity';
 import { OriginEntity } from './entities/origin.entity';
 import { ProductDescriptionImageEntity } from './entities/product-description-image.entity';
@@ -40,6 +42,8 @@ import { WishlistController } from './wishlist.controller';
       ProductTagEntity,
       InventoryTransactionEntity,
       WishlistEntity,
+      WarehouseEntity,
+      WarehouseStockEntity,
       UserEntity,
       DiscountEntity,
       DiscountCategoryEntity,

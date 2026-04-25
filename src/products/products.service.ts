@@ -8,7 +8,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { NotificationChannel } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CategoryEntity } from '../categories/entities/category.entity';
@@ -90,7 +92,31 @@ export class ProductsService {
     @InjectRepository(DiscountProductEntity)
     private readonly discountProductsRepository: Repository<DiscountProductEntity>,
     private readonly notificationsService: NotificationsService,
+    private readonly dataSource: DataSource,
   ) {}
+
+  private async syncDefaultWarehouseStock(
+    em: EntityManager,
+    productId: string,
+    qtyDelta: number,
+  ): Promise<void> {
+    if (qtyDelta === 0) return;
+    const warehouse = await em.findOne(WarehouseEntity, { where: { isDefault: true } });
+    if (!warehouse) return;
+    const stock = await em.findOne(WarehouseStockEntity, {
+      where: { warehouseId: warehouse.warehouseId, productId },
+    });
+    if (stock) {
+      stock.quantity = Math.max(0, stock.quantity + qtyDelta);
+      await em.save(WarehouseStockEntity, stock);
+    } else if (qtyDelta > 0) {
+      await em.save(WarehouseStockEntity, em.create(WarehouseStockEntity, {
+        warehouseId: warehouse.warehouseId,
+        productId,
+        quantity: qtyDelta,
+      }));
+    }
+  }
 
   // ─── PRODUCTS ────────────────────────────────────────────────────────────────
 
@@ -647,24 +673,33 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    product.quantityAvailable += importInventoryDto.quantity;
-    await this.productsRepository.save(product);
+    let transactionId: string;
+    await this.dataSource.transaction(async (em) => {
+      product.quantityAvailable += importInventoryDto.quantity;
+      await em.save(ProductEntity, product);
 
-    const transaction = this.inventoryTransactionsRepository.create({
-      productId: product.productId,
-      performedBy,
-      transactionType: InventoryTransactionType.IMPORT,
-      quantityChange: importInventoryDto.quantity,
-      note: importInventoryDto.note ?? 'Import inventory by admin',
-      relatedOrderId: null,
+      const tx = em.create(InventoryTransactionEntity, {
+        productId: product.productId,
+        performedBy,
+        transactionType: InventoryTransactionType.IMPORT,
+        quantityChange: importInventoryDto.quantity,
+        note: importInventoryDto.note ?? 'Import inventory by admin',
+        relatedOrderId: null,
+      });
+      const saved = await em.save(InventoryTransactionEntity, tx);
+      transactionId = saved.transactionId;
+
+      await this.syncDefaultWarehouseStock(
+        em,
+        product.productId,
+        importInventoryDto.quantity,
+      );
     });
-
-    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       quantityAvailable: product.quantityAvailable,
-      transactionId: saved.transactionId,
+      transactionId: transactionId!,
     };
   }
 
@@ -686,14 +721,10 @@ export class ProductsService {
     if (adjustInventoryDto.mode === InventoryAdjustmentMode.SET) {
       quantityChange = adjustInventoryDto.quantity - previousQuantity;
       product.quantityAvailable = adjustInventoryDto.quantity;
-    }
-
-    if (adjustInventoryDto.mode === InventoryAdjustmentMode.INCREASE) {
+    } else if (adjustInventoryDto.mode === InventoryAdjustmentMode.INCREASE) {
       quantityChange = adjustInventoryDto.quantity;
       product.quantityAvailable += adjustInventoryDto.quantity;
-    }
-
-    if (adjustInventoryDto.mode === InventoryAdjustmentMode.DECREASE) {
+    } else if (adjustInventoryDto.mode === InventoryAdjustmentMode.DECREASE) {
       if (adjustInventoryDto.quantity > product.quantityAvailable) {
         throw new BadRequestException('Quantity exceeds available stock');
       }
@@ -701,27 +732,36 @@ export class ProductsService {
       product.quantityAvailable -= adjustInventoryDto.quantity;
     }
 
-    await this.productsRepository.save(product);
+    let transactionId: string;
+    await this.dataSource.transaction(async (em) => {
+      await em.save(ProductEntity, product);
 
-    const transaction = this.inventoryTransactionsRepository.create({
-      productId: product.productId,
-      performedBy,
-      transactionType: InventoryTransactionType.ADJUSTMENT,
-      quantityChange,
-      note:
-        adjustInventoryDto.note ??
-        `Adjustment mode: ${adjustInventoryDto.mode}`,
-      relatedOrderId: null,
+      const tx = em.create(InventoryTransactionEntity, {
+        productId: product.productId,
+        performedBy,
+        transactionType: InventoryTransactionType.ADJUSTMENT,
+        quantityChange,
+        note:
+          adjustInventoryDto.note ??
+          `Adjustment mode: ${adjustInventoryDto.mode}`,
+        relatedOrderId: null,
+      });
+      const saved = await em.save(InventoryTransactionEntity, tx);
+      transactionId = saved.transactionId;
+
+      await this.syncDefaultWarehouseStock(
+        em,
+        product.productId,
+        quantityChange,
+      );
     });
-
-    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       previousQuantity,
       currentQuantity: product.quantityAvailable,
       quantityChange,
-      transactionId: saved.transactionId,
+      transactionId: transactionId!,
     };
   }
 
@@ -735,29 +775,37 @@ export class ProductsService {
     }
 
     if (dto.quantity > product.quantityAvailable) {
-      throw new BadRequestException(
-        'Damage quantity exceeds available stock',
-      );
+      throw new BadRequestException('Damage quantity exceeds available stock');
     }
 
     product.quantityAvailable -= dto.quantity;
-    await this.productsRepository.save(product);
 
-    const transaction = this.inventoryTransactionsRepository.create({
-      productId: product.productId,
-      performedBy,
-      transactionType: InventoryTransactionType.DAMAGE,
-      quantityChange: -dto.quantity,
-      note: dto.note ?? 'Damage/expired goods recorded',
-      relatedOrderId: null,
+    let transactionId: string;
+    await this.dataSource.transaction(async (em) => {
+      await em.save(ProductEntity, product);
+
+      const tx = em.create(InventoryTransactionEntity, {
+        productId: product.productId,
+        performedBy,
+        transactionType: InventoryTransactionType.DAMAGE,
+        quantityChange: -dto.quantity,
+        note: dto.note ?? 'Damage/expired goods recorded',
+        relatedOrderId: null,
+      });
+      const saved = await em.save(InventoryTransactionEntity, tx);
+      transactionId = saved.transactionId;
+
+      await this.syncDefaultWarehouseStock(
+        em,
+        product.productId,
+        -dto.quantity,
+      );
     });
-
-    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       quantityAvailable: product.quantityAvailable,
-      transactionId: saved.transactionId,
+      transactionId: transactionId!,
     };
   }
 
@@ -771,23 +819,29 @@ export class ProductsService {
     }
 
     product.quantityAvailable += dto.quantity;
-    await this.productsRepository.save(product);
 
-    const transaction = this.inventoryTransactionsRepository.create({
-      productId: product.productId,
-      performedBy,
-      transactionType: InventoryTransactionType.RETURN_IN,
-      quantityChange: dto.quantity,
-      note: dto.note ?? 'Return goods recorded',
-      relatedOrderId: dto.relatedOrderId ?? null,
+    let transactionId: string;
+    await this.dataSource.transaction(async (em) => {
+      await em.save(ProductEntity, product);
+
+      const tx = em.create(InventoryTransactionEntity, {
+        productId: product.productId,
+        performedBy,
+        transactionType: InventoryTransactionType.RETURN_IN,
+        quantityChange: dto.quantity,
+        note: dto.note ?? 'Return goods recorded',
+        relatedOrderId: dto.relatedOrderId ?? null,
+      });
+      const saved = await em.save(InventoryTransactionEntity, tx);
+      transactionId = saved.transactionId;
+
+      await this.syncDefaultWarehouseStock(em, product.productId, dto.quantity);
     });
-
-    const saved = await this.inventoryTransactionsRepository.save(transaction);
 
     return {
       productId: product.productId,
       quantityAvailable: product.quantityAvailable,
-      transactionId: saved.transactionId,
+      transactionId: transactionId!,
     };
   }
 

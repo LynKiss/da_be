@@ -1,7 +1,10 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuditLogsModule } from '../audit-logs/audit-logs.module';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { GoodsReceiptItemEntity } from './entities/goods-receipt-item.entity';
 import { GoodsReceiptEntity } from './entities/goods-receipt.entity';
 import { ProductCostHistoryEntity } from './entities/product-cost-history.entity';
@@ -14,6 +17,7 @@ import { ProcurementService } from './procurement.service';
 
 @Module({
   imports: [
+    AuditLogsModule,
     TypeOrmModule.forFeature([
       PurchaseOrderEntity,
       PurchaseOrderItemEntity,
@@ -24,6 +28,8 @@ import { ProcurementService } from './procurement.service';
       ProductCostHistoryEntity,
       ProductEntity,
       InventoryTransactionEntity,
+      WarehouseEntity,
+      WarehouseStockEntity,
     ]),
   ],
   controllers: [ProcurementController],

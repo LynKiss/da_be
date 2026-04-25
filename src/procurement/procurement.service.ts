@@ -6,8 +6,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { CreateGrDto } from './dto/create-gr.dto';
 import { CreatePoDto } from './dto/create-po.dto';
 import { CreateSrDto } from './dto/create-sr.dto';
@@ -107,6 +110,7 @@ export class ProcurementService {
     private readonly txRepo: Repository<InventoryTransactionEntity>,
 
     private readonly dataSource: DataSource,
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   // ─── PURCHASE ORDERS ─────────────────────────────────────────────────────
@@ -139,7 +143,7 @@ export class ProcurementService {
     return po;
   }
 
-  async createPo(dto: CreatePoDto, userId?: string) {
+  async createPo(dto: CreatePoDto, performer?: { userId: string; username: string; ip?: string }) {
     const po = this.poRepo.create({
       poId: uuidv4(),
       poCode: genCode('PO'),
@@ -150,7 +154,7 @@ export class ProcurementService {
       shippingCost: String(dto.shippingCost ?? 0),
       otherCost: String(dto.otherCost ?? 0),
       notes: dto.notes ?? null,
-      createdBy: userId ?? null,
+      createdBy: performer?.userId ?? null,
     });
 
     let totalAmount = 0;
@@ -171,16 +175,36 @@ export class ProcurementService {
     po.totalAmount = String(totalAmount);
     po.items = items;
 
-    return this.poRepo.save(po);
+    const saved = await this.poRepo.save(po);
+    void this.auditLogs.log({
+      entityType: 'PO',
+      entityId: saved.poId,
+      action: 'CREATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { poCode: saved.poCode, supplierId: saved.supplierId, totalAmount: saved.totalAmount },
+    });
+    return saved;
   }
 
-  async updatePoStatus(id: string, status: PurchaseOrderStatus) {
+  async updatePoStatus(id: string, status: PurchaseOrderStatus, performer?: { userId: string; username: string; ip?: string }) {
     const po = await this.findOnePo(id);
     if (po.status === PurchaseOrderStatus.CANCELLED) {
       throw new BadRequestException('Phiếu đã hủy không thể thay đổi trạng thái');
     }
+    const before = { status: po.status };
     po.status = status;
-    return this.poRepo.save(po);
+    const saved = await this.poRepo.save(po);
+    void this.auditLogs.log({
+      entityType: 'PO',
+      entityId: id,
+      action: status === PurchaseOrderStatus.CANCELLED ? 'CANCEL' : 'UPDATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: before,
+      afterData: { status },
+    });
+    return saved;
   }
 
   // ─── GOODS RECEIPTS ───────────────────────────────────────────────────────
@@ -208,7 +232,7 @@ export class ProcurementService {
     return gr;
   }
 
-  async createGr(dto: CreateGrDto, userId?: string) {
+  async createGr(dto: CreateGrDto, performer?: { userId: string; username: string; ip?: string }) {
     const shippingCost = dto.shippingCost ?? 0;
     const otherCost = dto.otherCost ?? 0;
     const totalExtraCost = shippingCost + otherCost;
@@ -229,7 +253,7 @@ export class ProcurementService {
       otherCost: String(otherCost),
       status: GoodsReceiptStatus.DRAFT,
       notes: dto.notes ?? null,
-      createdBy: userId ?? null,
+      createdBy: performer?.userId ?? null,
     });
 
     const items = dto.items.map((i) => {
@@ -266,7 +290,16 @@ export class ProcurementService {
     });
 
     gr.items = items;
-    return this.grRepo.save(gr);
+    const saved = await this.grRepo.save(gr);
+    void this.auditLogs.log({
+      entityType: 'GR',
+      entityId: saved.grId,
+      action: 'CREATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { grCode: saved.grCode, supplierId: saved.supplierId, poId: saved.poId },
+    });
+    return saved;
   }
 
   /**
@@ -277,7 +310,7 @@ export class ProcurementService {
    *  4. Tạo inventory_transaction (type = import)
    *  5. Nếu có PO → cập nhật qty_received + status PO
    */
-  async confirmGr(id: string, userId?: string) {
+  async confirmGr(id: string, performer?: { userId: string; username: string; ip?: string }) {
     const gr = await this.findOneGr(id);
 
     if (gr.status !== GoodsReceiptStatus.DRAFT) {
@@ -285,6 +318,8 @@ export class ProcurementService {
     }
 
     await this.dataSource.transaction(async (em) => {
+      const defaultWarehouse = await em.findOne(WarehouseEntity, { where: { isDefault: true } });
+
       for (const item of gr.items) {
         const qtyGood =
           item.qtyReceived - item.qtyReturned;
@@ -320,7 +355,7 @@ export class ProcurementService {
         // 4. Inventory transaction
         const tx = em.create(InventoryTransactionEntity, {
           productId: item.productId,
-          performedBy: userId ?? null,
+          performedBy: performer?.userId ?? null,
           transactionType: InventoryTransactionType.IMPORT,
           quantityChange: qtyGood,
           quantityBefore: qtyBefore,
@@ -332,7 +367,24 @@ export class ProcurementService {
         });
         await em.save(InventoryTransactionEntity, tx);
 
-        // 5. Cập nhật qty_received trên PO item (nếu có)
+        // 5. Cập nhật warehouse_stock cho kho mặc định
+        if (defaultWarehouse) {
+          const stock = await em.findOne(WarehouseStockEntity, {
+            where: { warehouseId: defaultWarehouse.warehouseId, productId: item.productId },
+          });
+          if (stock) {
+            stock.quantity += qtyGood;
+            await em.save(WarehouseStockEntity, stock);
+          } else {
+            await em.save(WarehouseStockEntity, em.create(WarehouseStockEntity, {
+              warehouseId: defaultWarehouse.warehouseId,
+              productId: item.productId,
+              quantity: qtyGood,
+            }));
+          }
+        }
+
+        // 6. Cập nhật qty_received trên PO item (nếu có)
         if (gr.poId) {
           await em
             .createQueryBuilder()
@@ -364,15 +416,32 @@ export class ProcurementService {
       }
     });
 
+    void this.auditLogs.log({
+      entityType: 'GR',
+      entityId: id,
+      action: 'CONFIRM',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { grCode: gr.grCode, status: GoodsReceiptStatus.CONFIRMED },
+    });
     return this.findOneGr(id);
   }
 
-  async cancelGr(id: string) {
+  async cancelGr(id: string, performer?: { userId: string; username: string; ip?: string }) {
     const gr = await this.findOneGr(id);
     if (gr.status === GoodsReceiptStatus.CONFIRMED) {
       throw new BadRequestException('Không thể hủy phiếu đã xác nhận. Hãy tạo phiếu trả hàng.');
     }
     await this.grRepo.update({ grId: id }, { status: GoodsReceiptStatus.CANCELLED });
+    void this.auditLogs.log({
+      entityType: 'GR',
+      entityId: id,
+      action: 'CANCEL',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: { status: gr.status },
+      afterData: { status: GoodsReceiptStatus.CANCELLED },
+    });
     return this.findOneGr(id);
   }
 
@@ -399,7 +468,7 @@ export class ProcurementService {
     return sr;
   }
 
-  async createSr(dto: CreateSrDto, userId?: string) {
+  async createSr(dto: CreateSrDto, performer?: { userId: string; username: string; ip?: string }) {
     const totalRefund = dto.items.reduce(
       (sum, i) => sum + (i.hasRefund !== false ? (i.refundAmount ?? i.qtyReturned * i.unitPrice) : 0),
       0,
@@ -414,7 +483,7 @@ export class ProcurementService {
       status: SupplierReturnStatus.DRAFT,
       totalRefund: String(totalRefund),
       notes: dto.notes ?? null,
-      createdBy: userId ?? null,
+      createdBy: performer?.userId ?? null,
     });
 
     const items = dto.items.map((i) =>
@@ -433,16 +502,27 @@ export class ProcurementService {
       }),
     );
     sr.items = items;
-    return this.srRepo.save(sr);
+    const saved = await this.srRepo.save(sr);
+    void this.auditLogs.log({
+      entityType: 'SR',
+      entityId: saved.srId,
+      action: 'CREATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { srCode: saved.srCode, supplierId: saved.supplierId, totalRefund: saved.totalRefund },
+    });
+    return saved;
   }
 
-  async confirmSr(id: string, userId?: string) {
+  async confirmSr(id: string, performer?: { userId: string; username: string; ip?: string }) {
     const sr = await this.findOneSr(id);
     if (sr.status !== SupplierReturnStatus.DRAFT) {
       throw new BadRequestException('Phiếu trả hàng đã được xử lý');
     }
 
     await this.dataSource.transaction(async (em) => {
+      const defaultWarehouse = await em.findOne(WarehouseEntity, { where: { isDefault: true } });
+
       for (const item of sr.items) {
         const product = await em.findOne(ProductEntity, {
           where: { productId: item.productId },
@@ -457,7 +537,7 @@ export class ProcurementService {
 
         const tx = em.create(InventoryTransactionEntity, {
           productId: item.productId,
-          performedBy: userId ?? null,
+          performedBy: performer?.userId ?? null,
           transactionType: InventoryTransactionType.RETURN_OUT,
           quantityChange: -item.qtyReturned,
           quantityBefore: qtyBefore,
@@ -468,11 +548,30 @@ export class ProcurementService {
           relatedOrderId: sr.srId,
         });
         await em.save(InventoryTransactionEntity, tx);
+
+        // Trừ warehouse_stock kho mặc định
+        if (defaultWarehouse) {
+          const stock = await em.findOne(WarehouseStockEntity, {
+            where: { warehouseId: defaultWarehouse.warehouseId, productId: item.productId },
+          });
+          if (stock) {
+            stock.quantity = Math.max(0, stock.quantity - item.qtyReturned);
+            await em.save(WarehouseStockEntity, stock);
+          }
+        }
       }
 
       await em.update(SupplierReturnEntity, { srId: id }, { status: SupplierReturnStatus.CONFIRMED });
     });
 
+    void this.auditLogs.log({
+      entityType: 'SR',
+      entityId: id,
+      action: 'CONFIRM',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { srCode: sr.srCode, status: SupplierReturnStatus.CONFIRMED },
+    });
     return this.findOneSr(id);
   }
 

@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { InjectRepository } from '@nestjs/typeorm';
 import { Like, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { QuerySuppliersDto } from './dto/query-suppliers.dto';
 import { SupplierEntity } from './entities/supplier.entity';
@@ -11,6 +12,7 @@ export class SuppliersService {
   constructor(
     @InjectRepository(SupplierEntity)
     private readonly repo: Repository<SupplierEntity>,
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   async findAll(query: QuerySuppliersDto) {
@@ -42,10 +44,12 @@ export class SuppliersService {
     return s;
   }
 
-  async create(dto: CreateSupplierDto) {
+  async create(dto: CreateSupplierDto, performer?: { userId: string; username: string; ip?: string }) {
+    const nameDup = await this.repo.findOne({ where: { name: dto.name } });
+    if (nameDup) throw new ConflictException('Tên nhà cung cấp đã tồn tại');
     if (dto.code) {
-      const exist = await this.repo.findOne({ where: { code: dto.code } });
-      if (exist) throw new ConflictException('Mã nhà cung cấp đã tồn tại');
+      const codeDup = await this.repo.findOne({ where: { code: dto.code } });
+      if (codeDup) throw new ConflictException('Mã nhà cung cấp đã tồn tại');
     }
     const entity = this.repo.create({
       supplierId: uuidv4(),
@@ -60,15 +64,29 @@ export class SuppliersService {
       notes: dto.notes ?? null,
       isActive: true,
     });
-    return this.repo.save(entity);
+    const saved = await this.repo.save(entity);
+    void this.auditLogs.log({
+      entityType: 'SUPPLIER',
+      entityId: saved.supplierId,
+      action: 'CREATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { name: saved.name, code: saved.code },
+    });
+    return saved;
   }
 
-  async update(id: string, dto: Partial<CreateSupplierDto>) {
+  async update(id: string, dto: Partial<CreateSupplierDto>, performer?: { userId: string; username: string; ip?: string }) {
     const s = await this.findOne(id);
-    if (dto.code && dto.code !== s.code) {
-      const exist = await this.repo.findOne({ where: { code: dto.code } });
-      if (exist) throw new ConflictException('Mã nhà cung cấp đã tồn tại');
+    if (dto.name && dto.name !== s.name) {
+      const nameDup = await this.repo.findOne({ where: { name: dto.name } });
+      if (nameDup) throw new ConflictException('Tên nhà cung cấp đã tồn tại');
     }
+    if (dto.code && dto.code !== s.code) {
+      const codeDup = await this.repo.findOne({ where: { code: dto.code } });
+      if (codeDup) throw new ConflictException('Mã nhà cung cấp đã tồn tại');
+    }
+    const before = { name: s.name, code: s.code, isActive: s.isActive };
     Object.assign(s, {
       name: dto.name ?? s.name,
       code: dto.code !== undefined ? (dto.code ?? null) : s.code,
@@ -80,13 +98,34 @@ export class SuppliersService {
       paymentTerms: dto.paymentTerms ?? s.paymentTerms,
       notes: dto.notes !== undefined ? (dto.notes ?? null) : s.notes,
     });
-    return this.repo.save(s);
+    const saved = await this.repo.save(s);
+    void this.auditLogs.log({
+      entityType: 'SUPPLIER',
+      entityId: id,
+      action: 'UPDATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: before,
+      afterData: { name: saved.name, code: saved.code },
+    });
+    return saved;
   }
 
-  async toggleActive(id: string) {
+  async toggleActive(id: string, performer?: { userId: string; username: string; ip?: string }) {
     const s = await this.findOne(id);
+    const before = { isActive: s.isActive };
     s.isActive = !s.isActive;
-    return this.repo.save(s);
+    const saved = await this.repo.save(s);
+    void this.auditLogs.log({
+      entityType: 'SUPPLIER',
+      entityId: id,
+      action: 'UPDATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: before,
+      afterData: { isActive: saved.isActive },
+    });
+    return saved;
   }
 
   async findAllActive() {

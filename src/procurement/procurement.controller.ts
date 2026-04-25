@@ -16,6 +16,18 @@ import { QueryProcurementDto } from './dto/query-procurement.dto';
 import { PurchaseOrderStatus } from './entities/purchase-order.entity';
 import { ProcurementService } from './procurement.service';
 
+function getPerformer(req: any, ip?: string) {
+  const user = req.user;
+  if (!user?._id) return undefined;
+  return { userId: user._id as string, username: user.username as string, ip };
+}
+
+function getIp(req: any): string | undefined {
+  return (req.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+    ?? req.ip
+    ?? undefined;
+}
+
 @Controller('procurement')
 export class ProcurementController {
   constructor(private readonly service: ProcurementService) {}
@@ -40,7 +52,7 @@ export class ProcurementController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Create purchase order')
   createPo(@Body() dto: CreatePoDto, @Request() req: any) {
-    return this.service.createPo(dto, req.user?.userId);
+    return this.service.createPo(dto, getPerformer(req, getIp(req)));
   }
 
   @Patch('purchase-orders/:id/status')
@@ -49,8 +61,9 @@ export class ProcurementController {
   updatePoStatus(
     @Param('id') id: string,
     @Body('status') status: PurchaseOrderStatus,
+    @Request() req: any,
   ) {
-    return this.service.updatePoStatus(id, status);
+    return this.service.updatePoStatus(id, status, getPerformer(req, getIp(req)));
   }
 
   // ─── Goods Receipts ───────────────────────────────────────────────────────
@@ -73,7 +86,7 @@ export class ProcurementController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Create goods receipt')
   createGr(@Body() dto: CreateGrDto, @Request() req: any) {
-    return this.service.createGr(dto, req.user?.userId);
+    return this.service.createGr(dto, getPerformer(req, getIp(req)));
   }
 
   @Post('goods-receipts/preview-cost')
@@ -87,14 +100,14 @@ export class ProcurementController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Confirm goods receipt')
   confirmGr(@Param('id') id: string, @Request() req: any) {
-    return this.service.confirmGr(id, req.user?.userId);
+    return this.service.confirmGr(id, getPerformer(req, getIp(req)));
   }
 
   @Patch('goods-receipts/:id/cancel')
   @RequirePermissions('manage_products')
   @ResponseMessage('Cancel goods receipt')
-  cancelGr(@Param('id') id: string) {
-    return this.service.cancelGr(id);
+  cancelGr(@Param('id') id: string, @Request() req: any) {
+    return this.service.cancelGr(id, getPerformer(req, getIp(req)));
   }
 
   // ─── Supplier Returns ─────────────────────────────────────────────────────
@@ -117,14 +130,14 @@ export class ProcurementController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Create supplier return')
   createSr(@Body() dto: CreateSrDto, @Request() req: any) {
-    return this.service.createSr(dto, req.user?.userId);
+    return this.service.createSr(dto, getPerformer(req, getIp(req)));
   }
 
   @Patch('supplier-returns/:id/confirm')
   @RequirePermissions('manage_products')
   @ResponseMessage('Confirm supplier return')
   confirmSr(@Param('id') id: string, @Request() req: any) {
-    return this.service.confirmSr(id, req.user?.userId);
+    return this.service.confirmSr(id, getPerformer(req, getIp(req)));
   }
 
   // ─── Cost History ─────────────────────────────────────────────────────────

@@ -9,6 +9,8 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { SettingsModule } from '../settings/settings.module';
 import { UserEntity } from '../users/entities/user.entity';
 import { DeliveryMethodsController } from './delivery-methods.controller';
@@ -41,6 +43,8 @@ import { OrdersService } from './orders.service';
       CartItemEntity,
       ProductEntity,
       InventoryTransactionEntity,
+      WarehouseEntity,
+      WarehouseStockEntity,
       UserEntity,
       DiscountEntity,
       DiscountCategoryEntity,

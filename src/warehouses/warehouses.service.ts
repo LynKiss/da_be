@@ -301,6 +301,13 @@ export class WarehousesService {
     }
 
     await this.dataSource.transaction(async (em) => {
+      // Xác định kho áp dụng: dùng kho được chỉ định hoặc kho mặc định
+      const warehouseId =
+        adj.warehouseId ??
+        (await em.findOne(WarehouseEntity, { where: { isDefault: true } }))
+          ?.warehouseId ??
+        null;
+
       for (const item of adj.items) {
         const product = await em.findOne(ProductEntity, {
           where: { productId: item.productId },
@@ -318,26 +325,53 @@ export class WarehousesService {
               ? InventoryTransactionType.ADJUSTMENT
               : InventoryTransactionType.DAMAGE;
 
-          await em.save(InventoryTransactionEntity, em.create(InventoryTransactionEntity, {
-            productId: item.productId,
-            performedBy: userId ?? null,
-            transactionType: txType,
-            quantityChange: item.qtyDiff,
-            quantityBefore: qtyBefore,
-            quantityAfter: item.qtyAfter,
-            referenceType: 'ADJ',
-            referenceId: adj.adjustmentId,
-            note: `Điều chỉnh kho theo phiếu ${adj.adjustmentCode} — lý do: ${adj.reason}`,
-            relatedOrderId: adj.adjustmentId,
-          }));
+          await em.save(
+            InventoryTransactionEntity,
+            em.create(InventoryTransactionEntity, {
+              productId: item.productId,
+              performedBy: userId ?? null,
+              transactionType: txType,
+              quantityChange: item.qtyDiff,
+              quantityBefore: qtyBefore,
+              quantityAfter: item.qtyAfter,
+              referenceType: 'ADJ',
+              referenceId: adj.adjustmentId,
+              note: `Điều chỉnh kho theo phiếu ${adj.adjustmentCode} — lý do: ${adj.reason}`,
+              relatedOrderId: adj.adjustmentId,
+            }),
+          );
+
+          // Đồng bộ warehouse_stock
+          if (warehouseId) {
+            const stock = await em.findOne(WarehouseStockEntity, {
+              where: { warehouseId, productId: item.productId },
+            });
+            if (stock) {
+              stock.quantity = Math.max(0, stock.quantity + item.qtyDiff);
+              await em.save(WarehouseStockEntity, stock);
+            } else if (item.qtyDiff > 0) {
+              await em.save(
+                WarehouseStockEntity,
+                em.create(WarehouseStockEntity, {
+                  warehouseId,
+                  productId: item.productId,
+                  quantity: item.qtyDiff,
+                }),
+              );
+            }
+          }
         }
       }
 
-      await em.update(StockAdjustmentEntity, { adjustmentId: id }, {
-        status: AdjustmentStatus.APPROVED,
-        approvedBy: userId ?? null,
-        approvedAt: new Date(),
-      });
+      await em.update(
+        StockAdjustmentEntity,
+        { adjustmentId: id },
+        {
+          status: AdjustmentStatus.APPROVED,
+          approvedBy: userId ?? null,
+          approvedAt: new Date(),
+        },
+      );
     });
 
     return this.findOneAdjustment(id);

@@ -216,6 +216,16 @@ export class CategoriesService {
       );
     }
 
+    const productCount = await this.productsRepository.count({
+      where: { categoryId },
+    });
+
+    if (productCount > 0) {
+      throw new BadRequestException(
+        `Cannot delete category: ${productCount} product(s) are still assigned to it`,
+      );
+    }
+
     await this.categoriesRepository.remove(category);
 
     return { success: true };

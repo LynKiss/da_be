@@ -7,7 +7,9 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
+import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
+import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { CartItemEntity } from '../carts/entities/cart-item.entity';
 import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { DiscountCategoryEntity } from '../discounts/entities/discount-category.entity';
@@ -99,6 +101,34 @@ export class OrdersService {
     private readonly notificationsService: NotificationsService,
     private readonly settingsService: SettingsService,
   ) {}
+
+  private async syncDefaultWarehouseStock(
+    em: EntityManager,
+    productId: string,
+    qtyDelta: number,
+  ): Promise<void> {
+    if (qtyDelta === 0) return;
+    const warehouse = await em.findOne(WarehouseEntity, {
+      where: { isDefault: true },
+    });
+    if (!warehouse) return;
+    const stock = await em.findOne(WarehouseStockEntity, {
+      where: { warehouseId: warehouse.warehouseId, productId },
+    });
+    if (stock) {
+      stock.quantity = Math.max(0, stock.quantity + qtyDelta);
+      await em.save(WarehouseStockEntity, stock);
+    } else if (qtyDelta > 0) {
+      await em.save(
+        WarehouseStockEntity,
+        em.create(WarehouseStockEntity, {
+          warehouseId: warehouse.warehouseId,
+          productId,
+          quantity: qtyDelta,
+        }),
+      );
+    }
+  }
 
   private async ensureUserExists(userId: string) {
     const user = await this.usersRepository.findOneBy({ userId });
@@ -520,6 +550,7 @@ export class OrdersService {
     orderId: string,
     productRepository: Repository<ProductEntity>,
     orderItemsRepository: Repository<OrderItemEntity>,
+    entityManager?: EntityManager,
   ) {
     const items = await orderItemsRepository.find({
       where: { orderId },
@@ -533,6 +564,14 @@ export class OrdersService {
       if (product) {
         product.quantityAvailable += item.quantity;
         await productRepository.save(product);
+
+        if (entityManager) {
+          await this.syncDefaultWarehouseStock(
+            entityManager,
+            item.productId,
+            item.quantity,
+          );
+        }
       }
     }
   }
@@ -659,6 +698,10 @@ export class OrdersService {
       const transactionalCouponUsageRepository =
         entityManager.getRepository(CouponUsageEntity);
 
+      const defaultWarehouse = await entityManager.findOne(WarehouseEntity, {
+        where: { isDefault: true },
+      });
+
       const order = transactionalOrdersRepository.create({
         orderId,
         userId,
@@ -713,6 +756,12 @@ export class OrdersService {
           });
         await transactionalInventoryTransactionsRepository.save(
           inventoryTransaction,
+        );
+
+        await this.syncDefaultWarehouseStock(
+          entityManager,
+          product.productId,
+          -cartItem.quantity,
         );
       }
 
@@ -894,6 +943,7 @@ export class OrdersService {
         order.orderId,
         transactionalProductsRepository,
         transactionalOrderItemsRepository,
+        entityManager,
       );
 
       for (const item of items) {
@@ -996,6 +1046,7 @@ export class OrdersService {
           order.orderId,
           transactionalProductsRepository,
           transactionalOrderItemsRepository,
+          entityManager,
         );
 
         for (const item of items) {
@@ -1516,19 +1567,28 @@ export class OrdersService {
         productId: orderItem.productId,
       });
       if (product) {
-        product.quantityAvailable += orderItem.quantity;
-        await this.productsRepository.save(product);
+        await this.ordersRepository.manager.transaction(async (em) => {
+          product.quantityAvailable += orderItem.quantity;
+          await em.save(ProductEntity, product);
 
-        const inventoryTransaction =
-          this.inventoryTransactionsRepository.create({
-            productId: product.productId,
-            performedBy: currentUser._id,
-            transactionType: InventoryTransactionType.RETURN_IN,
-            quantityChange: orderItem.quantity,
-            note: updateReturnStatusDto.note ?? 'Return received by admin',
-            relatedOrderId: returnRequest.orderId,
-          });
-        await this.inventoryTransactionsRepository.save(inventoryTransaction);
+          await em.save(
+            InventoryTransactionEntity,
+            em.create(InventoryTransactionEntity, {
+              productId: product.productId,
+              performedBy: currentUser._id,
+              transactionType: InventoryTransactionType.RETURN_IN,
+              quantityChange: orderItem.quantity,
+              note: updateReturnStatusDto.note ?? 'Return received by admin',
+              relatedOrderId: returnRequest.orderId,
+            }),
+          );
+
+          await this.syncDefaultWarehouseStock(
+            em,
+            product.productId,
+            orderItem.quantity,
+          );
+        });
       }
     }
 
