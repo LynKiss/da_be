@@ -10,6 +10,7 @@ import { CommonModule } from './common/common.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingInterceptor } from './common/interceptors/logging/logging.interceptor';
 import { HealthModule } from './health/health.module';
+import { IntelligenceModule } from './intelligence/intelligence.module';
 import { typeOrmConfig } from './config/typeorm.config';
 import { DatabasesModule } from './databases/databases.module';
 import { PermissionsModule } from './permissions/permissions.module';
@@ -65,6 +66,7 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module';
     WarehousesModule,
     CreditLimitsModule,
     AuditLogsModule,
+    IntelligenceModule,
     HealthModule,
   ],
   controllers: [AppController],
