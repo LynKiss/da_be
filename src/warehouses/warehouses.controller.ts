@@ -3,6 +3,18 @@ import { RequirePermissions, ResponseMessage } from '../decorator/customize';
 import { AdjustmentReason } from './entities/stock-adjustment.entity';
 import { WarehousesService } from './warehouses.service';
 
+function getPerformer(req: any, ip?: string) {
+  const user = req.user;
+  if (!user?._id) return undefined;
+  return { userId: user._id as string, username: user.username as string, ip };
+}
+
+function getIp(req: any): string | undefined {
+  return (req.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+    ?? req.ip
+    ?? undefined;
+}
+
 @Controller('warehouses')
 export class WarehousesController {
   constructor(private readonly service: WarehousesService) {}
@@ -33,15 +45,18 @@ export class WarehousesController {
   @Post()
   @RequirePermissions('manage_products')
   @ResponseMessage('Create warehouse')
-  create(@Body() dto: { name: string; code?: string; address?: string; managerName?: string; phone?: string }) {
-    return this.service.create(dto);
+  create(
+    @Body() dto: { name: string; code?: string; address?: string; managerName?: string; phone?: string },
+    @Request() req: any,
+  ) {
+    return this.service.create(dto, getPerformer(req, getIp(req)));
   }
 
   @Patch(':id')
   @RequirePermissions('manage_products')
   @ResponseMessage('Update warehouse')
-  update(@Param('id') id: string, @Body() dto: any) {
-    return this.service.update(id, dto);
+  update(@Param('id') id: string, @Body() dto: any, @Request() req: any) {
+    return this.service.update(id, dto, getPerformer(req, getIp(req)));
   }
 
   @Patch(':id/set-default')
@@ -82,7 +97,7 @@ export class WarehousesController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Ship stock transfer')
   shipTransfer(@Param('id') id: string, @Request() req: any) {
-    return this.service.shipTransfer(id, req.user?.userId);
+    return this.service.shipTransfer(id, req.user?._id, getPerformer(req, getIp(req)));
   }
 
   @Patch('transfers/:id/receive')
@@ -93,7 +108,7 @@ export class WarehousesController {
     @Body('items') items: Array<{ productId: string; qtyReceived: number }>,
     @Request() req: any,
   ) {
-    return this.service.receiveTransfer(id, items, req.user?.userId);
+    return this.service.receiveTransfer(id, items, req.user?._id, getPerformer(req, getIp(req)));
   }
 
   // ─── Stock Adjustments ────────────────────────────────────────────────────
@@ -136,7 +151,7 @@ export class WarehousesController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Approve stock adjustment')
   approveAdjustment(@Param('id') id: string, @Request() req: any) {
-    return this.service.approveAdjustment(id, req.user?.userId);
+    return this.service.approveAdjustment(id, req.user?._id, getPerformer(req, getIp(req)));
   }
 
   @Patch('adjustments/:id/cancel')

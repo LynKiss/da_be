@@ -6,6 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { AdjustmentReason, AdjustmentStatus, StockAdjustmentEntity } from './entities/stock-adjustment.entity';
@@ -53,6 +54,7 @@ export class WarehousesService {
     private readonly txRepo: Repository<InventoryTransactionEntity>,
 
     private readonly dataSource: DataSource,
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   // ─── Warehouses ───────────────────────────────────────────────────────────
@@ -67,7 +69,10 @@ export class WarehousesService {
     return wh;
   }
 
-  async create(dto: { name: string; code?: string; address?: string; managerName?: string; phone?: string }) {
+  async create(
+    dto: { name: string; code?: string; address?: string; managerName?: string; phone?: string },
+    performer?: { userId: string; username: string; ip?: string },
+  ) {
     const wh = this.whRepo.create({
       warehouseId: uuidv4(),
       name: dto.name,
@@ -78,13 +83,37 @@ export class WarehousesService {
       isActive: true,
       isDefault: false,
     });
-    return this.whRepo.save(wh);
+    const saved = await this.whRepo.save(wh);
+    void this.auditLogs.log({
+      entityType: 'WAREHOUSE',
+      entityId: saved.warehouseId,
+      action: 'CREATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { name: saved.name, code: saved.code },
+    });
+    return saved;
   }
 
-  async update(id: string, dto: Partial<{ name: string; code: string; address: string; managerName: string; phone: string; isActive: boolean }>) {
+  async update(
+    id: string,
+    dto: Partial<{ name: string; code: string; address: string; managerName: string; phone: string; isActive: boolean }>,
+    performer?: { userId: string; username: string; ip?: string },
+  ) {
     const wh = await this.findOne(id);
+    const before = { name: wh.name, code: wh.code, isActive: wh.isActive };
     Object.assign(wh, dto);
-    return this.whRepo.save(wh);
+    const saved = await this.whRepo.save(wh);
+    void this.auditLogs.log({
+      entityType: 'WAREHOUSE',
+      entityId: id,
+      action: 'UPDATE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: before,
+      afterData: { name: saved.name, code: saved.code, isActive: saved.isActive },
+    });
+    return saved;
   }
 
   async setDefault(id: string) {
@@ -153,7 +182,11 @@ export class WarehousesService {
     return this.transferRepo.save(transfer);
   }
 
-  async shipTransfer(id: string, userId?: string) {
+  async shipTransfer(
+    id: string,
+    userId?: string,
+    performer?: { userId: string; username: string; ip?: string },
+  ) {
     const t = await this.findOneTransfer(id);
     if (t.status !== StockTransferStatus.DRAFT) {
       throw new BadRequestException('Phiếu chuyển kho đã được xử lý');
@@ -187,6 +220,14 @@ export class WarehousesService {
       await em.update(StockTransferEntity, { transferId: id }, { status: StockTransferStatus.SHIPPING });
     });
 
+    void this.auditLogs.log({
+      entityType: 'STOCK_TRANSFER',
+      entityId: id,
+      action: 'SHIP',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { transferCode: t.transferCode, status: 'SHIPPING' },
+    });
     return this.findOneTransfer(id);
   }
 
@@ -194,6 +235,7 @@ export class WarehousesService {
     id: string,
     receivedItems: Array<{ productId: string; qtyReceived: number }>,
     userId?: string,
+    performer?: { userId: string; username: string; ip?: string },
   ) {
     const t = await this.findOneTransfer(id);
     if (t.status !== StockTransferStatus.SHIPPING) {
@@ -243,6 +285,14 @@ export class WarehousesService {
       });
     });
 
+    void this.auditLogs.log({
+      entityType: 'STOCK_TRANSFER',
+      entityId: id,
+      action: 'RECEIVE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { transferCode: t.transferCode, status: 'RECEIVED' },
+    });
     return this.findOneTransfer(id);
   }
 
@@ -294,7 +344,11 @@ export class WarehousesService {
     return this.adjRepo.save(adj);
   }
 
-  async approveAdjustment(id: string, userId?: string) {
+  async approveAdjustment(
+    id: string,
+    userId?: string,
+    performer?: { userId: string; username: string; ip?: string },
+  ) {
     const adj = await this.findOneAdjustment(id);
     if (adj.status !== AdjustmentStatus.DRAFT) {
       throw new BadRequestException('Phiếu điều chỉnh đã được xử lý');
@@ -374,6 +428,14 @@ export class WarehousesService {
       );
     });
 
+    void this.auditLogs.log({
+      entityType: 'STOCK_ADJUSTMENT',
+      entityId: id,
+      action: 'APPROVE',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      afterData: { adjustmentCode: adj.adjustmentCode, reason: adj.reason },
+    });
     return this.findOneAdjustment(id);
   }
 

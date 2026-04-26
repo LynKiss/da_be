@@ -646,6 +646,215 @@ export class OrdersService {
     await couponUsageRepository.delete({ orderId: order.orderId });
   }
 
+  /**
+   * Đặt hàng cho khách vãng lai (không cần đăng ký tài khoản).
+   *
+   * Khác createOrder thường:
+   * 1. Không cần userId — guest cung cấp thông tin shipping trực tiếp
+   * 2. Tạo userId tạm dạng `guest-<uuid>` chỉ để thoả mãn FK constraint
+   * 3. Không lấy giá từ cart (vì không có cart) — lấy giá hiện tại từ products
+   * 4. Không support discount code (đơn giản hơn) — có thể bổ sung sau
+   * 5. Vẫn dùng pessimistic lock + idempotency + reservation pattern
+   */
+  async createGuestOrder(dto: import('./dto/create-guest-order.dto').CreateGuestOrderDto, idempotencyKey?: string) {
+    await this.ensurePaymentMethodEnabled(dto.paymentMethod);
+
+    if (idempotencyKey) {
+      const existing = await this.ordersRepository.findOne({
+        where: { idempotencyKey },
+      });
+      if (existing) {
+        return this.buildOrderDetail(await this.findAnyOrder(existing.orderId));
+      }
+    }
+
+    const deliveryMethod = await this.deliveryMethodsRepository.findOneBy({
+      deliveryId: dto.deliveryId,
+    });
+    if (!deliveryMethod || !deliveryMethod.isActive) {
+      throw new NotFoundException('Phương thức giao hàng không khả dụng');
+    }
+
+    const productIds = [...new Set(dto.items.map((it) => it.productId))];
+    const products = await this.productsRepository.findBy(
+      productIds.map((productId) => ({ productId })),
+    );
+    const productsById = new Map(
+      products.map((product) => [product.productId, product]),
+    );
+
+    let subtotalAmount = 0;
+    let totalQuantity = 0;
+    let isBackorder = false;
+
+    for (const item of dto.items) {
+      const product = productsById.get(item.productId);
+      if (!product || !product.isShow) {
+        throw new BadRequestException('Sản phẩm không khả dụng');
+      }
+      if (item.quantity > product.quantityAvailable) {
+        if (!dto.allowBackorder) {
+          throw new BadRequestException(
+            `Sản phẩm ${product.productName} không đủ tồn kho`,
+          );
+        }
+        isBackorder = true;
+      }
+      const price =
+        Number(product.productPriceSale ?? 0) > 0
+          ? Number(product.productPriceSale)
+          : Number(product.productPrice);
+      subtotalAmount += price * item.quantity;
+      totalQuantity += item.quantity;
+    }
+
+    const deliveryCost = this.calculateDeliveryCost(deliveryMethod, subtotalAmount);
+    const totalPayment = subtotalAmount + deliveryCost;
+    const orderId = randomUUID();
+    const guestUserId = `guest-${randomUUID()}`.slice(0, 36);
+    const addressSnapshot = [
+      dto.shipping.addressLine,
+      dto.shipping.ward,
+      dto.shipping.district,
+      dto.shipping.province,
+    ]
+      .filter(Boolean)
+      .join(', ');
+
+    await withDeadlockRetry(() =>
+      this.ordersRepository.manager.transaction(async (entityManager) => {
+        const trxOrders = entityManager.getRepository(OrderEntity);
+        const trxItems = entityManager.getRepository(OrderItemEntity);
+        const trxHistory = entityManager.getRepository(OrderStatusHistoryEntity);
+        const trxProducts = entityManager.getRepository(ProductEntity);
+        const trxInvTx = entityManager.getRepository(InventoryTransactionEntity);
+
+        if (idempotencyKey) {
+          const dup = await trxOrders.findOne({ where: { idempotencyKey } });
+          if (dup) return;
+        }
+
+        const order = trxOrders.create({
+          orderId,
+          userId: guestUserId,
+          shippingAddressId: null,
+          deliveryId: deliveryMethod.deliveryId,
+          discountId: null,
+          orderStatus: isBackorder ? OrderStatus.BACKORDERED : OrderStatus.PENDING,
+          paymentMethod: dto.paymentMethod,
+          paymentStatus: PaymentStatus.UNPAID,
+          subtotalAmount: subtotalAmount.toFixed(2),
+          discountAmount: '0.00',
+          deliveryCost: deliveryCost.toFixed(2),
+          totalPayment: totalPayment.toFixed(2),
+          totalQuantity,
+          note:
+            (dto.note ? `${dto.note}\n` : '') +
+            `[GUEST] ${dto.shipping.email ?? ''}`.trim(),
+          fullName: dto.shipping.recipientName,
+          phone: dto.shipping.phone,
+          address: addressSnapshot,
+          idempotencyKey: idempotencyKey ?? null,
+        });
+        await trxOrders.save(order);
+
+        for (const item of dto.items) {
+          const product = await trxProducts.findOne({
+            where: { productId: item.productId },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (!product) {
+            throw new BadRequestException('Sản phẩm không tồn tại');
+          }
+          const isLineBackorder = item.quantity > product.quantityAvailable;
+          if (isLineBackorder && !dto.allowBackorder) {
+            throw new BadRequestException(
+              `Sản phẩm ${product.productName} không đủ tồn kho`,
+            );
+          }
+
+          const unitPrice =
+            Number(product.productPriceSale ?? 0) > 0
+              ? product.productPriceSale!
+              : product.productPrice;
+          const lineTotal = Number(unitPrice) * item.quantity;
+
+          const orderItem = trxItems.create({
+            orderId,
+            productId: item.productId,
+            productName: product.productName,
+            quantity: item.quantity,
+            unitPrice,
+            lineTotal: lineTotal.toFixed(2),
+          });
+          await trxItems.save(orderItem);
+
+          if (isLineBackorder) continue;
+
+          const qtyBefore = product.quantityAvailable;
+          product.quantityAvailable -= item.quantity;
+          product.quantityReserved =
+            (product.quantityReserved ?? 0) + item.quantity;
+          await trxProducts.save(product);
+
+          await trxInvTx.save(
+            trxInvTx.create({
+              productId: item.productId,
+              performedBy: null,
+              transactionType: InventoryTransactionType.EXPORT,
+              quantityChange: -item.quantity,
+              quantityBefore: qtyBefore,
+              quantityAfter: product.quantityAvailable,
+              referenceType: 'ORDER',
+              referenceId: orderId,
+              unitCostAtTime: product.avgCost ?? null,
+              note: 'Guest order checkout',
+              relatedOrderId: orderId,
+            }),
+          );
+          await this.syncDefaultWarehouseStock(
+            entityManager,
+            item.productId,
+            -item.quantity,
+          );
+        }
+
+        await trxHistory.save(
+          trxHistory.create({
+            orderId,
+            oldStatus: null,
+            newStatus: isBackorder ? OrderStatus.BACKORDERED : OrderStatus.PENDING,
+            changedBy: null,
+            note: 'Guest order created',
+          }),
+        );
+      }),
+    );
+
+    const created = await this.findAnyOrder(orderId);
+    return this.buildOrderDetail(created);
+  }
+
+  /**
+   * Tra cứu đơn guest bằng orderId + phone (verify nhẹ — anyone biết cả 2 sẽ xem được).
+   */
+  async findGuestOrder(orderId: string, phone: string) {
+    if (!phone || !orderId) {
+      throw new BadRequestException('Cần cung cấp orderId và phone');
+    }
+    const order = await this.ordersRepository.findOne({
+      where: { orderId },
+    });
+    if (!order) throw new NotFoundException('Không tìm thấy đơn hàng');
+    if (!order.userId.startsWith('guest-')) {
+      throw new UnauthorizedException('Đơn này thuộc tài khoản đăng ký, hãy đăng nhập để xem');
+    }
+    if (order.phone.replace(/\s+/g, '') !== phone.replace(/\s+/g, '')) {
+      throw new UnauthorizedException('Số điện thoại không khớp');
+    }
+    return this.buildOrderDetail(order);
+  }
+
   async createOrder(
     userId: string,
     createOrderDto: CreateOrderDto,

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { AuditLogsModule } from '../audit-logs/audit-logs.module';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { StockAdjustmentItemEntity } from './entities/stock-adjustment-item.entity';
@@ -23,6 +24,7 @@ import { WarehousesService } from './warehouses.service';
       ProductEntity,
       InventoryTransactionEntity,
     ]),
+    AuditLogsModule,
   ],
   controllers: [WarehousesController],
   providers: [WarehousesService],

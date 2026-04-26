@@ -16,7 +16,10 @@ import { CouponUsageEntity } from './entities/coupon-usage.entity';
 import { DiscountCategoryEntity } from './entities/discount-category.entity';
 import { DiscountProductEntity } from './entities/discount-product.entity';
 import {
+  DISCOUNT_APPROVAL_THRESHOLD_FIXED,
+  DISCOUNT_APPROVAL_THRESHOLD_PCT,
   DiscountApplyTarget,
+  DiscountApprovalStatus,
   DiscountEntity,
   DiscountType,
 } from './entities/discount.entity';
@@ -87,6 +90,12 @@ export class DiscountsService {
     );
     await this.validateDiscountTargets(createDiscountDto);
 
+    // Approval logic: nếu giảm > 30% (PERCENT) hoặc > 1tr VND (FIXED) → cần duyệt
+    const needApproval = this.discountNeedsApproval(
+      createDiscountDto.discountType,
+      createDiscountDto.discountValue,
+    );
+
     const discount = this.discountsRepository.create({
       discountCode: this.normalizeDiscountCode(createDiscountDto.discountCode),
       discountName: createDiscountDto.discountName,
@@ -97,7 +106,11 @@ export class DiscountsService {
       userId: createDiscountDto.userId ?? null,
       discountDescription: createDiscountDto.discountDescription ?? null,
       discountValue: createDiscountDto.discountValue,
-      isActive: createDiscountDto.isActive ?? true,
+      // Nếu cần duyệt: tự động deactivate đến khi được duyệt
+      isActive: needApproval ? false : (createDiscountDto.isActive ?? true),
+      approvalStatus: needApproval
+        ? DiscountApprovalStatus.PENDING_APPROVAL
+        : DiscountApprovalStatus.NOT_REQUIRED,
       usageLimit: createDiscountDto.usageLimit ?? null,
       usedCount: 0,
       minOrderValue: createDiscountDto.minOrderValue ?? '0',
@@ -108,6 +121,60 @@ export class DiscountsService {
     await this.syncDiscountTargets(saved.discountId, createDiscountDto);
 
     return this.findOne(saved.discountId);
+  }
+
+  private discountNeedsApproval(type: DiscountType, value: string | number): boolean {
+    const v = Number(value);
+    if (type === DiscountType.PERCENT) return v > DISCOUNT_APPROVAL_THRESHOLD_PCT;
+    if (type === DiscountType.FIXED) return v > DISCOUNT_APPROVAL_THRESHOLD_FIXED;
+    return false;
+  }
+
+  /**
+   * Admin duyệt discount giảm sâu (cần permission manage_discounts).
+   * approvedBy: id của admin duyệt.
+   */
+  async approveDiscount(
+    discountId: string,
+    approvedBy: string,
+    note?: string,
+  ) {
+    const discount = await this.findOne(discountId);
+    if (discount.approvalStatus !== DiscountApprovalStatus.PENDING_APPROVAL) {
+      throw new BadRequestException(
+        'Chỉ có thể duyệt discount đang ở trạng thái PENDING_APPROVAL',
+      );
+    }
+    discount.approvalStatus = DiscountApprovalStatus.APPROVED;
+    discount.approvedBy = approvedBy;
+    discount.approvedAt = new Date();
+    discount.approvalNote = note ?? null;
+    discount.isActive = true; // tự active sau khi duyệt
+    await this.discountsRepository.save(discount);
+    return this.findOne(discountId);
+  }
+
+  /**
+   * Admin từ chối discount giảm sâu.
+   */
+  async rejectDiscount(
+    discountId: string,
+    rejectedBy: string,
+    note?: string,
+  ) {
+    const discount = await this.findOne(discountId);
+    if (discount.approvalStatus !== DiscountApprovalStatus.PENDING_APPROVAL) {
+      throw new BadRequestException(
+        'Chỉ có thể từ chối discount đang ở trạng thái PENDING_APPROVAL',
+      );
+    }
+    discount.approvalStatus = DiscountApprovalStatus.REJECTED;
+    discount.approvedBy = rejectedBy;
+    discount.approvedAt = new Date();
+    discount.approvalNote = note ?? null;
+    discount.isActive = false;
+    await this.discountsRepository.save(discount);
+    return this.findOne(discountId);
   }
 
   async update(discountId: string, updateDiscountDto: UpdateDiscountDto) {

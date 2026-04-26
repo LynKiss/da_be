@@ -17,6 +17,23 @@ export enum DiscountApplyTarget {
   PRODUCT = 'product',
 }
 
+/**
+ * Trạng thái duyệt cho discount giảm sâu (>30%).
+ *  - NOT_REQUIRED: discount thường, không cần duyệt
+ *  - PENDING_APPROVAL: chờ admin duyệt (discount > 30%)
+ *  - APPROVED: đã duyệt, có thể dùng
+ *  - REJECTED: từ chối, không thể dùng
+ */
+export enum DiscountApprovalStatus {
+  NOT_REQUIRED = 'not_required',
+  PENDING_APPROVAL = 'pending_approval',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
+}
+
+export const DISCOUNT_APPROVAL_THRESHOLD_PCT = 30;
+export const DISCOUNT_APPROVAL_THRESHOLD_FIXED = 1_000_000;
+
 @Entity({ name: 'discounts' })
 export class DiscountEntity {
   @PrimaryGeneratedColumn({
@@ -94,6 +111,23 @@ export class DiscountEntity {
     nullable: true,
   })
   maxDiscountAmount: string | null;
+
+  @Column({
+    name: 'approval_status',
+    type: 'enum',
+    enum: DiscountApprovalStatus,
+    default: DiscountApprovalStatus.NOT_REQUIRED,
+  })
+  approvalStatus: DiscountApprovalStatus;
+
+  @Column({ name: 'approved_by', type: 'char', length: 36, nullable: true })
+  approvedBy: string | null;
+
+  @Column({ name: 'approved_at', type: 'datetime', nullable: true })
+  approvedAt: Date | null;
+
+  @Column({ name: 'approval_note', type: 'varchar', length: 500, nullable: true })
+  approvalNote: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;

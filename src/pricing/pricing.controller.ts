@@ -3,6 +3,16 @@ import { RequirePermissions, ResponseMessage } from '../decorator/customize';
 import { ApplyPriceDto, CalcPriceSuggestionDto } from './dto/price-suggestion.dto';
 import { PricingService } from './pricing.service';
 
+function getPerformer(req: any, ip?: string) {
+  const user = req.user;
+  if (!user?._id) return undefined;
+  return { userId: user._id as string, username: user.username as string, ip };
+}
+
+function getIp(req: any): string | undefined {
+  return (req.headers?.['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.ip ?? undefined;
+}
+
 @Controller('pricing')
 export class PricingController {
   constructor(private readonly service: PricingService) {}
@@ -32,7 +42,7 @@ export class PricingController {
   @RequirePermissions('manage_products')
   @ResponseMessage('Calculate and save price suggestion')
   calculate(@Body() dto: CalcPriceSuggestionDto, @Request() req: any) {
-    return this.service.calculate(dto, req.user?.userId);
+    return this.service.calculate(dto, req.user?._id);
   }
 
   @Post('suggestions/:id/apply')
@@ -43,6 +53,6 @@ export class PricingController {
     @Body() dto: ApplyPriceDto,
     @Request() req: any,
   ) {
-    return this.service.applyPrice(id, dto, req.user?.userId);
+    return this.service.applyPrice(id, dto, req.user?._id, getPerformer(req, getIp(req)));
   }
 }

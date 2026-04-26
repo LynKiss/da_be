@@ -102,6 +102,30 @@ export class DiscountsController {
     return this.discountsService.create(dto);
   }
 
+  /** Approve discount đang chờ duyệt (giảm > 30%). */
+  @Patch('admin/:id/approve')
+  @RequirePermissions('manage_discounts')
+  @ResponseMessage('Approve high-discount')
+  approveDiscount(
+    @Param('id') id: string,
+    @User() user: IUser,
+    @Body('note') note?: string,
+  ) {
+    return this.discountsService.approveDiscount(id, user._id, note);
+  }
+
+  /** Reject discount đang chờ duyệt. */
+  @Patch('admin/:id/reject')
+  @RequirePermissions('manage_discounts')
+  @ResponseMessage('Reject high-discount')
+  rejectDiscount(
+    @Param('id') id: string,
+    @User() user: IUser,
+    @Body('note') note?: string,
+  ) {
+    return this.discountsService.rejectDiscount(id, user._id, note);
+  }
+
   @Patch(':id')
   @RequirePermissions('manage_discounts')
   @ResponseMessage('Update discount')

@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { ProductEntity } from '../products/entities/product.entity';
 import { ApplyPriceDto, CalcPriceSuggestionDto } from './dto/price-suggestion.dto';
 import { PriceSuggestionEntity } from './entities/price-suggestion.entity';
@@ -42,6 +43,8 @@ export class PricingService {
 
     @InjectRepository(ProductEntity)
     private readonly productRepo: Repository<ProductEntity>,
+
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   async calculate(dto: CalcPriceSuggestionDto, userId?: string) {
@@ -95,7 +98,12 @@ export class PricingService {
     };
   }
 
-  async applyPrice(suggestionId: string, dto: ApplyPriceDto, userId?: string) {
+  async applyPrice(
+    suggestionId: string,
+    dto: ApplyPriceDto,
+    userId?: string,
+    performer?: { userId: string; username: string; ip?: string },
+  ) {
     const suggestion = await this.repo.findOne({ where: { suggestionId } });
     if (!suggestion) throw new NotFoundException('Không tìm thấy đề xuất giá');
 
@@ -107,13 +115,25 @@ export class PricingService {
 
     // Cập nhật giá trên sản phẩm
     const product = await this.productRepo.findOne({ where: { productId: suggestion.productId } });
+    let priceBefore: { product?: string | null; bulk?: string | null } | null = null;
     if (product) {
+      priceBefore = { product: product.productPrice, bulk: product.bulkPrice };
       product.productPrice = String(dto.retailPrice);
       if (dto.bulkPrice != null) {
         product.bulkPrice = String(dto.bulkPrice);
       }
       await this.productRepo.save(product);
     }
+
+    void this.auditLogs.log({
+      entityType: 'PRODUCT_PRICE',
+      entityId: suggestion.productId,
+      action: 'APPLY',
+      changedBy: performer?.username,
+      ipAddress: performer?.ip,
+      beforeData: priceBefore ?? undefined,
+      afterData: { retailPrice: dto.retailPrice, bulkPrice: dto.bulkPrice },
+    });
 
     return suggestion;
   }
