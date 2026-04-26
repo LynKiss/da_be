@@ -107,6 +107,42 @@ describe('SupportBotService', () => {
     expect(result.reply).toContain('Hat giong lua OM5451');
   });
 
+  it('returns product recommendations with reasons', async () => {
+    configService.get.mockReturnValue(undefined);
+    productsService.findAll.mockResolvedValue({
+      items: [
+        {
+          productId: 'product-6',
+          productName: 'Phan NPK chuyen dung cho lua',
+          effectivePrice: '210000.00',
+          basePrice: '210000.00',
+          unit: 'bao',
+          quantityAvailable: 15,
+          primaryImageUrl: null,
+        },
+      ],
+    });
+
+    const result = await service.createReply({
+      message: 'Goi y san pham cho lua',
+      history: [],
+    });
+
+    expect(productsService.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        search: 'lua',
+        page: 1,
+        limit: 4,
+        includeHidden: false,
+      }),
+    );
+    expect(result.intent).toBe('product_recommendation');
+    expect(result.products).toHaveLength(1);
+    expect(result.reply).toContain('Toi goi y cac san pham');
+    expect(result.reply).toContain('Phan NPK chuyen dung cho lua');
+    expect(result.reply).toContain('Phu hop vi');
+  });
+
   it('uses the current user context for identity questions', async () => {
     configService.get.mockReturnValue(undefined);
 

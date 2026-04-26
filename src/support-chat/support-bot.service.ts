@@ -17,6 +17,7 @@ type SupportBotIntent =
   | 'returns'
   | 'payment'
   | 'product_search'
+  | 'product_recommendation'
   | 'cart_add'
   | 'cart_view'
   | 'checkout'
@@ -156,6 +157,23 @@ const PRODUCT_HINT_KEYWORDS = [
   'nong duoc',
   'dung cu',
   'may',
+  'lua',
+  'rau',
+  'cay',
+  'sau',
+  'nam',
+  'co dai',
+];
+
+const PRODUCT_RECOMMENDATION_KEYWORDS = [
+  'goi y san pham',
+  'tu van san pham',
+  'de xuat san pham',
+  'nen mua',
+  'mua gi',
+  'chon san pham',
+  'san pham phu hop',
+  'phu hop voi',
 ];
 
 const PRODUCT_STOP_WORDS = new Set([
@@ -166,6 +184,17 @@ const PRODUCT_STOP_WORDS = new Set([
   'gi',
   'nao',
   'nay',
+  'nen',
+  'dung',
+  'su',
+  'de',
+  'xuat',
+  'chon',
+  'phu',
+  'hop',
+  'voi',
+  'em',
+  'minh',
   'them',
   'vao',
   'gio',
@@ -434,6 +463,14 @@ export class SupportBotService {
         normalizedMessage.includes(keyword),
       )
     ) {
+      if (
+        PRODUCT_RECOMMENDATION_KEYWORDS.some((keyword) =>
+          normalizedMessage.includes(keyword),
+        )
+      ) {
+        return 'product_recommendation';
+      }
+
       return 'product_search';
     }
 
@@ -473,6 +510,7 @@ export class SupportBotService {
   ) {
     const shouldSearch =
       intent === 'product_search' ||
+      intent === 'product_recommendation' ||
       intent === 'cart_add' ||
       PRODUCT_HINT_KEYWORDS.some((keyword) =>
         normalizedMessage.includes(keyword),
@@ -489,18 +527,18 @@ export class SupportBotService {
       message,
       intent === 'cart_add',
     );
-    const productQuery = this.isBroadProductQuestion(
-      normalizedMessage,
-      extractedProductQuery,
-    )
-      ? null
-      : extractedProductQuery;
+    const productQuery =
+      intent === 'product_recommendation'
+        ? extractedProductQuery
+        : this.isBroadProductQuestion(normalizedMessage, extractedProductQuery)
+          ? null
+          : extractedProductQuery;
 
     try {
       let products = await this.findProductSuggestions(productQuery);
 
       if (products.length === 0 && productQuery) {
-        if (intent === 'cart_add') {
+        if (intent === 'cart_add' || intent === 'product_recommendation') {
           const catalogProducts = await this.findProductSuggestions(null, 50);
           products = this.rankProductsByQuery(productQuery, catalogProducts)
             .filter((item) => item.score > 0)
@@ -520,7 +558,11 @@ export class SupportBotService {
         };
       }
 
-      if (intent === 'cart_add' && productQuery && products.length > 1) {
+      if (
+        (intent === 'cart_add' || intent === 'product_recommendation') &&
+        productQuery &&
+        products.length > 1
+      ) {
         products = this.rankProductsByQuery(productQuery, products).map(
           (item) => item.product,
         );
@@ -652,6 +694,26 @@ export class SupportBotService {
     }
 
     return score;
+  }
+
+  private buildProductRecommendationReason(
+    productQuery: string | null,
+    product: SupportBotProductSuggestion,
+  ) {
+    if (!productQuery) {
+      return 'San pham dang hien thi trong catalog va co du lieu gia/ton kho xac thuc.';
+    }
+
+    const normalizedName = this.normalizeText(product.productName);
+    const matchedTokens = this.getProductQueryTokens(productQuery).filter(
+      (token) => normalizedName.includes(token),
+    );
+
+    if (matchedTokens.length > 0) {
+      return `Phu hop vi ten san pham khop cac tu khoa: ${matchedTokens.slice(0, 4).join(', ')}.`;
+    }
+
+    return 'Phu hop de ban xem them trong nhom san pham lien quan.';
   }
 
   private async buildCartContext(
@@ -881,6 +943,28 @@ export class SupportBotService {
       return [
         'Toi co the chuyen huong sang ho tro truc tiep.',
         'Ban hay mo tab "Nhan vien" de chat voi CSKH, hoac goi 1800 6863 neu can xu ly nhanh.',
+      ].join('\n');
+    }
+
+    if (
+      context.intent === 'product_recommendation' &&
+      context.products.length > 0
+    ) {
+      const lines = context.products.slice(0, 4).map((product, index) => {
+        const reason = this.buildProductRecommendationReason(
+          context.productQuery,
+          product,
+        );
+
+        return `${index + 1}. ${product.productName} - ${this.formatCurrency(product.effectivePrice)}${product.unit ? `/${product.unit}` : ''}. ${reason}`;
+      });
+
+      return [
+        context.productQuery
+          ? `Toi goi y cac san pham phu hop voi nhu cau "${context.productQuery}":`
+          : 'Toi goi y mot so san pham dang co trong catalog:',
+        ...lines,
+        'Ban co the bam vao the san pham de xem chi tiet. Neu can chan doan benh cay trong hoac cach dung thuoc, hay chuyen sang tab Nhan vien/Rice diagnosis de duoc ho tro dung hon.',
       ].join('\n');
     }
 
