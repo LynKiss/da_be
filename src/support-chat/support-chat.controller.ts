@@ -10,14 +10,17 @@ import {
   Query,
 } from '@nestjs/common';
 import {
+  Public,
   RequirePermissions,
   ResponseMessage,
   User,
 } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
+import { CreateSupportBotReplyDto } from './dto/create-support-bot-reply.dto';
 import { CreateSupportMessageDto } from './dto/create-support-message.dto';
 import { StartSupportConversationDto } from './dto/start-support-conversation.dto';
 import { UpdateSupportConversationStatusDto } from './dto/update-support-conversation-status.dto';
+import { SupportBotService } from './support-bot.service';
 import { SupportConversationStatus } from './entities/support-conversation.entity';
 import { SupportChatPublisher } from './support-chat.publisher';
 import { SupportChatService } from './support-chat.service';
@@ -27,7 +30,15 @@ export class SupportChatController {
   constructor(
     private readonly supportChatService: SupportChatService,
     private readonly supportChatPublisher: SupportChatPublisher,
+    private readonly supportBotService: SupportBotService,
   ) {}
+
+  @Public()
+  @Post('bot/reply')
+  @ResponseMessage('Generate support bot reply')
+  createBotReply(@Body() createSupportBotReplyDto: CreateSupportBotReplyDto) {
+    return this.supportBotService.createReply(createSupportBotReplyDto);
+  }
 
   @Post('conversations/me/start')
   @ResponseMessage('Start my support conversation')
@@ -57,12 +68,19 @@ export class SupportChatController {
     @Param('id') id: string,
     @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
   ) {
-    return this.supportChatService.getConversationMessages(currentUser, id, limit);
+    return this.supportChatService.getConversationMessages(
+      currentUser,
+      id,
+      limit,
+    );
   }
 
   @Patch('conversations/:id/read')
   @ResponseMessage('Mark support conversation as read')
-  async markConversationRead(@User() currentUser: IUser, @Param('id') id: string) {
+  async markConversationRead(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+  ) {
     const conversation = await this.supportChatService.markConversationRead(
       currentUser,
       id,
@@ -127,7 +145,10 @@ export class SupportChatController {
   @Patch('admin/conversations/:id/assign')
   @RequirePermissions('manage_support')
   @ResponseMessage('Assign support conversation')
-  async assignConversation(@User() currentUser: IUser, @Param('id') id: string) {
+  async assignConversation(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+  ) {
     const conversation = await this.supportChatService.assignConversation(
       currentUser,
       id,
@@ -142,14 +163,14 @@ export class SupportChatController {
   async updateConversationStatus(
     @User() currentUser: IUser,
     @Param('id') id: string,
-    @Body() updateSupportConversationStatusDto: UpdateSupportConversationStatusDto,
+    @Body()
+    updateSupportConversationStatusDto: UpdateSupportConversationStatusDto,
   ) {
-    const conversation =
-      await this.supportChatService.updateConversationStatus(
-        currentUser,
-        id,
-        updateSupportConversationStatusDto.status,
-      );
+    const conversation = await this.supportChatService.updateConversationStatus(
+      currentUser,
+      id,
+      updateSupportConversationStatusDto.status,
+    );
     this.supportChatPublisher.emitConversationUpdated(conversation);
     return conversation;
   }
