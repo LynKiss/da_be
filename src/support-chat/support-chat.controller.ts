@@ -40,6 +40,18 @@ export class SupportChatController {
     return this.supportBotService.createReply(createSupportBotReplyDto);
   }
 
+  @Post('bot/reply/me')
+  @ResponseMessage('Generate support bot reply for current user')
+  createMyBotReply(
+    @User() currentUser: IUser,
+    @Body() createSupportBotReplyDto: CreateSupportBotReplyDto,
+  ) {
+    return this.supportBotService.createReply(
+      createSupportBotReplyDto,
+      currentUser,
+    );
+  }
+
   @Post('conversations/me/start')
   @ResponseMessage('Start my support conversation')
   async startMyConversation(@User() currentUser: IUser) {

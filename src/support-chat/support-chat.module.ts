@@ -1,10 +1,12 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
+import { CartsModule } from '../carts/carts.module';
 import { OrdersModule } from '../orders/orders.module';
 import { ProductsModule } from '../products/products.module';
 import { RolesModule } from '../roles/roles.module';
 import { UserEntity } from '../users/entities/user.entity';
+import { UsersModule } from '../users/users.module';
 import { SupportBotService } from './support-bot.service';
 import { SupportChatController } from './support-chat.controller';
 import { SupportChatGateway } from './support-chat.gateway';
@@ -21,8 +23,10 @@ import { SupportMessageEntity } from './entities/support-message.entity';
       UserEntity,
     ]),
     AuthModule,
+    CartsModule,
     ProductsModule,
     OrdersModule,
+    UsersModule,
     RolesModule,
   ],
   controllers: [SupportChatController],
