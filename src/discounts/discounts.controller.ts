@@ -18,6 +18,7 @@ import {
 import type { IUser } from '../users/users.interface';
 import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { CreateDiscountDto } from './dto/create-discount.dto';
+import { QueryAvailableCouponsDto } from './dto/query-available-coupons.dto';
 import { UpdateDiscountDto } from './dto/update-discount.dto';
 import { ValidateCouponDto } from './dto/validate-coupon.dto';
 import { DiscountsService } from './discounts.service';
@@ -63,6 +64,16 @@ export class DiscountsController {
   @ResponseMessage('Apply coupon to order')
   applyCoupon(@User() user: IUser, @Body() dto: ApplyCouponDto) {
     return this.discountsService.applyCoupon(user._id, dto);
+  }
+
+  @Post('available-for-cart')
+  @SkipCheckPermission()
+  @ResponseMessage('Get coupons available for current cart')
+  getAvailableCouponsForCart(
+    @User() user: IUser,
+    @Body() dto: QueryAvailableCouponsDto,
+  ) {
+    return this.discountsService.findAvailableCouponsForUser(user._id, dto);
   }
 
   @Get('my-history')

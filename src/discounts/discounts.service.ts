@@ -10,6 +10,7 @@ import { CategoryEntity } from '../categories/entities/category.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { CreateDiscountDto } from './dto/create-discount.dto';
+import { QueryAvailableCouponsDto } from './dto/query-available-coupons.dto';
 import { UpdateDiscountDto } from './dto/update-discount.dto';
 import { ValidateCouponDto } from './dto/validate-coupon.dto';
 import { CouponUsageEntity } from './entities/coupon-usage.entity';
@@ -284,7 +285,7 @@ export class DiscountsService {
           d.expireDate.getTime() >= now.getTime();
         const hasRemaining =
           d.usageLimit === null || d.usedCount < d.usageLimit;
-        return withinRange && hasRemaining;
+        return withinRange && hasRemaining && d.userId === null;
       })
       .map((d) => ({
         id: d.discountId,
@@ -298,6 +299,84 @@ export class DiscountsService {
         expiresAt: d.expireDate,
         isPrivate: d.userId !== null,
       }));
+  }
+
+  async findAvailableCouponsForUser(
+    userId: string,
+    dto: QueryAvailableCouponsDto,
+  ) {
+    const now = new Date();
+    const orderValue = Number(dto.orderValue ?? 0);
+    const discounts = await this.discountsRepository.find({
+      where: { appliesTo: DiscountApplyTarget.ORDER, isActive: true },
+      order: { expireDate: 'ASC', createdAt: 'DESC' },
+    });
+
+    const visibleDiscounts = discounts.filter((discount) => {
+      const withinRange =
+        discount.startAt.getTime() <= now.getTime() &&
+        discount.expireDate.getTime() >= now.getTime();
+      const hasRemaining =
+        discount.usageLimit === null ||
+        discount.usedCount < discount.usageLimit;
+      const visibleForUser =
+        discount.userId === null || discount.userId === userId;
+      const approvalOk = [
+        DiscountApprovalStatus.NOT_REQUIRED,
+        DiscountApprovalStatus.APPROVED,
+      ].includes(discount.approvalStatus);
+
+      return withinRange && hasRemaining && visibleForUser && approvalOk;
+    });
+
+    const usageRows = visibleDiscounts.length
+      ? await this.couponUsageRepository.findBy(
+          visibleDiscounts.map((discount) => ({
+            discountId: discount.discountId,
+            userId,
+          })),
+        )
+      : [];
+    const usedDiscountIds = new Set(
+      usageRows.map((usage) => usage.discountId),
+    );
+
+    return visibleDiscounts.map((discount) => {
+      const minOrderValue = Number(discount.minOrderValue);
+      const isUsed = usedDiscountIds.has(discount.discountId);
+      const missingAmount = Math.max(0, minOrderValue - orderValue);
+      const eligible = !isUsed && missingAmount <= 0;
+      const discountAmount =
+        eligible && orderValue > 0
+          ? this.calculateDiscountAmount(discount, orderValue)
+          : 0;
+
+      return {
+        id: discount.discountId,
+        code: discount.discountCode,
+        name: discount.discountName,
+        description: discount.discountDescription,
+        type: discount.discountType,
+        value: discount.discountValue,
+        appliesTo: discount.appliesTo,
+        minOrderValue: discount.minOrderValue,
+        maxDiscountAmount: discount.maxDiscountAmount,
+        expiresAt: discount.expireDate,
+        isPrivate: discount.userId !== null,
+        usageLimit: discount.usageLimit,
+        usedCount: discount.usedCount,
+        eligible,
+        isUsed,
+        missingAmount: missingAmount.toFixed(2),
+        discountAmount: discountAmount.toFixed(2),
+        finalPrice: Math.max(0, orderValue - discountAmount).toFixed(2),
+        reason: isUsed
+          ? 'Bạn đã dùng voucher này'
+          : missingAmount > 0
+            ? `Cần mua thêm ${missingAmount.toFixed(0)}đ để dùng voucher`
+            : 'Có thể áp dụng cho giỏ hàng hiện tại',
+      };
+    });
   }
 
   async validateCoupon(userId: string, dto: ValidateCouponDto) {
