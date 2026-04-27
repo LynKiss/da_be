@@ -34,6 +34,7 @@ import { PricingModule } from './pricing/pricing.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
 import { CreditLimitsModule } from './credit-limits/credit-limits.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
+import { AdminSearchModule } from './admin-search/admin-search.module';
 
 @Module({
   imports: [
@@ -66,6 +67,7 @@ import { AuditLogsModule } from './audit-logs/audit-logs.module';
     WarehousesModule,
     CreditLimitsModule,
     AuditLogsModule,
+    AdminSearchModule,
     IntelligenceModule,
     HealthModule,
   ],
