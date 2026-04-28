@@ -85,6 +85,20 @@ export class DiscountsController {
 
   // ─── ADMIN ────────────────────────────────────────────────────────────────────
 
+  @Get('my-saved')
+  @SkipCheckPermission()
+  @ResponseMessage('Get my saved vouchers')
+  getMySavedVouchers(@User() user: IUser) {
+    return this.discountsService.getSavedVouchers(user._id);
+  }
+
+  @Post(':id/save')
+  @SkipCheckPermission()
+  @ResponseMessage('Save voucher')
+  saveVoucher(@Param('id') id: string, @User() user: IUser) {
+    return this.discountsService.saveVoucher(user._id, id);
+  }
+
   @Get('admin')
   @RequirePermissions('manage_discounts')
   @ResponseMessage('Get discounts for admin')

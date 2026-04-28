@@ -16,6 +16,7 @@ import { ValidateCouponDto } from './dto/validate-coupon.dto';
 import { CouponUsageEntity } from './entities/coupon-usage.entity';
 import { DiscountCategoryEntity } from './entities/discount-category.entity';
 import { DiscountProductEntity } from './entities/discount-product.entity';
+import { SavedVoucherEntity } from './entities/saved-voucher.entity';
 import {
   DISCOUNT_APPROVAL_THRESHOLD_FIXED,
   DISCOUNT_APPROVAL_THRESHOLD_PCT,
@@ -36,6 +37,8 @@ export class DiscountsService {
     private readonly discountProductsRepository: Repository<DiscountProductEntity>,
     @InjectRepository(CouponUsageEntity)
     private readonly couponUsageRepository: Repository<CouponUsageEntity>,
+    @InjectRepository(SavedVoucherEntity)
+    private readonly savedVoucherRepository: Repository<SavedVoucherEntity>,
     @InjectRepository(CategoryEntity)
     private readonly categoriesRepository: Repository<CategoryEntity>,
     @InjectRepository(ProductEntity)
@@ -285,20 +288,10 @@ export class DiscountsService {
           d.expireDate.getTime() >= now.getTime();
         const hasRemaining =
           d.usageLimit === null || d.usedCount < d.usageLimit;
-        return withinRange && hasRemaining && d.userId === null;
+        const approvalOk = this.isDiscountApprovedForUse(d);
+        return withinRange && hasRemaining && d.userId === null && approvalOk;
       })
-      .map((d) => ({
-        id: d.discountId,
-        code: d.discountCode,
-        name: d.discountName,
-        description: d.discountDescription,
-        type: d.discountType,
-        value: d.discountValue,
-        minOrderValue: d.minOrderValue,
-        maxDiscountAmount: d.maxDiscountAmount,
-        expiresAt: d.expireDate,
-        isPrivate: d.userId !== null,
-      }));
+      .map((d) => this.toVoucherPayload(d, { isSaved: false }));
   }
 
   async findAvailableCouponsForUser(
@@ -329,16 +322,27 @@ export class DiscountsService {
       return withinRange && hasRemaining && visibleForUser && approvalOk;
     });
 
-    const usageRows = visibleDiscounts.length
-      ? await this.couponUsageRepository.findBy(
-          visibleDiscounts.map((discount) => ({
-            discountId: discount.discountId,
-            userId,
-          })),
-        )
-      : [];
+    const [usageRows, savedRows] = visibleDiscounts.length
+      ? await Promise.all([
+          this.couponUsageRepository.findBy(
+            visibleDiscounts.map((discount) => ({
+              discountId: discount.discountId,
+              userId,
+            })),
+          ),
+          this.savedVoucherRepository.findBy(
+            visibleDiscounts.map((discount) => ({
+              discountId: discount.discountId,
+              userId,
+            })),
+          ),
+        ])
+      : [[], []];
     const usedDiscountIds = new Set(
       usageRows.map((usage) => usage.discountId),
+    );
+    const savedDiscountIds = new Set(
+      savedRows.map((saved) => saved.discountId),
     );
 
     return visibleDiscounts.map((discount) => {
@@ -352,17 +356,9 @@ export class DiscountsService {
           : 0;
 
       return {
-        id: discount.discountId,
-        code: discount.discountCode,
-        name: discount.discountName,
-        description: discount.discountDescription,
-        type: discount.discountType,
-        value: discount.discountValue,
-        appliesTo: discount.appliesTo,
-        minOrderValue: discount.minOrderValue,
-        maxDiscountAmount: discount.maxDiscountAmount,
-        expiresAt: discount.expireDate,
-        isPrivate: discount.userId !== null,
+        ...this.toVoucherPayload(discount, {
+          isSaved: savedDiscountIds.has(discount.discountId),
+        }),
         usageLimit: discount.usageLimit,
         usedCount: discount.usedCount,
         eligible,
@@ -535,6 +531,64 @@ export class DiscountsService {
     });
   }
 
+  async saveVoucher(userId: string, discountId: string) {
+    const discount = await this.discountsRepository.findOneBy({ discountId });
+    if (!discount || !this.isDiscountClaimableByUser(discount, userId)) {
+      throw new NotFoundException('Voucher not found or unavailable');
+    }
+
+    const existing = await this.savedVoucherRepository.findOneBy({
+      userId,
+      discountId,
+    });
+    if (existing) {
+      return {
+        saved: true,
+        savedAt: existing.savedAt,
+        voucher: this.toVoucherPayload(discount, { isSaved: true }),
+      };
+    }
+
+    const saved = await this.savedVoucherRepository.save(
+      this.savedVoucherRepository.create({ userId, discountId }),
+    );
+
+    return {
+      saved: true,
+      savedAt: saved.savedAt,
+      voucher: this.toVoucherPayload(discount, { isSaved: true }),
+    };
+  }
+
+  async getSavedVouchers(userId: string) {
+    const rows = await this.savedVoucherRepository.find({
+      where: { userId },
+      order: { savedAt: 'DESC' },
+    });
+    const discountIds = rows.map((row) => row.discountId);
+    const discounts = discountIds.length
+      ? await this.discountsRepository.findBy(
+          discountIds.map((discountId) => ({ discountId })),
+        )
+      : [];
+    const discountMap = new Map(
+      discounts.map((discount) => [discount.discountId, discount]),
+    );
+
+    return rows
+      .map((row) => {
+        const discount = discountMap.get(row.discountId);
+        if (!discount) return null;
+        return {
+          savedVoucherId: row.savedVoucherId,
+          savedAt: row.savedAt,
+          ...this.toVoucherPayload(discount, { isSaved: true }),
+          isAvailable: this.isDiscountClaimableByUser(discount, userId),
+        };
+      })
+      .filter(Boolean);
+  }
+
   async findDiscountsByProduct(productId: string) {
     const now = new Date();
     const productMappings = await this.discountProductsRepository.findBy({
@@ -578,6 +632,54 @@ export class DiscountsService {
   }
 
   // ─── PRIVATE HELPERS ─────────────────────────────────────────────────────────
+
+  private toVoucherPayload(
+    discount: DiscountEntity,
+    options: { isSaved?: boolean } = {},
+  ) {
+    return {
+      id: discount.discountId,
+      code: discount.discountCode,
+      name: discount.discountName,
+      description: discount.discountDescription,
+      type: discount.discountType,
+      value: discount.discountValue,
+      appliesTo: discount.appliesTo,
+      minOrderValue: discount.minOrderValue,
+      maxDiscountAmount: discount.maxDiscountAmount,
+      expiresAt: discount.expireDate,
+      isPrivate: discount.userId !== null,
+      usageLimit: discount.usageLimit,
+      usedCount: discount.usedCount,
+      remainingUses: this.getRemainingUses(discount),
+      isSaved: options.isSaved ?? false,
+    };
+  }
+
+  private getRemainingUses(discount: DiscountEntity) {
+    if (discount.usageLimit === null) return null;
+    return Math.max(0, discount.usageLimit - discount.usedCount);
+  }
+
+  private isDiscountApprovedForUse(discount: DiscountEntity) {
+    return [
+      DiscountApprovalStatus.NOT_REQUIRED,
+      DiscountApprovalStatus.APPROVED,
+    ].includes(discount.approvalStatus);
+  }
+
+  private isDiscountClaimableByUser(discount: DiscountEntity, userId: string) {
+    const now = Date.now();
+    return (
+      discount.appliesTo === DiscountApplyTarget.ORDER &&
+      discount.isActive &&
+      discount.startAt.getTime() <= now &&
+      discount.expireDate.getTime() >= now &&
+      this.getRemainingUses(discount) !== 0 &&
+      (discount.userId === null || discount.userId === userId) &&
+      this.isDiscountApprovedForUse(discount)
+    );
+  }
 
   private calculateDiscountAmount(
     discount: DiscountEntity,

@@ -7,6 +7,7 @@ import { CouponUsageEntity } from './entities/coupon-usage.entity';
 import { DiscountCategoryEntity } from './entities/discount-category.entity';
 import { DiscountProductEntity } from './entities/discount-product.entity';
 import { DiscountEntity } from './entities/discount.entity';
+import { SavedVoucherEntity } from './entities/saved-voucher.entity';
 import { DiscountsService } from './discounts.service';
 
 @Module({
@@ -16,6 +17,7 @@ import { DiscountsService } from './discounts.service';
       DiscountCategoryEntity,
       DiscountProductEntity,
       CouponUsageEntity,
+      SavedVoucherEntity,
       CategoryEntity,
       ProductEntity,
     ]),
