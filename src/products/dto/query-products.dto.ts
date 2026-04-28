@@ -35,6 +35,10 @@ export class QueryProductsDto {
 
   @IsOptional()
   @IsString()
+  categoryIds?: string;
+
+  @IsOptional()
+  @IsString()
   subcategoryId?: string;
 
   @IsOptional()

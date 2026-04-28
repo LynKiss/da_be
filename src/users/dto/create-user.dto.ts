@@ -23,6 +23,16 @@ export class RegisterUserDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(150)
+  fullName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phoneNumber?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(500)
   avatarUrl?: string;
 }

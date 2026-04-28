@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -32,6 +33,13 @@ import { RefreshTokenEntity } from './entities/refresh-token.entity';
 import { UserEntity, UserRole } from './entities/user.entity';
 import { IUser } from './users.interface';
 import { WishlistEntity } from '../products/entities/wishlist.entity';
+
+type UploadedImageFile = {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname: string;
+};
 
 @Injectable()
 export class UsersService {
@@ -143,6 +151,8 @@ export class UsersService {
       userId: randomUUID(),
       username: registerUserDto.username,
       email: registerUserDto.email,
+      fullName: registerUserDto.fullName?.trim() || null,
+      phoneNumber: registerUserDto.phoneNumber?.trim() || null,
       avatarUrl: registerUserDto.avatarUrl ?? null,
       role: UserRole.CUSTOMER,
       passwordHash: await this.hashPassword(registerUserDto.password),
@@ -182,6 +192,8 @@ export class UsersService {
       userId: randomUUID(),
       username: createAdminUserDto.username,
       email: createAdminUserDto.email,
+      fullName: createAdminUserDto.fullName?.trim() || null,
+      phoneNumber: createAdminUserDto.phoneNumber?.trim() || null,
       avatarUrl: createAdminUserDto.avatarUrl ?? null,
       role: createAdminUserDto.role ?? UserRole.CUSTOMER,
       passwordHash: await this.hashPassword(createAdminUserDto.password),
@@ -287,6 +299,8 @@ export class UsersService {
       _id: user.userId,
       username: user.username,
       email: user.email,
+      fullName: user.fullName,
+      phoneNumber: user.phoneNumber,
       avatarUrl: user.avatarUrl,
       role: {
         _id: user.role,
@@ -397,6 +411,21 @@ export class UsersService {
       user.avatarUrl = updateUserDto.avatarUrl;
     }
 
+    if (updateUserDto.fullName !== undefined) {
+      user.fullName = updateUserDto.fullName.trim() || null;
+    }
+
+    if (updateUserDto.phoneNumber !== undefined) {
+      user.phoneNumber = updateUserDto.phoneNumber.trim() || null;
+    }
+
+    const savedUser = await this.usersRepository.save(user);
+    return this.toPublicUser(savedUser);
+  }
+
+  async uploadMyAvatar(userId: string, file: UploadedImageFile | undefined) {
+    const user = await this.ensureUserExists(userId);
+    user.avatarUrl = await this.uploadAvatarToCloudinary(file, userId);
     const savedUser = await this.usersRepository.save(user);
     return this.toPublicUser(savedUser);
   }
@@ -674,6 +703,14 @@ export class UsersService {
       user.avatarUrl = updateAdminUserDto.avatarUrl;
     }
 
+    if (updateAdminUserDto.fullName !== undefined) {
+      user.fullName = updateAdminUserDto.fullName.trim() || null;
+    }
+
+    if (updateAdminUserDto.phoneNumber !== undefined) {
+      user.phoneNumber = updateAdminUserDto.phoneNumber.trim() || null;
+    }
+
     if (updateAdminUserDto.password !== undefined) {
       user.passwordHash = await this.hashPassword(updateAdminUserDto.password);
     }
@@ -692,6 +729,23 @@ export class UsersService {
       user.isActive = updateAdminUserDto.isActive;
     }
 
+    const savedUser = await this.usersRepository.save(user);
+    return {
+      ...this.toPublicUser(savedUser),
+      isActive: savedUser.isActive,
+      createdAt: savedUser.createdAt,
+      updatedAt: savedUser.updatedAt,
+    };
+  }
+
+  async uploadAdminUserAvatar(
+    actorUserId: string,
+    userId: string,
+    file: UploadedImageFile | undefined,
+  ) {
+    await this.ensureUserExists(actorUserId);
+    const user = await this.ensureUserExists(userId);
+    user.avatarUrl = await this.uploadAvatarToCloudinary(file, userId);
     const savedUser = await this.usersRepository.save(user);
     return {
       ...this.toPublicUser(savedUser),
@@ -795,5 +849,69 @@ export class UsersService {
       _id: user.userId,
       deleted: true,
     };
+  }
+
+  private async uploadAvatarToCloudinary(
+    file: UploadedImageFile | undefined,
+    userId: string,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Image file is required');
+    }
+    if (!file.mimetype.startsWith('image/')) {
+      throw new BadRequestException('Only image files are allowed');
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      throw new BadRequestException('Image size must be 5MB or less');
+    }
+
+    const cloudName = process.env.CLOUD_NAME;
+    const apiKey = process.env.API_KEY;
+    const apiSecret = process.env.API_SECRET;
+
+    if (!cloudName || !apiKey || !apiSecret) {
+      throw new InternalServerErrorException(
+        'Cloudinary environment variables are missing',
+      );
+    }
+
+    const folder = 'agri_ecommerce/avatars';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const publicId = `${userId}-${Date.now()}`;
+    const signature = createHash('sha1')
+      .update(
+        `folder=${folder}&public_id=${publicId}&timestamp=${timestamp}${apiSecret}`,
+      )
+      .digest('hex');
+
+    const formData = new FormData();
+    formData.append(
+      'file',
+      new Blob([new Uint8Array(file.buffer)], { type: file.mimetype }),
+      file.originalname,
+    );
+    formData.append('api_key', apiKey);
+    formData.append('timestamp', String(timestamp));
+    formData.append('signature', signature);
+    formData.append('folder', folder);
+    formData.append('public_id', publicId);
+
+    const response = await fetch(
+      `https://api.cloudinary.com/v1_1/${cloudName}/image/upload`,
+      { method: 'POST', body: formData },
+    );
+
+    const payload = (await response.json()) as {
+      secure_url?: string;
+      error?: { message?: string };
+    };
+
+    if (!response.ok || !payload.secure_url) {
+      throw new InternalServerErrorException(
+        payload.error?.message ?? 'Unable to upload image to Cloudinary',
+      );
+    }
+
+    return payload.secure_url;
   }
 }

@@ -135,10 +135,11 @@ export class ProductsService {
       );
     }
 
-    if (query.categoryId) {
-      const categoryIds = await this.collectCategoryIds(query.categoryId);
+    const requestedCategoryIds = this.parseCategoryIds(query);
+    if (requestedCategoryIds.length > 0) {
+      const nestedCategoryIds = await this.collectManyCategoryIds(requestedCategoryIds);
       queryBuilder.andWhere('product.category_id IN (:...categoryIds)', {
-        categoryIds,
+        categoryIds: nestedCategoryIds,
       });
     }
 
@@ -1103,6 +1104,28 @@ export class ProductsService {
     }
 
     return [...collectedIds];
+  }
+
+  private parseCategoryIds(query: QueryProductsDto) {
+    const rawIds = [
+      ...(query.categoryIds?.split(',') ?? []),
+      query.categoryId ?? '',
+    ];
+
+    return [
+      ...new Set(
+        rawIds.map((id) => id.trim()).filter((id): id is string => id.length > 0),
+      ),
+    ];
+  }
+
+  private async collectManyCategoryIds(rootCategoryIds: string[]) {
+    const collected = new Set<string>();
+    for (const categoryId of rootCategoryIds) {
+      const nestedIds = await this.collectCategoryIds(categoryId);
+      nestedIds.forEach((id) => collected.add(id));
+    }
+    return [...collected];
   }
 
   private async ensureUserExists(userId: string) {

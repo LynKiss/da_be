@@ -171,6 +171,8 @@ export class AuthService {
       _id: user.userId,
       username: user.username,
       email: user.email,
+      fullName: user.fullName,
+      phoneNumber: user.phoneNumber,
       avatarUrl: user.avatarUrl,
       role: {
         _id: user.role,

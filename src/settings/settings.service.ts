@@ -51,8 +51,13 @@ export type SmtpSettings = {
   secure: boolean;
 };
 
+export type AdminSidebarSettings = {
+  hiddenItemIds: string[];
+};
+
 const PAYMENT_SETTINGS_KEY = 'commerce_payments';
 const SMTP_SETTINGS_KEY = 'commerce_smtp';
+const ADMIN_SIDEBAR_SETTINGS_KEY = 'admin_sidebar';
 
 export const createDefaultPaymentSettings = (): PaymentSettings => ({
   cod: {
@@ -95,6 +100,10 @@ export const createDefaultSmtpSettings = (): SmtpSettings => ({
   pass: '',
   from: '',
   secure: false,
+});
+
+export const createDefaultAdminSidebarSettings = (): AdminSidebarSettings => ({
+  hiddenItemIds: [],
 });
 
 @Injectable()
@@ -162,6 +171,20 @@ export class SettingsService {
   async saveSmtpSettings(value: unknown) {
     const nextValue = this.normalizeSmtpSettings(value);
     await this.saveJsonSetting(SMTP_SETTINGS_KEY, nextValue);
+    return nextValue;
+  }
+
+  async getAdminSidebarSettings() {
+    return this.getJsonSetting(
+      ADMIN_SIDEBAR_SETTINGS_KEY,
+      createDefaultAdminSidebarSettings(),
+      (value) => this.normalizeAdminSidebarSettings(value),
+    );
+  }
+
+  async saveAdminSidebarSettings(value: unknown) {
+    const nextValue = this.normalizeAdminSidebarSettings(value);
+    await this.saveJsonSetting(ADMIN_SIDEBAR_SETTINGS_KEY, nextValue);
     return nextValue;
   }
 
@@ -262,6 +285,24 @@ export class SettingsService {
       pass: this.asString(source?.pass),
       from: this.asString(source?.from),
       secure: this.asBoolean(source?.secure, defaults.secure),
+    };
+  }
+
+  private normalizeAdminSidebarSettings(value: unknown): AdminSidebarSettings {
+    const source = this.asRecord(value);
+    const rawIds = Array.isArray(source?.hiddenItemIds)
+      ? source.hiddenItemIds
+      : [];
+
+    return {
+      hiddenItemIds: [
+        ...new Set(
+          rawIds
+            .filter((id): id is string => typeof id === 'string')
+            .map((id) => id.trim())
+            .filter(Boolean),
+        ),
+      ],
     };
   }
 

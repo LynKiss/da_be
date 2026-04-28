@@ -7,7 +7,10 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   RequirePermissions,
   ResponseMessage,
@@ -24,6 +27,13 @@ import { UpdateAdminUserStatusDto } from './dto/update-admin-user-status.dto';
 import type { IUser } from './users.interface';
 import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
+
+type UploadedImageFile = {
+  buffer: Buffer;
+  mimetype: string;
+  size: number;
+  originalname: string;
+};
 
 @Controller('users')
 export class UsersController {
@@ -62,6 +72,18 @@ export class UsersController {
     @Body() updateAdminUserDto: UpdateAdminUserDto,
   ) {
     return this.usersService.updateAdminUser(currentUser._id, id, updateAdminUserDto);
+  }
+
+  @Post('admin/customers/:id/avatar')
+  @RequirePermissions('manage_users')
+  @UseInterceptors(FileInterceptor('file'))
+  @ResponseMessage('Upload customer avatar')
+  uploadCustomerAvatar(
+    @User() currentUser: IUser,
+    @Param('id') id: string,
+    @UploadedFile() file: UploadedImageFile,
+  ) {
+    return this.usersService.uploadAdminUserAvatar(currentUser._id, id, file);
   }
 
   @Patch('admin/customers/:id/status')
@@ -114,6 +136,16 @@ export class UsersController {
     @Body() updateUserDto: UpdateUserDto,
   ) {
     return this.usersService.updateProfile(currentUser._id, updateUserDto);
+  }
+
+  @Post('me/avatar')
+  @UseInterceptors(FileInterceptor('file'))
+  @ResponseMessage('Upload my avatar')
+  uploadMyAvatar(
+    @User() currentUser: IUser,
+    @UploadedFile() file: UploadedImageFile,
+  ) {
+    return this.usersService.uploadMyAvatar(currentUser._id, file);
   }
 
   @Patch('me/change-password')

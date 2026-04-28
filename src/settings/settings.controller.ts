@@ -37,4 +37,20 @@ export class SettingsController {
   updateSmtpSettings(@Body() body: { smtp?: Record<string, unknown> }) {
     return this.settingsService.saveSmtpSettings(body.smtp ?? {});
   }
+
+  @RequirePermissions('manage_settings')
+  @Get('admin/sidebar')
+  @ResponseMessage('Get admin sidebar settings')
+  getAdminSidebarSettings() {
+    return this.settingsService.getAdminSidebarSettings();
+  }
+
+  @RequirePermissions('manage_settings')
+  @Put('admin/sidebar')
+  @ResponseMessage('Update admin sidebar settings')
+  updateAdminSidebarSettings(
+    @Body() body: { hiddenItemIds?: string[] },
+  ) {
+    return this.settingsService.saveAdminSidebarSettings(body);
+  }
 }
