@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as nodemailer from 'nodemailer';
-import { QueryFailedError, Repository } from 'typeorm';
+import { IsNull, QueryFailedError, Repository } from 'typeorm';
 import { ProductEntity } from '../products/entities/product.entity';
 import { SettingsService } from '../settings/settings.service';
 import { UserEntity } from '../users/entities/user.entity';
@@ -66,7 +66,7 @@ export class NotificationsService {
     try {
       const items = await this.notificationsRepository.find({
         where: [
-          { channel: NotificationChannel.SYSTEM },
+          { channel: NotificationChannel.SYSTEM, userId: IsNull() },
         ],
         order: { createdAt: 'DESC' },
         take: 20,
@@ -181,6 +181,27 @@ export class NotificationsService {
         metadata: { orderId, type: 'order_created' },
       }),
     ]);
+  }
+
+  async sendAdminOrderCreatedNotification(input: {
+    orderId: string;
+    fullName: string;
+    phone: string;
+    totalPayment: string;
+  }) {
+    return this.createNotification({
+      userId: null,
+      channel: NotificationChannel.SYSTEM,
+      title: 'Co don hang moi',
+      message: `Don ${input.orderId} tu ${input.fullName || input.phone} co tong tien ${input.totalPayment}.`,
+      metadata: {
+        orderId: input.orderId,
+        fullName: input.fullName,
+        phone: input.phone,
+        totalPayment: input.totalPayment,
+        type: 'admin_order_created',
+      },
+    });
   }
 
   async sendOrderStatusNotification(

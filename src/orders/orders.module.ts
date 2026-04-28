@@ -7,8 +7,10 @@ import { DiscountProductEntity } from '../discounts/entities/discount-product.en
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { AuthModule } from '../auth/auth.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { RolesModule } from '../roles/roles.module';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { SettingsModule } from '../settings/settings.module';
@@ -25,11 +27,15 @@ import { OrderEntity } from './entities/order.entity';
 import { PaymentTransactionEntity } from './entities/payment-transaction.entity';
 import { ReturnEntity } from './entities/return.entity';
 import { ShippingAddressEntity } from './entities/shipping-address.entity';
+import { OrdersAdminGateway } from './orders-admin.gateway';
+import { OrdersAdminPublisher } from './orders-admin.publisher';
 import { OrdersService } from './orders.service';
 
 @Module({
   imports: [
+    AuthModule,
     NotificationsModule,
+    RolesModule,
     SettingsModule,
     TypeOrmModule.forFeature([
       DeliveryMethodEntity,
@@ -54,7 +60,7 @@ import { OrdersService } from './orders.service';
     ]),
   ],
   controllers: [OrdersController, PaymentsController, ReturnsController, DeliveryMethodsController],
-  providers: [OrdersService],
+  providers: [OrdersService, OrdersAdminPublisher, OrdersAdminGateway],
   exports: [OrdersService, TypeOrmModule],
 })
 export class OrdersModule {}

@@ -28,6 +28,7 @@ import {
 } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { OrdersAdminPublisher } from './orders-admin.publisher';
 import { SettingsService } from '../settings/settings.service';
 import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
@@ -109,6 +110,7 @@ export class OrdersService {
     @InjectRepository(PaymentTransactionEntity)
     private readonly paymentTransactionsRepository: Repository<PaymentTransactionEntity>,
     private readonly notificationsService: NotificationsService,
+    private readonly ordersAdminPublisher: OrdersAdminPublisher,
     private readonly settingsService: SettingsService,
   ) {}
 
@@ -541,6 +543,16 @@ export class OrdersService {
     };
   }
 
+  private async notifyAdminsAboutNewOrder(order: OrderEntity) {
+    await this.notificationsService.sendAdminOrderCreatedNotification({
+      orderId: order.orderId,
+      fullName: order.fullName,
+      phone: order.phone,
+      totalPayment: order.totalPayment,
+    });
+    this.ordersAdminPublisher.emitNewOrder(order);
+  }
+
   private isValidAdminStatusTransition(
     currentStatus: OrderStatus,
     nextStatus: OrderStatus,
@@ -832,6 +844,7 @@ export class OrdersService {
     );
 
     const created = await this.findAnyOrder(orderId);
+    await this.notifyAdminsAboutNewOrder(created);
     return this.buildOrderDetail(created);
   }
 
@@ -1119,6 +1132,7 @@ export class OrdersService {
       userId,
       orderId,
     );
+    await this.notifyAdminsAboutNewOrder(createdOrder);
     return this.buildOrderDetail(createdOrder);
   }
 
