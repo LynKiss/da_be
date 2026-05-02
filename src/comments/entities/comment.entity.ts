@@ -41,6 +41,13 @@ export class CommentEntity {
   @Column({ name: 'rating', type: 'tinyint', nullable: true })
   rating: number | null;
 
+  /**
+   * Mảng URLs ảnh đính kèm review (max 5 ảnh).
+   * Stored as JSON array string. Empty array nếu không có ảnh.
+   */
+  @Column({ name: 'image_urls', type: 'json', nullable: true })
+  imageUrls: string[] | null;
+
   @Column({ name: 'like_count', type: 'int', default: 0 })
   likeCount: number;
 

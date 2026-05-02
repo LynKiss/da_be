@@ -7,7 +7,14 @@ import {
   Patch,
   Post,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  uploadImageToCloudinary,
+  type UploadedImageFile,
+} from '../common/cloudinary.util';
 import {
   Public,
   RequirePermissions,
@@ -69,6 +76,25 @@ export class CommentsController {
       productId,
       createReviewDto,
     );
+  }
+
+  /**
+   * Upload 1 ảnh review lên Cloudinary, trả về URL.
+   * Client gọi nhiều lần (max 5) trước khi submit review.
+   */
+  @Post('upload-image')
+  @UseInterceptors(FileInterceptor('file'))
+  @ResponseMessage('Review image uploaded')
+  async uploadReviewImage(
+    @User() currentUser: IUser,
+    @UploadedFile() file: UploadedImageFile | undefined,
+  ) {
+    const url = await uploadImageToCloudinary(file, {
+      folder: 'agri_ecommerce/reviews',
+      publicIdPrefix: `review-${currentUser._id}`,
+      maxBytes: 5 * 1024 * 1024,
+    });
+    return { url };
   }
 
   // ─── Admin endpoints ───────────────────────────────────────────────────────

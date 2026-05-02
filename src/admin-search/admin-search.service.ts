@@ -88,14 +88,14 @@ export class AdminSearchService {
     ]);
 
     const namedGroups = [
-      { key: 'commands', label: 'Chuc nang', items: groups[0] },
-      { key: 'products', label: 'San pham', items: groups[1] },
-      { key: 'orders', label: 'Don hang', items: groups[2] },
-      { key: 'customers', label: 'Khach hang', items: groups[3] },
-      { key: 'suppliers', label: 'Nha cung cap', items: groups[4] },
-      { key: 'news', label: 'Bai viet', items: groups[5] },
-      { key: 'discounts', label: 'Ma giam gia', items: groups[6] },
-      { key: 'warehouses', label: 'Kho hang', items: groups[7] },
+      { key: 'commands', label: 'Chức năng', items: groups[0] },
+      { key: 'products', label: 'Sản phẩm', items: groups[1] },
+      { key: 'orders', label: 'Đơn hàng', items: groups[2] },
+      { key: 'customers', label: 'Khách hàng', items: groups[3] },
+      { key: 'suppliers', label: 'Nhà cung cấp', items: groups[4] },
+      { key: 'news', label: 'Bài viết', items: groups[5] },
+      { key: 'discounts', label: 'Mã giảm giá', items: groups[6] },
+      { key: 'warehouses', label: 'Kho hàng', items: groups[7] },
     ].filter((group) => group.items.length > 0);
 
     return {
@@ -125,8 +125,8 @@ export class AdminSearchService {
       id: product.productId,
       type: 'product',
       title: product.productName,
-      subtitle: `Ton ${product.quantityAvailable} ${product.unit ?? ''}`.trim(),
-      badge: product.isShow ? 'Dang hien thi' : 'Dang an',
+      subtitle: `Tồn ${product.quantityAvailable} ${product.unit ?? ''}`.trim(),
+      badge: product.isShow ? 'Đang hiển thị' : 'Đang ẩn',
       path: `/admin/products?search=${encodeURIComponent(product.productName)}`,
     }));
   }
@@ -149,7 +149,7 @@ export class AdminSearchService {
     return orders.map((order) => ({
       id: order.orderId,
       type: 'order',
-      title: `Don ${order.orderId.slice(0, 8)}`,
+      title: `Đơn ${order.orderId.slice(0, 8)}`,
       subtitle: `${order.fullName} - ${order.phone}`,
       badge: order.orderStatus,
       path: `/admin/orders?search=${encodeURIComponent(order.orderId)}`,
@@ -275,7 +275,7 @@ export class AdminSearchService {
       type: 'warehouse',
       title: warehouse.name,
       subtitle: [warehouse.code, warehouse.managerName, warehouse.phone].filter(Boolean).join(' - '),
-      badge: warehouse.isDefault ? 'mac dinh' : warehouse.isActive ? 'active' : 'inactive',
+      badge: warehouse.isDefault ? 'Mặc định' : warehouse.isActive ? 'active' : 'inactive',
       path: `/admin/warehouses?search=${encodeURIComponent(warehouse.name)}`,
     }));
   }
@@ -294,29 +294,29 @@ export class AdminSearchService {
 
   private commands(): CommandItem[] {
     return [
-      this.command('dashboard', 'Tong quan', 'Dashboard dieu hanh', '/admin', ['dashboard', 'tong quan']),
-      this.command('products', 'Tat ca san pham', 'Quan ly catalog, gia, ton kho', '/admin/products', ['san pham', 'catalog'], ['manage_products']),
-      this.command('product-new', 'Them san pham', 'Tao san pham moi', '/admin/products/new', ['them san pham', 'tao san pham'], ['manage_products']),
-      this.command('low-stock', 'Tong quan ton kho', 'San pham sap het hang', '/admin/products/inventory-lowstock', ['ton kho', 'sap het hang', 'de xuat nhap hang', 'reorder'], ['manage_inventory']),
-      this.command('orders', 'Don hang', 'Quan ly trang thai don hang', '/admin/orders', ['don hang', 'dang giao', 'cho xac nhan'], ['manage_orders']),
-      this.command('returns', 'Tra hang', 'Xu ly yeu cau tra hang', '/admin/returns', ['tra hang', 'hoan hang'], ['manage_orders']),
-      this.command('customers', 'Khach hang', 'Tai khoan va thong tin khach', '/admin/customers', ['khach hang', 'tai khoan', 'user'], ['manage_users']),
-      this.command('discounts', 'Ma giam gia', 'Chuong trinh khuyen mai', '/admin/discounts', ['coupon', 'giam gia', 'khuyen mai'], ['manage_discounts']),
-      this.command('news', 'Bai viet', 'Tin tuc va noi dung', '/admin/news', ['bai viet', 'tin tuc', 'blog'], ['manage_news']),
-      this.command('reviews', 'Danh gia san pham', 'Kiem duyet review', '/admin/reviews', ['review', 'danh gia'], ['manage_reviews']),
-      this.command('support', 'Chat ho tro', 'Hoi thoai khach hang', '/admin/support-chats', ['chat', 'ho tro'], ['manage_support']),
-      this.command('suppliers', 'Nha cung cap', 'Danh sach nha cung cap', '/admin/suppliers', ['nha cung cap', 'supplier'], ['manage_products']),
-      this.command('procurement', 'Mua hang', 'Phieu mua va nhap hang', '/admin/procurement', ['mua hang', 'purchase order'], ['manage_products']),
-      this.command('pricing', 'Dinh gia ban', 'Goi y va dieu chinh gia', '/admin/pricing', ['gia ban', 'pricing'], ['manage_products']),
-      this.command('warehouses', 'Kho hang', 'Quan ly kho', '/admin/warehouses', ['kho hang', 'warehouse'], ['manage_inventory']),
-      this.command('ledger', 'So kho chi tiet', 'Lich su nhap xuat ton', '/admin/inventory-ledger', ['so kho', 'nhap xuat ton'], ['manage_inventory']),
-      this.command('valuation', 'Gia tri ton kho', 'Bao cao gia tri hang ton', '/admin/inventory-valuation', ['gia tri ton kho'], ['manage_reports']),
-      this.command('reports', 'Bao cao kinh doanh', 'Doanh thu va thong ke', '/admin/reports', ['bao cao', 'doanh thu'], ['manage_reports']),
-      this.command('recommendation-ai', 'AI goi y san pham', 'Machine Learning recommendation', '/admin/reports', ['ai', 'ml', 'goi y san pham', 'recommendation'], ['manage_reports']),
-      this.command('forecast-ai', 'Du bao nhu cau', 'Demand forecasting', '/admin/products/inventory-lowstock', ['du bao', 'forecast', 'demand'], ['manage_inventory']),
-      this.command('rice-ai', 'AI benh lua', 'Chan doan benh la lua', '/admin/rice-diagnosis', ['ai', 'benh lua', 'rice'], ['manage_ai_diagnosis']),
-      this.command('settings', 'Cai dat', 'Cau hinh he thong', '/admin/settings', ['cai dat', 'settings']),
-      this.command('security', 'Bao mat', 'Doi mat khau va bao mat tai khoan', '/admin/security', ['bao mat', 'mat khau']),
+      this.command('dashboard', 'Tổng quan', 'Dashboard điều hành', '/admin', ['dashboard', 'tong quan']),
+      this.command('products', 'Tất cả sản phẩm', 'Quản lý catalog, giá, tồn kho', '/admin/products', ['san pham', 'catalog'], ['manage_products']),
+      this.command('product-new', 'Thêm sản phẩm', 'Tạo sản phẩm mới', '/admin/products/new', ['them san pham', 'tao san pham'], ['manage_products']),
+      this.command('low-stock', 'Tổng quan tồn kho', 'Sản phẩm sắp hết hàng', '/admin/products/inventory-lowstock', ['ton kho', 'sap het hang', 'de xuat nhap hang', 'reorder'], ['manage_inventory']),
+      this.command('orders', 'Đơn hàng', 'Quản lý trạng thái đơn hàng', '/admin/orders', ['don hang', 'dang giao', 'cho xac nhan'], ['manage_orders']),
+      this.command('returns', 'Trả hàng', 'Xử lý yêu cầu trả hàng', '/admin/returns', ['tra hang', 'hoan hang'], ['manage_orders']),
+      this.command('customers', 'Khách hàng', 'Tài khoản và thông tin khách', '/admin/customers', ['khach hang', 'tai khoan', 'user'], ['manage_users']),
+      this.command('discounts', 'Mã giảm giá', 'Chương trình khuyến mãi', '/admin/discounts', ['coupon', 'giam gia', 'khuyen mai'], ['manage_discounts']),
+      this.command('news', 'Bài viết', 'Tin tức và nội dung', '/admin/news', ['bai viet', 'tin tuc', 'blog'], ['manage_news']),
+      this.command('reviews', 'Đánh giá sản phẩm', 'Kiểm duyệt review', '/admin/reviews', ['review', 'danh gia'], ['manage_reviews']),
+      this.command('support', 'Chat hỗ trợ', 'Hội thoại khách hàng', '/admin/support-chats', ['chat', 'ho tro'], ['manage_support']),
+      this.command('suppliers', 'Nhà cung cấp', 'Danh sách nhà cung cấp', '/admin/suppliers', ['nha cung cap', 'supplier'], ['manage_products']),
+      this.command('procurement', 'Mua hàng', 'Phiếu mua và nhập hàng', '/admin/procurement', ['mua hang', 'purchase order'], ['manage_products']),
+      this.command('pricing', 'Định giá bán', 'Gợi ý và điều chỉnh giá', '/admin/pricing', ['gia ban', 'pricing'], ['manage_products']),
+      this.command('warehouses', 'Kho hàng', 'Quản lý kho', '/admin/warehouses', ['kho hang', 'warehouse'], ['manage_inventory']),
+      this.command('ledger', 'Sổ kho chi tiết', 'Lịch sử nhập xuất tồn', '/admin/inventory-ledger', ['so kho', 'nhap xuat ton'], ['manage_inventory']),
+      this.command('valuation', 'Giá trị tồn kho', 'Báo cáo giá trị hàng tồn', '/admin/inventory-valuation', ['gia tri ton kho'], ['manage_reports']),
+      this.command('reports', 'Báo cáo kinh doanh', 'Doanh thu và thống kê', '/admin/reports', ['bao cao', 'doanh thu'], ['manage_reports']),
+      this.command('recommendation-ai', 'AI gợi ý sản phẩm', 'Machine Learning recommendation', '/admin/reports', ['ai', 'ml', 'goi y san pham', 'recommendation'], ['manage_reports']),
+      this.command('forecast-ai', 'Dự báo nhu cầu', 'Demand forecasting', '/admin/products/inventory-lowstock', ['du bao', 'forecast', 'demand'], ['manage_inventory']),
+      this.command('rice-ai', 'AI bệnh lúa', 'Chẩn đoán bệnh lá lúa', '/admin/rice-diagnosis', ['ai', 'benh lua', 'rice'], ['manage_ai_diagnosis']),
+      this.command('settings', 'Cài đặt', 'Cấu hình hệ thống', '/admin/settings', ['cai dat', 'settings']),
+      this.command('security', 'Bảo mật', 'Đổi mật khẩu và bảo mật tài khoản', '/admin/security', ['bao mat', 'mat khau']),
     ];
   }
 
@@ -333,7 +333,7 @@ export class AdminSearchService {
       type: 'command',
       title,
       subtitle,
-      badge: 'Dieu huong',
+      badge: 'Điều hướng',
       path,
       keywords,
       permissions,
