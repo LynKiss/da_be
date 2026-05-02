@@ -35,6 +35,7 @@ import { WarehousesModule } from './warehouses/warehouses.module';
 import { CreditLimitsModule } from './credit-limits/credit-limits.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { AdminSearchModule } from './admin-search/admin-search.module';
+import { SuperAdminSyncModule } from './super-admin-sync/super-admin-sync.module';
 
 @Module({
   imports: [
@@ -68,6 +69,7 @@ import { AdminSearchModule } from './admin-search/admin-search.module';
     CreditLimitsModule,
     AuditLogsModule,
     AdminSearchModule,
+    SuperAdminSyncModule,
     IntelligenceModule,
     HealthModule,
   ],

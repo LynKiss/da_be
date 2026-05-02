@@ -11,7 +11,7 @@ import {
 } from '@nestjs/websockets';
 import { JwtService } from '@nestjs/jwt';
 import type { Server, Socket } from 'socket.io';
-import { RolesService } from '../roles/roles.service';
+import { EffectivePermissionsService } from '../permissions/effective-permissions.service';
 import { UserRole } from '../users/entities/user.entity';
 import type { IUser } from '../users/users.interface';
 import {
@@ -48,7 +48,7 @@ export class OrdersAdminGateway
 
   constructor(
     private readonly jwtService: JwtService,
-    private readonly rolesService: RolesService,
+    private readonly effectivePermissionsService: EffectivePermissionsService,
     private readonly ordersAdminPublisher: OrdersAdminPublisher,
   ) {}
 
@@ -78,16 +78,18 @@ export class OrdersAdminGateway
     }
 
     const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
-    const role = payload.role?._id
-      ? await this.rolesService.findOne(payload.role._id)
-      : null;
 
     const currentUser: IUser = {
       _id: payload._id,
       username: payload.username,
       email: payload.email,
       role: payload.role,
-      permissions: role?.permissions ?? [],
+      permissions: payload.role?._id
+        ? await this.effectivePermissionsService.getEffectivePermissions(
+            payload._id,
+            payload.role._id,
+          )
+        : [],
     };
 
     const canManageOrders = currentUser.permissions.some(

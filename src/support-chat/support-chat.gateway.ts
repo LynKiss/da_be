@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import type { Server, Socket } from 'socket.io';
-import { RolesService } from '../roles/roles.service';
+import { EffectivePermissionsService } from '../permissions/effective-permissions.service';
 import { UserRole } from '../users/entities/user.entity';
 import type { IUser } from '../users/users.interface';
 import {
@@ -53,7 +53,7 @@ export class SupportChatGateway
 
   constructor(
     private readonly jwtService: JwtService,
-    private readonly rolesService: RolesService,
+    private readonly effectivePermissionsService: EffectivePermissionsService,
     private readonly supportChatService: SupportChatService,
     private readonly supportChatPublisher: SupportChatPublisher,
   ) {}
@@ -203,16 +203,18 @@ export class SupportChatGateway
     }
 
     const payload = await this.jwtService.verifyAsync<JwtPayload>(token);
-    const role = payload.role?._id
-      ? await this.rolesService.findOne(payload.role._id)
-      : null;
 
     const currentUser: IUser = {
       _id: payload._id,
       username: payload.username,
       email: payload.email,
       role: payload.role,
-      permissions: role?.permissions ?? [],
+      permissions: payload.role?._id
+        ? await this.effectivePermissionsService.getEffectivePermissions(
+            payload._id,
+            payload.role._id,
+          )
+        : [],
     };
 
     const isCustomer = currentUser.role?._id === UserRole.CUSTOMER;

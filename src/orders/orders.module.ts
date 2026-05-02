@@ -10,6 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { PermissionsModule } from '../permissions/permissions.module';
 import { RolesModule } from '../roles/roles.module';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
@@ -35,6 +36,7 @@ import { OrdersService } from './orders.service';
   imports: [
     AuthModule,
     NotificationsModule,
+    PermissionsModule,
     RolesModule,
     SettingsModule,
     TypeOrmModule.forFeature([

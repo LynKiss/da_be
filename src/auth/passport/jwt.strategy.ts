@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { RolesService } from '../../roles/roles.service';
+import { EffectivePermissionsService } from '../../permissions/effective-permissions.service';
 import { UserRole } from '../../users/entities/user.entity';
 
 type JwtPayload = {
@@ -19,7 +19,7 @@ type JwtPayload = {
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     configService: ConfigService,
-    private readonly rolesService: RolesService,
+    private readonly effectivePermissionsService: EffectivePermissionsService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -30,16 +30,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
-    const fullRole = payload.role?._id
-      ? await this.rolesService.findOne(payload.role._id)
-      : null;
-
     return {
       _id: payload._id,
       username: payload.username,
       email: payload.email,
       role: payload.role,
-      permissions: fullRole?.permissions ?? [],
+      permissions: payload.role?._id
+        ? await this.effectivePermissionsService.getEffectivePermissions(
+            payload._id,
+            payload.role._id,
+          )
+        : [],
     };
   }
 }

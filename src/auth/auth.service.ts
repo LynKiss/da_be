@@ -3,7 +3,7 @@ import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import ms, { StringValue } from 'ms';
-import { RolesService } from '../roles/roles.service';
+import { EffectivePermissionsService } from '../permissions/effective-permissions.service';
 import { RegisterUserDto } from '../users/dto/create-user.dto';
 import { UserEntity } from '../users/entities/user.entity';
 import { IUser, IUserRoleSummary } from '../users/users.interface';
@@ -22,7 +22,7 @@ export class AuthService {
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
-    private readonly rolesService: RolesService,
+    private readonly effectivePermissionsService: EffectivePermissionsService,
   ) {}
 
   async validateUser(username: string, pass: string): Promise<IUser | null> {
@@ -61,7 +61,7 @@ export class AuthService {
       refreshExpiresAt,
     );
 
-    const permissions = await this.loadPermissionsForRole(user.role);
+    const permissions = await this.loadEffectivePermissions(user);
 
     return {
       access_token: accessToken,
@@ -126,7 +126,7 @@ export class AuthService {
       ),
       user: {
         ...user,
-        permissions: await this.loadPermissionsForRole(user.role),
+        permissions: await this.loadEffectivePermissions(user),
       },
     };
   }
@@ -157,13 +157,15 @@ export class AuthService {
     };
   }
 
-  private async loadPermissionsForRole(role: IUserRoleSummary) {
-    if (!role?._id) {
+  private async loadEffectivePermissions(user: IUser) {
+    if (!user._id || !user.role?._id) {
       return [];
     }
 
-    const fullRole = await this.rolesService.findOne(role._id);
-    return fullRole.permissions;
+    return this.effectivePermissionsService.getEffectivePermissions(
+      user._id,
+      user.role._id,
+    );
   }
 
   private toAuthUser(user: UserEntity): IUser {

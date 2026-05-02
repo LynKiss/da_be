@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from '../auth/auth.module';
 import { CartsModule } from '../carts/carts.module';
 import { OrdersModule } from '../orders/orders.module';
+import { PermissionsModule } from '../permissions/permissions.module';
 import { ProductsModule } from '../products/products.module';
 import { RolesModule } from '../roles/roles.module';
 import { UserEntity } from '../users/entities/user.entity';
@@ -25,6 +26,7 @@ import { SupportMessageEntity } from './entities/support-message.entity';
     AuthModule,
     CartsModule,
     ProductsModule,
+    PermissionsModule,
     OrdersModule,
     UsersModule,
     RolesModule,
