@@ -60,7 +60,7 @@ export class PaymentsController {
     return this.ordersService.handleMomoIpn(body);
   }
 
-  @RequirePermissions('manage_orders')
+  @RequirePermissions('manage_payments')
   @Get('admin/transactions')
   @ResponseMessage('Get all payment transactions')
   getAllTransactions(

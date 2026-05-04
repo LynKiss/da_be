@@ -15,6 +15,7 @@ const CORE_PERMISSIONS = [
   { permissionKey: 'manage_inventory', permissionName: 'Quản lý kho hàng' },
   { permissionKey: 'manage_users', permissionName: 'Quản lý người dùng' },
   { permissionKey: 'manage_discounts', permissionName: 'Quản lý khuyến mãi' },
+  { permissionKey: 'manage_payments', permissionName: 'Quan ly thanh toan' },
   { permissionKey: 'manage_reports', permissionName: 'Quản lý báo cáo' },
   { permissionKey: 'manage_settings', permissionName: 'Quản lý cài đặt hệ thống' },
   { permissionKey: 'manage_delivery', permissionName: 'Quản lý vận chuyển' },
@@ -54,6 +55,7 @@ const CORE_PERMISSIONS = [
 // VIEWER: chỉ view_*
 const STAFF_PERMISSIONS = [
   'manage_orders',
+  'manage_payments',
   'manage_products',
   'manage_inventory',
   'manage_categories',

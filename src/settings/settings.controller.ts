@@ -17,21 +17,21 @@ export class SettingsController {
     return this.settingsService.getPublicCommerceSettings();
   }
 
-  @RequirePermissions('manage_settings')
+  @RequirePermissions('manage_payments')
   @Get('admin/commerce')
   @ResponseMessage('Get commerce settings')
   getAdminCommerceSettings() {
     return this.settingsService.getAdminCommerceSettings();
   }
 
-  @RequirePermissions('manage_settings')
+  @RequirePermissions('manage_payments')
   @Put('admin/payments')
   @ResponseMessage('Update payment settings')
   updatePaymentSettings(@Body() body: { payments?: Record<string, unknown> }) {
     return this.settingsService.savePaymentSettings(body.payments ?? {});
   }
 
-  @RequirePermissions('manage_settings')
+  @RequirePermissions('manage_payments')
   @Put('admin/smtp')
   @ResponseMessage('Update SMTP settings')
   updateSmtpSettings(@Body() body: { smtp?: Record<string, unknown> }) {
