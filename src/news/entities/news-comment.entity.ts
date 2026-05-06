@@ -27,8 +27,14 @@ export class NewsCommentEntity {
   @Column({ name: 'news_id', type: 'bigint', unsigned: true })
   newsId: string;
 
+  @Column({ name: 'parent_id', type: 'bigint', unsigned: true, nullable: true })
+  parentId: string | null;
+
   @Column({ name: 'content', type: 'text' })
   content: string;
+
+  @Column({ name: 'image_urls', type: 'json', nullable: true })
+  imageUrls: string[] | null;
 
   @Column({ name: 'like_count', type: 'int', default: 0 })
   likeCount: number;

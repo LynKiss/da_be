@@ -11,18 +11,17 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  uploadImageToCloudinary,
+  type UploadedImageFile,
+} from '../common/cloudinary.util';
 import { Public, RequirePermissions, ResponseMessage, User } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
+import { CreateNewsCommentDto } from './dto/create-news-comment.dto';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { QueryNewsDto } from './dto/query-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
 import { NewsService } from './news.service';
-
-type UploadedImageFile = {
-  buffer: Buffer;
-  originalname: string;
-  mimetype: string;
-};
 
 @Controller('news')
 export class NewsController {
@@ -128,14 +127,38 @@ export class NewsController {
     return this.newsService.getNewsComments(id);
   }
 
+  @Post('public/comments/upload-image')
+  @UseInterceptors(FileInterceptor('file'))
+  @ResponseMessage('Comment image uploaded')
+  async uploadCommentImage(
+    @User() currentUser: IUser,
+    @UploadedFile() file: UploadedImageFile | undefined,
+  ) {
+    const url = await uploadImageToCloudinary(file, {
+      folder: 'agri_ecommerce/news_comments',
+      publicIdPrefix: `comment-${currentUser._id}`,
+      maxBytes: 5 * 1024 * 1024,
+    });
+    return { url };
+  }
+
   @Post('public/:id/comments')
   @ResponseMessage('Add news comment')
   addComment(
     @User() currentUser: IUser,
     @Param('id') id: string,
-    @Body() body: { content: string },
+    @Body() dto: CreateNewsCommentDto,
   ) {
-    return this.newsService.addNewsComment(id, currentUser._id, body.content);
+    return this.newsService.addNewsComment(id, currentUser._id, dto);
+  }
+
+  @Delete('public/comments/:commentId')
+  @ResponseMessage('Delete own comment')
+  deleteOwnComment(
+    @User() currentUser: IUser,
+    @Param('commentId') commentId: string,
+  ) {
+    return this.newsService.deleteOwnComment(currentUser._id, commentId);
   }
 
   @Public()

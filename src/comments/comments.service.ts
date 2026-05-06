@@ -1,12 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Like, Repository } from 'typeorm';
+import { IsNull, Like, Not, Repository } from 'typeorm';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderEntity, OrderStatus } from '../orders/entities/order.entity';
 import { ProductEntity } from '../products/entities/product.entity';
@@ -148,6 +149,20 @@ export class CommentsService {
     return { likeCount: comment.likeCount, dislikeCount: Math.max(0, comment.dislikeCount - 1) };
   }
 
+  async deleteOwnReview(userId: string, reviewId: string) {
+    const review = await this.commentsRepository.findOneBy({ commentId: reviewId });
+    if (!review) throw new NotFoundException('Đánh giá không tìm thấy');
+    if (review.userId !== userId)
+      throw new ForbiddenException('Bạn không có quyền xóa đánh giá này');
+    if (review.status === ProductCommentStatus.DELETED)
+      throw new BadRequestException('Đánh giá đã bị xóa rồi');
+
+    review.status = ProductCommentStatus.DELETED;
+    await this.commentsRepository.save(review);
+    await this.refreshProductRating(review.productId);
+    return { id: review.commentId, deleted: true };
+  }
+
   async findAdminReviews(params: {
     page: number;
     limit: number;
@@ -155,8 +170,9 @@ export class CommentsService {
     rating?: number;
     productId?: string;
     search?: string;
+    hasImages?: boolean;
   }) {
-    const { page, limit, status, rating, productId, search } = params;
+    const { page, limit, status, rating, productId, search, hasImages } = params;
     const skip = (page - 1) * limit;
 
     const where: Record<string, unknown> = {};
@@ -175,6 +191,10 @@ export class CommentsService {
 
     if (search && search.trim()) {
       where['content'] = Like(`%${search.trim()}%`);
+    }
+
+    if (hasImages === true) {
+      where['imageUrls'] = Not(IsNull());
     }
 
     const [reviews, total] = await this.commentsRepository.findAndCount({
@@ -215,6 +235,7 @@ export class CommentsService {
         content: r.content,
         rating: r.rating,
         status: r.status,
+        imageUrls: r.imageUrls ?? [],
         likeCount: r.likeCount,
         dislikeCount: r.dislikeCount,
         createdAt: r.createdAt,

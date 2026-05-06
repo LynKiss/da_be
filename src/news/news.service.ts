@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
@@ -102,32 +103,130 @@ export class NewsService {
   }
 
   async getNewsComments(newsId: string) {
-    const comments = await this.newsCommentRepository.find({
-      where: { newsId, status: NewsCommentStatus.VISIBLE },
-      order: { createdAt: 'DESC' },
+    // Fetch both VISIBLE and DELETED (DELETED needed for stub display when replies exist)
+    const all = await this.newsCommentRepository.find({
+      where: [
+        { newsId, status: NewsCommentStatus.VISIBLE },
+        { newsId, status: NewsCommentStatus.DELETED },
+      ],
+      order: { createdAt: 'ASC' },
     });
-    const userIds = [...new Set(comments.map((c) => c.userId))];
-    const users = userIds.length > 0
-      ? await this.usersRepository.createQueryBuilder('u').select(['u.userId', 'u.username']).whereInIds(userIds).getMany()
-      : [];
+
+    // Only look up usernames for non-deleted comments
+    const visibleUserIds = [
+      ...new Set(all.filter((c) => c.status === NewsCommentStatus.VISIBLE).map((c) => c.userId)),
+    ];
+    const users =
+      visibleUserIds.length > 0
+        ? await this.usersRepository
+            .createQueryBuilder('u')
+            .select(['u.userId', 'u.username'])
+            .whereInIds(visibleUserIds)
+            .getMany()
+        : [];
     const userMap = new Map(users.map((u) => [u.userId, u.username]));
-    return comments.map((c) => ({
-      id: c.commentId,
-      content: c.content,
-      likeCount: c.likeCount,
-      dislikeCount: c.dislikeCount,
-      createdAt: c.createdAt,
-      author: { username: userMap.get(c.userId) ?? 'Độc giả' },
-    }));
+
+    // Build parentId → VISIBLE children map
+    const childrenMap = new Map<string, NewsCommentEntity[]>();
+    all.forEach((c) => {
+      if (c.parentId && c.status === NewsCommentStatus.VISIBLE) {
+        const arr = childrenMap.get(c.parentId) ?? [];
+        arr.push(c);
+        childrenMap.set(c.parentId, arr);
+      }
+    });
+
+    const mapComment = (c: NewsCommentEntity): Record<string, unknown> => {
+      const deleted = c.status === NewsCommentStatus.DELETED;
+      const replies = (childrenMap.get(c.commentId) ?? []).map((r) => mapComment(r));
+      return {
+        id: c.commentId,
+        userId: deleted ? null : c.userId,
+        parentId: c.parentId ?? null,
+        content: deleted ? '[Bình luận đã bị xóa]' : c.content,
+        imageUrls: deleted ? [] : (c.imageUrls ?? []),
+        likeCount: deleted ? 0 : c.likeCount,
+        dislikeCount: deleted ? 0 : c.dislikeCount,
+        isDeleted: deleted,
+        createdAt: c.createdAt,
+        author: deleted ? null : { username: userMap.get(c.userId) ?? 'Độc giả' },
+        replies,
+      };
+    };
+
+    return all
+      .filter((c) => !c.parentId) // root comments only
+      .map((c) => mapComment(c))
+      .filter((dto) => {
+        // Show VISIBLE roots always; show DELETED roots only when they have visible replies
+        const deleted = dto['isDeleted'] as boolean;
+        const replies = dto['replies'] as unknown[];
+        return !deleted || replies.length > 0;
+      })
+      .reverse(); // newest first
   }
 
-  async addNewsComment(newsId: string, userId: string, content: string) {
+  async deleteOwnComment(userId: string, commentId: string) {
+    const comment = await this.newsCommentRepository.findOneBy({ commentId });
+    if (!comment) throw new NotFoundException('Bình luận không tìm thấy');
+    if (comment.userId !== userId)
+      throw new ForbiddenException('Bạn không có quyền xóa bình luận này');
+    if (comment.status === NewsCommentStatus.DELETED)
+      throw new BadRequestException('Bình luận đã bị xóa rồi');
+
+    // Count visible replies to decide stub vs clean delete
+    const replyCount = await this.newsCommentRepository.count({
+      where: { parentId: commentId, status: NewsCommentStatus.VISIBLE },
+    });
+
+    comment.status = NewsCommentStatus.DELETED;
+    if (replyCount > 0) {
+      // Keep the row as a stub so the thread structure stays intact
+      comment.content = '[Bình luận đã bị xóa]';
+      comment.imageUrls = null;
+    }
+    await this.newsCommentRepository.save(comment);
+    return { id: comment.commentId, deleted: true, hasStub: replyCount > 0 };
+  }
+
+  async addNewsComment(
+    newsId: string,
+    userId: string,
+    dto: { content: string; imageUrls?: string[]; parentId?: string },
+  ) {
     const article = await this.newsRepository.findOneBy({ newsId, isPublished: true });
     if (!article) throw new NotFoundException('Bài viết không tìm thấy');
-    const comment = this.newsCommentRepository.create({ newsId, userId, content, likeCount: 0, dislikeCount: 0, status: NewsCommentStatus.VISIBLE });
+
+    if (dto.parentId) {
+      const parent = await this.newsCommentRepository.findOneBy({ commentId: dto.parentId, newsId });
+      if (!parent || parent.status !== NewsCommentStatus.VISIBLE) {
+        throw new NotFoundException('Bình luận gốc không tồn tại');
+      }
+    }
+
+    const comment = this.newsCommentRepository.create({
+      newsId,
+      userId,
+      parentId: dto.parentId ?? null,
+      content: dto.content,
+      imageUrls: dto.imageUrls && dto.imageUrls.length > 0 ? dto.imageUrls : null,
+      likeCount: 0,
+      dislikeCount: 0,
+      status: NewsCommentStatus.VISIBLE,
+    });
     const saved = await this.newsCommentRepository.save(comment);
     const user = await this.usersRepository.findOneBy({ userId }).catch(() => null);
-    return { id: saved.commentId, content: saved.content, likeCount: 0, dislikeCount: 0, createdAt: saved.createdAt, author: { username: user?.username ?? 'Độc giả' } };
+    return {
+      id: saved.commentId,
+      parentId: saved.parentId ?? null,
+      content: saved.content,
+      imageUrls: saved.imageUrls ?? [],
+      likeCount: 0,
+      dislikeCount: 0,
+      createdAt: saved.createdAt,
+      author: { username: user?.username ?? 'Độc giả' },
+      replies: [],
+    };
   }
 
   async likeNewsComment(commentId: string) {
@@ -331,7 +430,9 @@ export class NewsService {
       },
       items: comments.map((c) => ({
         id: c.commentId,
+        parentId: c.parentId ?? null,
         content: c.content,
+        imageUrls: c.imageUrls ?? [],
         status: c.status,
         likeCount: c.likeCount,
         dislikeCount: c.dislikeCount,

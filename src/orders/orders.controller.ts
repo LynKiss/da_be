@@ -76,6 +76,13 @@ export class OrdersController {
     return this.ordersService.findAllOrders(query);
   }
 
+  @Get('admin/stats')
+  @RequirePermissions('manage_orders')
+  @ResponseMessage('Get order stats')
+  getOrderStats() {
+    return this.ordersService.getOrderStats();
+  }
+
   @Get(':id')
   @ResponseMessage('Get order detail')
   getOrderDetail(@User() currentUser: IUser, @Param('id') id: string) {

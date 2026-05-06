@@ -116,6 +116,7 @@ export class CommentsController {
     @Query('rating') rating?: string,
     @Query('productId') productId?: string,
     @Query('search') search?: string,
+    @Query('hasImages') hasImages?: string,
   ) {
     return this.commentsService.findAdminReviews({
       page: Math.max(1, parseInt(page, 10) || 1),
@@ -124,6 +125,7 @@ export class CommentsController {
       rating: rating ? parseInt(rating, 10) : undefined,
       productId,
       search,
+      hasImages: hasImages === 'true' ? true : undefined,
     });
   }
 
@@ -146,5 +148,11 @@ export class CommentsController {
   @ResponseMessage('Review deleted')
   deleteReview(@Param('id') id: string) {
     return this.commentsService.deleteReview(id);
+  }
+
+  @Delete(':id')
+  @ResponseMessage('Delete own review')
+  deleteOwnReview(@User() currentUser: IUser, @Param('id') id: string) {
+    return this.commentsService.deleteOwnReview(currentUser._id, id);
   }
 }
