@@ -1786,7 +1786,7 @@ export class OrdersService {
       orderId?: string;
       requestId?: string;
       amount?: number;
-      resultCode?: number;
+      resultCode?: number | string;
       transId?: string;
       message?: string;
     };
@@ -1837,7 +1837,8 @@ export class OrdersService {
       }
     }
 
-    const success = resultCode === 0;
+    const resultCodeValue = Number(resultCode);
+    const success = resultCodeValue === 0;
     const paymentStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
 
     // Update existing transaction status if found, or create a new one
