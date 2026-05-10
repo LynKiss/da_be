@@ -14,6 +14,13 @@ export enum UserRole {
   CUSTOMER = 'customer',
 }
 
+export enum MembershipTier {
+  NONE = 'none',
+  SILVER = 'silver',
+  GOLD = 'gold',
+  DIAMOND = 'diamond',
+}
+
 @Entity({ name: 'users' })
 export class UserEntity {
   @PrimaryColumn({ name: 'user_id', type: 'char', length: 36 })
@@ -73,6 +80,23 @@ export class UserEntity {
     nullable: true,
   })
   resetPasswordExpiresAt: Date | null;
+
+  @Column({
+    name: 'membership_tier',
+    type: 'enum',
+    enum: MembershipTier,
+    default: MembershipTier.NONE,
+  })
+  membershipTier: MembershipTier;
+
+  @Column({
+    name: 'total_spent',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    default: '0.00',
+  })
+  totalSpent: string;
 
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;

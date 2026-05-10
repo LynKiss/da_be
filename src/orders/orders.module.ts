@@ -31,6 +31,7 @@ import { ShippingAddressEntity } from './entities/shipping-address.entity';
 import { OrdersAdminGateway } from './orders-admin.gateway';
 import { OrdersAdminPublisher } from './orders-admin.publisher';
 import { OrdersService } from './orders.service';
+import { MembershipModule } from '../membership/membership.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { OrdersService } from './orders.service';
     PermissionsModule,
     RolesModule,
     SettingsModule,
+    MembershipModule,
     TypeOrmModule.forFeature([
       DeliveryMethodEntity,
       ShippingAddressEntity,

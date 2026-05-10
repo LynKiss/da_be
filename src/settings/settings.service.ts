@@ -58,6 +58,23 @@ export type AdminSidebarSettings = {
 const PAYMENT_SETTINGS_KEY = 'commerce_payments';
 const SMTP_SETTINGS_KEY = 'commerce_smtp';
 const ADMIN_SIDEBAR_SETTINGS_KEY = 'admin_sidebar';
+const MEMBERSHIP_TIERS_KEY = 'membership_tiers';
+
+export type MembershipTierSetting = {
+  tier: 'silver' | 'gold' | 'diamond';
+  minSpent: number;
+  discountPercent: number;
+  couponValidDays: number;
+  label: string;
+};
+
+export type MembershipTierSettings = MembershipTierSetting[];
+
+export const createDefaultMembershipTierSettings = (): MembershipTierSettings => [
+  { tier: 'silver',  label: 'Bạc',       minSpent: 3_000_000,  discountPercent: 5,  couponValidDays: 30 },
+  { tier: 'gold',    label: 'Vàng',      minSpent: 10_000_000, discountPercent: 10, couponValidDays: 60 },
+  { tier: 'diamond', label: 'Kim Cương', minSpent: 20_000_000, discountPercent: 15, couponValidDays: 90 },
+];
 
 export const createDefaultPaymentSettings = (): PaymentSettings => ({
   cod: {
@@ -188,6 +205,20 @@ export class SettingsService {
     return nextValue;
   }
 
+  async getMembershipTierSettings(): Promise<MembershipTierSettings> {
+    return this.getJsonSetting(
+      MEMBERSHIP_TIERS_KEY,
+      createDefaultMembershipTierSettings(),
+      (value) => this.normalizeMembershipTierSettings(value),
+    );
+  }
+
+  async saveMembershipTierSettings(value: unknown): Promise<MembershipTierSettings> {
+    const nextValue = this.normalizeMembershipTierSettings(value);
+    await this.saveJsonSetting(MEMBERSHIP_TIERS_KEY, nextValue);
+    return nextValue;
+  }
+
   async getResolvedSmtpConfig() {
     const smtp = await this.getSmtpSettings();
     const port = Number(
@@ -286,6 +317,28 @@ export class SettingsService {
       from: this.asString(source?.from),
       secure: this.asBoolean(source?.secure, defaults.secure),
     };
+  }
+
+  private normalizeMembershipTierSettings(value: unknown): MembershipTierSettings {
+    const defaults = createDefaultMembershipTierSettings();
+    if (!Array.isArray(value)) return defaults;
+    const tiers: MembershipTierSetting[] = [];
+    for (const item of value as unknown[]) {
+      const src = this.asRecord(item);
+      if (!src) continue;
+      const tier = this.asString(src.tier) as MembershipTierSetting['tier'];
+      if (!['silver', 'gold', 'diamond'].includes(tier)) continue;
+      const def = defaults.find((d) => d.tier === tier)!;
+      tiers.push({
+        tier,
+        label: this.asString(src.label) || def.label,
+        minSpent: typeof src.minSpent === 'number' ? src.minSpent : def.minSpent,
+        discountPercent: typeof src.discountPercent === 'number' ? src.discountPercent : def.discountPercent,
+        couponValidDays: typeof src.couponValidDays === 'number' ? src.couponValidDays : def.couponValidDays,
+      });
+    }
+    if (tiers.length === 0) return defaults;
+    return tiers.sort((a, b) => b.minSpent - a.minSpent);
   }
 
   private normalizeAdminSidebarSettings(value: unknown): AdminSidebarSettings {

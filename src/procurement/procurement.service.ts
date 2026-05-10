@@ -393,6 +393,22 @@ export class ProcurementService {
   }
 
   async createGr(dto: CreateGrDto, performer?: { userId: string; username: string; ip?: string }) {
+    if (dto.poId) {
+      const linkedPo = await this.poRepo.findOne({ where: { poId: dto.poId } });
+      if (!linkedPo) {
+        throw new BadRequestException(`Không tìm thấy PO ${dto.poId}`);
+      }
+      if (linkedPo.supplierId !== dto.supplierId) {
+        throw new BadRequestException('Nhà cung cấp phiếu nhận phải khớp với nhà cung cấp của PO liên kết');
+      }
+      if (linkedPo.status === PurchaseOrderStatus.CANCELLED) {
+        throw new BadRequestException('Không thể tạo phiếu nhận cho PO đã hủy');
+      }
+      if (linkedPo.status === PurchaseOrderStatus.RECEIVED) {
+        throw new BadRequestException('PO này đã nhận đủ hàng');
+      }
+    }
+
     const shippingCost = dto.shippingCost ?? 0;
     const otherCost = dto.otherCost ?? 0;
     const totalExtraCost = shippingCost + otherCost;

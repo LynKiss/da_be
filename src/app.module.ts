@@ -36,6 +36,7 @@ import { CreditLimitsModule } from './credit-limits/credit-limits.module';
 import { AuditLogsModule } from './audit-logs/audit-logs.module';
 import { AdminSearchModule } from './admin-search/admin-search.module';
 import { SuperAdminSyncModule } from './super-admin-sync/super-admin-sync.module';
+import { MembershipModule } from './membership/membership.module';
 
 @Module({
   imports: [
@@ -72,6 +73,7 @@ import { SuperAdminSyncModule } from './super-admin-sync/super-admin-sync.module
     SuperAdminSyncModule,
     IntelligenceModule,
     HealthModule,
+    MembershipModule,
   ],
   controllers: [AppController],
   providers: [
