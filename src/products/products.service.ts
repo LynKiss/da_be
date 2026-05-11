@@ -1136,7 +1136,7 @@ export class ProductsService {
   }
 
   private async enrichProductWithFullDetails(product: ProductEntity) {
-    const [images, descriptionImages, tags, enriched] = await Promise.all([
+    const [images, descriptionImages, tags, enriched, soldResult] = await Promise.all([
       this.productImagesRepository.find({
         where: { productId: product.productId },
         order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
@@ -1147,6 +1147,16 @@ export class ProductsService {
       }),
       this.getProductTagsInternal(product.productId),
       this.enrichProductWithDiscount(product),
+      this.productsRepository.manager
+        .createQueryBuilder()
+        .select('COALESCE(SUM(oi.quantity), 0)', 'total')
+        .from('order_items', 'oi')
+        .innerJoin('orders', 'o', 'o.order_id = oi.order_id')
+        .where('oi.product_id = :productId', { productId: product.productId })
+        .andWhere('o.order_status NOT IN (:...excluded)', {
+          excluded: ['cancelled', 'returned'],
+        })
+        .getRawOne<{ total: string }>(),
     ]);
 
     const [origin, subcategory, category] = await Promise.all([
@@ -1161,7 +1171,16 @@ export class ProductsService {
       this.categoriesRepository.findOneBy({ categoryId: product.categoryId }),
     ]);
 
-    return { ...enriched, images, descriptionImages, tags, origin, subcategory, category };
+    return {
+      ...enriched,
+      soldCount: Number(soldResult?.total ?? 0),
+      images,
+      descriptionImages,
+      tags,
+      origin,
+      subcategory,
+      category,
+    };
   }
 
   private async enrichProductWithDiscount(product: ProductEntity) {
