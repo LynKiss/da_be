@@ -65,6 +65,9 @@ export class NotificationEntity {
   })
   deliveryError: string | null;
 
+  @Column({ name: 'is_read', type: 'tinyint', width: 1, default: 0 })
+  isRead: boolean;
+
   @Column({ name: 'sent_at', type: 'datetime', nullable: true })
   sentAt: Date | null;
 

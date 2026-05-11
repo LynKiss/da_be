@@ -141,8 +141,9 @@ export class NotificationsService {
   async listMyNotifications(userId: string) {
     try {
       const items = await this.notificationsRepository.find({
-        where: { userId },
+        where: { userId, channel: NotificationChannel.SYSTEM },
         order: { createdAt: 'DESC' },
+        take: 50,
       });
 
       return items.map((item) => this.toResponse(item));
@@ -154,6 +155,18 @@ export class NotificationsService {
         return [];
       }
 
+      throw error;
+    }
+  }
+
+  async markAllRead(userId: string) {
+    try {
+      await this.notificationsRepository.update(
+        { userId, channel: NotificationChannel.SYSTEM, isRead: false as unknown as boolean },
+        { isRead: true as unknown as boolean },
+      );
+    } catch (error) {
+      if (this.isMissingNotificationsTable(error)) return;
       throw error;
     }
   }
@@ -351,6 +364,7 @@ export class NotificationsService {
       email: notification.email,
       channel: notification.channel,
       status: notification.status,
+      isRead: notification.isRead ?? false,
       title: notification.title,
       message: notification.message,
       metadata: notification.metadata,

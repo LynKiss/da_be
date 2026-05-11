@@ -1,4 +1,4 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Patch } from '@nestjs/common';
 import { RequirePermissions, ResponseMessage, User } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
 import { NotificationsService } from './notifications.service';
@@ -11,6 +11,13 @@ export class NotificationsController {
   @ResponseMessage('Get my notifications')
   getMyNotifications(@User() currentUser: IUser) {
     return this.notificationsService.listMyNotifications(currentUser._id);
+  }
+
+  @Patch('me/read')
+  @ResponseMessage('Mark all notifications as read')
+  async markAllRead(@User() currentUser: IUser) {
+    await this.notificationsService.markAllRead(currentUser._id);
+    return { success: true };
   }
 
   @Get('admin/summary')
