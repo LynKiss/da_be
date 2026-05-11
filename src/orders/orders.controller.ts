@@ -101,6 +101,19 @@ export class OrdersController {
     return this.ordersService.cancelOrder(currentUser._id, id);
   }
 
+  @Patch(':id/confirm-received')
+  @ResponseMessage('Customer confirm received')
+  confirmReceived(@User() currentUser: IUser, @Param('id') id: string) {
+    return this.ordersService.confirmReceivedByCustomer(currentUser, id);
+  }
+
+  @Patch(':id/payment/confirm')
+  @RequirePermissions('manage_orders')
+  @ResponseMessage('Admin confirm payment')
+  confirmPayment(@User() currentUser: IUser, @Param('id') id: string) {
+    return this.ordersService.confirmPayment(currentUser, id);
+  }
+
   @Patch(':id/status')
   @RequirePermissions('manage_orders')
   @ResponseMessage('Update order status')

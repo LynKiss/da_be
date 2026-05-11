@@ -26,6 +26,7 @@ export enum PaymentMethod {
   VNPAY = 'vnpay',
   ZALOPAY = 'zalopay',
   PAYPAL = 'paypal',
+  CREDIT = 'credit',
 }
 
 export enum PaymentStatus {

@@ -35,6 +35,7 @@ export class CreditLimitsService {
           ...item,
           username: user?.username ?? null,
           email: user?.email ?? null,
+          fullName: user?.fullName ?? null,
           availableCredit: Math.max(0, Number(item.creditLimit) - Number(item.currentDebt ?? 0)),
         };
       }),
@@ -54,6 +55,7 @@ export class CreditLimitsService {
       ...limit,
       username: user?.username ?? null,
       email: user?.email ?? null,
+      fullName: user?.fullName ?? null,
       availableCredit,
     };
   }
@@ -87,6 +89,7 @@ export class CreditLimitsService {
       .createQueryBuilder('o')
       .select('COALESCE(SUM(o.total_payment), 0)', 'total')
       .where('o.user_id = :userId', { userId })
+      .andWhere('o.payment_method = :pm', { pm: 'credit' })
       .andWhere('o.payment_status = :ps', { ps: PaymentStatus.UNPAID })
       .andWhere('o.order_status NOT IN (:...cancelled)', {
         cancelled: [OrderStatus.CANCELLED, OrderStatus.RETURNED],
@@ -96,6 +99,18 @@ export class CreditLimitsService {
     const debt = Number(unpaidTotal?.total ?? 0);
     await this.repo.update({ userId }, { currentDebt: String(debt) });
     return this.findByUser(userId);
+  }
+
+  async getMyLimit(userId: string) {
+    const limit = await this.repo.findOne({ where: { userId, isActive: true as unknown as boolean } });
+    if (!limit) return null;
+    const availableCredit = Math.max(0, Number(limit.creditLimit) - Number(limit.currentDebt ?? 0));
+    return {
+      creditLimit: Number(limit.creditLimit),
+      currentDebt: Number(limit.currentDebt ?? 0),
+      availableCredit,
+      isActive: limit.isActive,
+    };
   }
 
   async recordPayment(dto: RecordPaymentDto) {
@@ -129,5 +144,17 @@ export class CreditLimitsService {
     limit.isActive = false;
     await this.repo.save(limit);
     return { message: 'Đã vô hiệu hạn mức' };
+  }
+
+  async getCustomers(search?: string) {
+    const qb = this.userRepo.createQueryBuilder('u')
+      .select(['u.userId', 'u.username', 'u.email', 'u.fullName'])
+      .where('u.isActive = :active', { active: true })
+      .orderBy('u.createdAt', 'DESC')
+      .take(100);
+    if (search) {
+      qb.andWhere('(u.username LIKE :s OR u.email LIKE :s OR u.fullName LIKE :s)', { s: `%${search}%` });
+    }
+    return qb.getMany();
   }
 }

@@ -49,4 +49,8 @@ export class UpdateAdminUserDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  isWholesale?: boolean;
 }

@@ -66,6 +66,9 @@ export class UserEntity {
   @Column({ name: 'is_active', type: 'tinyint', width: 1, default: () => '1' })
   isActive: boolean;
 
+  @Column({ name: 'is_wholesale', type: 'tinyint', width: 1, default: () => '0' })
+  isWholesale: boolean;
+
   @Column({
     name: 'reset_password_code',
     type: 'varchar',

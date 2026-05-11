@@ -68,6 +68,7 @@ import {
 } from './entities/return.entity';
 import { ShippingAddressEntity } from './entities/shipping-address.entity';
 import { MembershipService } from '../membership/membership.service';
+import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-credit-limit.entity';
 
 @Injectable()
 export class OrdersService {
@@ -110,6 +111,8 @@ export class OrdersService {
     private readonly returnsRepository: Repository<ReturnEntity>,
     @InjectRepository(PaymentTransactionEntity)
     private readonly paymentTransactionsRepository: Repository<PaymentTransactionEntity>,
+    @InjectRepository(CustomerCreditLimitEntity)
+    private readonly creditLimitRepository: Repository<CustomerCreditLimitEntity>,
     private readonly notificationsService: NotificationsService,
     private readonly ordersAdminPublisher: OrdersAdminPublisher,
     private readonly settingsService: SettingsService,
@@ -313,6 +316,9 @@ export class OrdersService {
   private async ensurePaymentMethodEnabled(method: PaymentMethod) {
     if (method === PaymentMethod.PAYPAL) {
       throw new BadRequestException('Payment method is not supported');
+    }
+    if (method === PaymentMethod.CREDIT) {
+      return;
     }
 
     const isActive = await this.settingsService.isPaymentMethodActive(method);
@@ -587,7 +593,7 @@ export class OrdersService {
       [OrderStatus.BACKORDERED]: [OrderStatus.PENDING, OrderStatus.CANCELLED],
       [OrderStatus.PENDING]: [OrderStatus.CONFIRMED, OrderStatus.CANCELLED],
       [OrderStatus.CONFIRMED]: [OrderStatus.PROCESSING, OrderStatus.CANCELLED],
-      [OrderStatus.PROCESSING]: [OrderStatus.SHIPPING, OrderStatus.CANCELLED],
+      [OrderStatus.PROCESSING]: [OrderStatus.SHIPPING, OrderStatus.DELIVERED, OrderStatus.CANCELLED],
       [OrderStatus.SHIPPING]: [
         OrderStatus.DELIVERED,
         OrderStatus.PARTIAL_DELIVERED,
@@ -899,7 +905,7 @@ export class OrdersService {
     createOrderDto: CreateOrderDto,
     idempotencyKey?: string,
   ) {
-    await this.ensureUserExists(userId);
+    const currentUser = await this.ensureUserExists(userId);
     await this.ensurePaymentMethodEnabled(createOrderDto.paymentMethod);
 
     if (idempotencyKey) {
@@ -994,6 +1000,25 @@ export class OrdersService {
       subtotalAmount,
     );
     const totalPayment = subtotalAmount - discountAmount + deliveryCost;
+
+    // Kiểm tra và xử lý hạn mức tín dụng cho đơn mua nợ
+    let creditLimit: import('../credit-limits/entities/customer-credit-limit.entity').CustomerCreditLimitEntity | null = null;
+    if (createOrderDto.paymentMethod === PaymentMethod.CREDIT) {
+      if (!currentUser.isWholesale) {
+        throw new BadRequestException('Phương thức "Mua nợ" chỉ dành cho khách sỉ được cấp hạn mức tín dụng');
+      }
+      creditLimit = await this.creditLimitRepository.findOne({ where: { userId, isActive: true as unknown as boolean } });
+      if (!creditLimit) {
+        throw new BadRequestException('Bạn chưa được cấp hạn mức tín dụng. Vui lòng liên hệ shop để được hỗ trợ');
+      }
+      const available = Number(creditLimit.creditLimit) - Number(creditLimit.currentDebt ?? 0);
+      if (totalPayment > available) {
+        throw new BadRequestException(
+          `Vượt hạn mức tín dụng. Hạn mức còn lại: ${Math.max(0, available).toLocaleString('vi-VN')}₫`,
+        );
+      }
+    }
+
     const addressSnapshot = this.buildAddressSnapshot(shippingAddress);
     const orderId = randomUUID();
 
@@ -1152,6 +1177,14 @@ export class OrdersService {
         await transactionalCartItemsRepository.delete({ cartId: cart.cartId });
       }),
     );
+
+    // Ghi nhận công nợ cho đơn mua nợ
+    if (createOrderDto.paymentMethod === PaymentMethod.CREDIT && creditLimit) {
+      await this.creditLimitRepository.update(
+        { userId },
+        { currentDebt: () => `current_debt + ${totalPayment}` },
+      );
+    }
 
     const createdOrder = await this.findOwnedOrder(userId, orderId);
     await this.notificationsService.sendOrderCreatedNotification(
@@ -1355,6 +1388,14 @@ export class OrdersService {
       await transactionalHistoryRepository.save(history);
     });
 
+    // Hoàn lại công nợ khi hủy đơn mua nợ
+    if (order.paymentMethod === PaymentMethod.CREDIT) {
+      await this.creditLimitRepository.update(
+        { userId },
+        { currentDebt: () => `GREATEST(0, current_debt - ${Number(order.totalPayment)})` },
+      );
+    }
+
     const cancelledOrder = await this.findOwnedOrder(userId, orderId);
     await this.notificationsService.sendOrderStatusNotification(
       userId,
@@ -1372,6 +1413,7 @@ export class OrdersService {
     await this.ensureUserExists(currentUser._id);
     const order = await this.findAnyOrder(orderId);
     const previousStatus = order.orderStatus;
+    const previousPaymentStatus = order.paymentStatus;
     const nextStatus = updateOrderStatusDto.status;
 
     if (previousStatus === nextStatus) {
@@ -1617,6 +1659,18 @@ export class OrdersService {
       });
       await transactionalHistoryRepository.save(history);
     });
+
+    // Hoàn lại công nợ khi admin hủy đơn mua nợ chưa thanh toán
+    if (
+      nextStatus === OrderStatus.CANCELLED &&
+      order.paymentMethod === PaymentMethod.CREDIT &&
+      previousPaymentStatus === PaymentStatus.UNPAID
+    ) {
+      await this.creditLimitRepository.update(
+        { userId: order.userId },
+        { currentDebt: () => `GREATEST(0, current_debt - ${Number(order.totalPayment)})` },
+      );
+    }
 
     const updatedOrder = await this.findAnyOrder(orderId);
     await this.notificationsService.sendOrderStatusNotification(
@@ -2569,5 +2623,106 @@ export class OrdersService {
     });
 
     return this.returnsRepository.findOneBy({ returnId });
+  }
+
+  /**
+   * Admin xác nhận thanh toán thủ công cho đơn non-COD (BANK_TRANSFER, online chưa tự ghi nhận).
+   */
+  async confirmPayment(currentUser: IUser, orderId: string) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(orderId);
+
+    if (order.paymentStatus === PaymentStatus.PAID) {
+      throw new BadRequestException('Đơn hàng đã được thanh toán');
+    }
+    if (order.paymentMethod === PaymentMethod.COD) {
+      throw new BadRequestException('COD tự động ghi nhận khi giao — không cần xác nhận thủ công');
+    }
+    if (order.paymentMethod === PaymentMethod.CREDIT) {
+      throw new BadRequestException('Đơn hàng mua nợ — công nợ được quản lý riêng qua hạn mức tín dụng');
+    }
+
+    order.paymentStatus = PaymentStatus.PAID;
+    await this.ordersRepository.save(order);
+
+    const tx = this.paymentTransactionsRepository.create({
+      orderId: order.orderId,
+      userId: order.userId,
+      provider: order.paymentMethod,
+      transactionRef: `manual-${Date.now()}`,
+      transactionStatus: PaymentTransactionStatus.SUCCESS,
+      paymentStatus: PaymentStatus.PAID,
+      amount: order.totalPayment,
+      gatewayCode: 'MANUAL',
+      gatewayMessage: `Xác nhận thủ công bởi admin ${currentUser._id}`,
+      rawPayload: { confirmedBy: currentUser._id, confirmedAt: new Date().toISOString() },
+    });
+    await this.paymentTransactionsRepository.save(tx);
+
+    await this.notificationsService.sendPaymentNotification(
+      order.userId,
+      orderId,
+      PaymentStatus.PAID,
+      order.paymentMethod,
+    );
+
+    return this.buildOrderDetail(await this.findAnyOrder(orderId));
+  }
+
+  /**
+   * Khách hàng xác nhận đã nhận hàng (khi đơn đang SHIPPING).
+   * Chuyển → DELIVERED + giải phóng reserved + COD tự PAID.
+   */
+  async confirmReceivedByCustomer(currentUser: IUser, orderId: string) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findOrderDetail(currentUser, orderId);
+
+    if (order.status !== OrderStatus.SHIPPING) {
+      throw new BadRequestException('Chỉ có thể xác nhận nhận hàng khi đơn đang được giao');
+    }
+
+    await this.ordersRepository.manager.transaction(async (em) => {
+      const transactionalProductsRepo = em.getRepository(ProductEntity);
+      const transactionalOrderItemsRepo = em.getRepository(OrderItemEntity);
+
+      await this.releaseReservedOnDelivered(
+        orderId,
+        transactionalProductsRepo,
+        transactionalOrderItemsRepo,
+      );
+
+      const dbOrder = await em.getRepository(OrderEntity).findOneBy({ orderId });
+      if (!dbOrder) return;
+
+      dbOrder.orderStatus = OrderStatus.DELIVERED;
+      if (dbOrder.paymentMethod === PaymentMethod.COD) {
+        dbOrder.paymentStatus = PaymentStatus.PAID;
+      }
+
+      await em.save(OrderEntity, dbOrder);
+      await em.save(
+        OrderStatusHistoryEntity,
+        em.create(OrderStatusHistoryEntity, {
+          orderId,
+          oldStatus: OrderStatus.SHIPPING,
+          newStatus: OrderStatus.DELIVERED,
+          changedBy: currentUser._id,
+          note: 'Khách hàng xác nhận đã nhận hàng',
+        }),
+      );
+    });
+
+    const updated = await this.findAnyOrder(orderId);
+    await this.notificationsService.sendOrderStatusNotification(
+      updated.userId,
+      orderId,
+      OrderStatus.DELIVERED,
+    );
+
+    if (updated.userId) {
+      void this.membershipService.recalculateAndReward(updated.userId);
+    }
+
+    return this.buildOrderDetail(updated);
   }
 }

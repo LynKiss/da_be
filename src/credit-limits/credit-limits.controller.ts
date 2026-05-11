@@ -7,7 +7,8 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ResponseMessage } from '../decorator/customize';
+import { ResponseMessage, User } from '../decorator/customize';
+import type { IUser } from '../users/users.interface';
 import { CreditLimitsService } from './credit-limits.service';
 import { RecordPaymentDto, UpsertCreditLimitDto } from './dto/upsert-credit-limit.dto';
 
@@ -19,6 +20,12 @@ export class CreditLimitsController {
   @ResponseMessage('Get credit limits list')
   findAll(@Query('page') page = 1, @Query('limit') limit = 20) {
     return this.svc.findAll(+page, +limit);
+  }
+
+  @Get('my-limit')
+  @ResponseMessage('Get my credit limit')
+  getMyLimit(@User() currentUser: IUser) {
+    return this.svc.getMyLimit(currentUser._id);
   }
 
   @Get('user/:userId')
@@ -49,5 +56,11 @@ export class CreditLimitsController {
   @ResponseMessage('Remove credit limit')
   remove(@Param('userId') userId: string) {
     return this.svc.remove(userId);
+  }
+
+  @Get('customers')
+  @ResponseMessage('Get customer list for credit limit assignment')
+  getCustomers(@Query('search') search?: string) {
+    return this.svc.getCustomers(search);
   }
 }

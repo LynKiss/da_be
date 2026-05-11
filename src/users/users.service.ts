@@ -121,6 +121,7 @@ export class UsersService {
       items: users.map((user) => ({
         ...this.toPublicUser(user),
         isActive: user.isActive,
+        isWholesale: user.isWholesale,
         createdAt: user.createdAt,
       })),
     };
@@ -132,7 +133,7 @@ export class UsersService {
       throw new UnauthorizedException('Nguoi dung khong ton tai');
     }
 
-    return this.toPublicUser(user);
+    return { ...this.toPublicUser(user), isWholesale: user.isWholesale };
   }
 
   async register(registerUserDto: RegisterUserDto) {
@@ -662,6 +663,7 @@ export class UsersService {
     return {
       ...this.toPublicUser(user),
       isActive: user.isActive,
+      isWholesale: user.isWholesale,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
       statistics: {
@@ -729,10 +731,15 @@ export class UsersService {
       user.isActive = updateAdminUserDto.isActive;
     }
 
+    if (updateAdminUserDto.isWholesale !== undefined) {
+      user.isWholesale = updateAdminUserDto.isWholesale;
+    }
+
     const savedUser = await this.usersRepository.save(user);
     return {
       ...this.toPublicUser(savedUser),
       isActive: savedUser.isActive,
+      isWholesale: savedUser.isWholesale,
       createdAt: savedUser.createdAt,
       updatedAt: savedUser.updatedAt,
     };

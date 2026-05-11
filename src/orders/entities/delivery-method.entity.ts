@@ -53,6 +53,15 @@ export class DeliveryMethodEntity {
   })
   isDefault: boolean;
 
+  @Column({
+    name: 'is_pickup',
+    type: 'tinyint',
+    width: 1,
+    default: () => '0',
+    comment: 'Nhận tại cửa hàng — bỏ qua bước SHIPPING',
+  })
+  isPickup: boolean;
+
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;
 

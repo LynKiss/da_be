@@ -32,6 +32,7 @@ import { OrdersAdminGateway } from './orders-admin.gateway';
 import { OrdersAdminPublisher } from './orders-admin.publisher';
 import { OrdersService } from './orders.service';
 import { MembershipModule } from '../membership/membership.module';
+import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-credit-limit.entity';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { MembershipModule } from '../membership/membership.module';
       DiscountProductEntity,
       CouponUsageEntity,
       PaymentTransactionEntity,
+      CustomerCreditLimitEntity,
     ]),
   ],
   controllers: [OrdersController, PaymentsController, ReturnsController, DeliveryMethodsController],
