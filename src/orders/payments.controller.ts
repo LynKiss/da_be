@@ -24,6 +24,20 @@ export class PaymentsController {
   }
 
   @Public()
+  @Post('guest/orders/:orderId/initiate')
+  @ResponseMessage('Initiate guest payment')
+  initiateGuestPayment(
+    @Param('orderId') orderId: string,
+    @Body() initiatePaymentDto: InitiatePaymentDto,
+  ) {
+    return this.ordersService.initiatePayment(
+      undefined,
+      orderId,
+      initiatePaymentDto,
+    );
+  }
+
+  @Public()
   @Post('callback/:provider')
   @ResponseMessage('Handle payment callback')
   handlePaymentCallback(

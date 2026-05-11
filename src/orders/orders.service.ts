@@ -180,6 +180,38 @@ export class OrdersService {
     );
   }
 
+  private async createGuestUserRecord(
+    entityManager: EntityManager,
+    userId: string,
+    orderId: string,
+  ) {
+    const compactOrderId = orderId.replace(/-/g, '');
+    await entityManager.query(
+      `INSERT INTO users
+        (user_id, username, email, role, password_hash, provider, provider_id, is_active)
+       VALUES (?, ?, ?, 'customer', NULL, 'guest', ?, 1)`,
+      [
+        userId,
+        `guest_${compactOrderId.slice(0, 24)}`,
+        `guest_${compactOrderId}@guest.local`,
+        orderId,
+      ],
+    );
+  }
+
+  private async isGuestUserId(userId: string) {
+    if (userId.startsWith('guest-')) {
+      return true;
+    }
+
+    const rows = (await this.ordersRepository.manager.query(
+      'SELECT provider FROM users WHERE user_id = ? LIMIT 1',
+      [userId],
+    )) as Array<{ provider?: string | null }>;
+
+    return rows[0]?.provider === 'guest';
+  }
+
   private async findAccessibleOrder(currentUser: IUser, orderId: string) {
     return this.hasManageOrdersPermission(currentUser)
       ? this.findAnyOrder(orderId)
@@ -755,7 +787,7 @@ export class OrdersService {
     const deliveryCost = this.calculateDeliveryCost(deliveryMethod, subtotalAmount);
     const totalPayment = subtotalAmount + deliveryCost;
     const orderId = randomUUID();
-    const guestUserId = `guest-${randomUUID()}`.slice(0, 36);
+    const guestUserId = randomUUID();
     const addressSnapshot = [
       dto.shipping.addressLine,
       dto.shipping.ward,
@@ -777,6 +809,8 @@ export class OrdersService {
           const dup = await trxOrders.findOne({ where: { idempotencyKey } });
           if (dup) return;
         }
+
+        await this.createGuestUserRecord(entityManager, guestUserId, orderId);
 
         const order = trxOrders.create({
           orderId,
@@ -891,7 +925,7 @@ export class OrdersService {
       where: { orderId },
     });
     if (!order) throw new NotFoundException('Không tìm thấy đơn hàng');
-    if (!order.userId.startsWith('guest-')) {
+    if (!(await this.isGuestUserId(order.userId))) {
       throw new UnauthorizedException('Đơn này thuộc tài khoản đăng ký, hãy đăng nhập để xem');
     }
     if (order.phone.replace(/\s+/g, '') !== phone.replace(/\s+/g, '')) {
@@ -1679,7 +1713,11 @@ export class OrdersService {
       nextStatus,
     );
 
-    if (nextStatus === OrderStatus.DELIVERED && updatedOrder.userId) {
+    if (
+      nextStatus === OrderStatus.DELIVERED &&
+      updatedOrder.userId &&
+      !(await this.isGuestUserId(updatedOrder.userId))
+    ) {
       void this.membershipService.recalculateAndReward(updatedOrder.userId);
     }
 
@@ -1687,12 +1725,28 @@ export class OrdersService {
   }
 
   async initiatePayment(
-    currentUser: IUser,
+    currentUser: IUser | undefined,
     orderId: string,
     initiatePaymentDto: InitiatePaymentDto,
   ) {
-    await this.ensureUserExists(currentUser._id);
-    const order = await this.findOrderDetail(currentUser, orderId);
+    const order = currentUser
+      ? await this.findAccessibleOrder(currentUser, orderId)
+      : await this.findAnyOrder(orderId);
+
+    if (currentUser) {
+      await this.ensureUserExists(currentUser._id);
+    } else {
+      const normalizePhone = (value: string) => value.replace(/\s+/g, '');
+      if (!(await this.isGuestUserId(order.userId))) {
+        throw new UnauthorizedException('Order is not a guest order');
+      }
+      if (
+        !initiatePaymentDto.phone ||
+        normalizePhone(order.phone) !== normalizePhone(initiatePaymentDto.phone)
+      ) {
+        throw new UnauthorizedException('Phone number does not match order');
+      }
+    }
 
     if (!this.isOnlinePaymentMethod(order.paymentMethod)) {
       throw new BadRequestException('Order does not require online payment');
@@ -1705,7 +1759,7 @@ export class OrdersService {
     const transactionRef = `${orderId}-${Date.now()}`;
     const paymentTransaction = this.paymentTransactionsRepository.create({
       orderId,
-      userId: currentUser._id,
+      userId: order.userId,
       provider: order.paymentMethod,
       transactionRef,
       transactionStatus: PaymentTransactionStatus.PENDING,

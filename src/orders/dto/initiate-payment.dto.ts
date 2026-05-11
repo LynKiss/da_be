@@ -5,4 +5,9 @@ export class InitiatePaymentDto {
   @IsString()
   @MaxLength(500)
   returnUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  phone?: string;
 }
