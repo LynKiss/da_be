@@ -37,7 +37,8 @@ export class CartsService {
   }
 
   private getEffectivePrice(product: ProductEntity) {
-    return product.productPriceSale ?? product.productPrice;
+    const sale = product.productPriceSale != null ? Number(product.productPriceSale) : null;
+    return sale != null && sale > 0 ? product.productPriceSale! : product.productPrice;
   }
 
   private toCartItemResponse(

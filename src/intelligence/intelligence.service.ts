@@ -378,10 +378,11 @@ export class IntelligenceService {
 
     return rows.map((row) => {
       const coOrderCount = Number(row.coOrderCount);
+      const saleNum = row.salePrice != null ? Number(row.salePrice) : null;
       return {
         productId: row.productId,
         productName: row.productName,
-        effectivePrice: row.salePrice ?? row.basePrice,
+        effectivePrice: saleNum != null && saleNum > 0 ? row.salePrice! : row.basePrice,
         basePrice: row.basePrice,
         unit: row.unit,
         quantityAvailable: Number(row.quantityAvailable),
@@ -458,18 +459,21 @@ export class IntelligenceService {
         totalQuantitySold: string;
       }>();
 
-    return rows.map((row) => ({
-      productId: row.productId,
-      productName: row.productName,
-      effectivePrice: row.salePrice ?? row.basePrice,
-      basePrice: row.basePrice,
-      unit: row.unit,
-      quantityAvailable: Number(row.quantityAvailable),
-      primaryImageUrl: row.primaryImageUrl,
-      score: Number(row.totalQuantitySold),
-      confidence: Number(row.orderCount),
-      reason: `Ban chay trong ${row.orderCount} don hang gan day, tong ${row.totalQuantitySold} san pham.`,
-    }));
+    return rows.map((row) => {
+      const saleNum = row.salePrice != null ? Number(row.salePrice) : null;
+      return {
+        productId: row.productId,
+        productName: row.productName,
+        effectivePrice: saleNum != null && saleNum > 0 ? row.salePrice! : row.basePrice,
+        basePrice: row.basePrice,
+        unit: row.unit,
+        quantityAvailable: Number(row.quantityAvailable),
+        primaryImageUrl: row.primaryImageUrl,
+        score: Number(row.totalQuantitySold),
+        confidence: Number(row.orderCount),
+        reason: `Ban chay trong ${row.orderCount} don hang gan day, tong ${row.totalQuantitySold} san pham.`,
+      };
+    });
   }
 
   private async getRecommendationInteractions(since: Date) {
@@ -1151,7 +1155,9 @@ export class IntelligenceService {
     return {
       productId: product.productId,
       productName: product.productName,
-      effectivePrice: product.productPriceSale ?? product.productPrice,
+      effectivePrice: (product.productPriceSale != null && Number(product.productPriceSale) > 0)
+        ? product.productPriceSale
+        : product.productPrice,
       basePrice: product.productPrice,
       unit: product.unit,
       quantityAvailable: product.quantityAvailable,

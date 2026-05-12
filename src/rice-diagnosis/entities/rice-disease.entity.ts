@@ -34,6 +34,9 @@ export class RiceDiseaseEntity {
   @Column({ name: 'disease_name', type: 'varchar', length: 180 })
   diseaseName!: string;
 
+  @Column({ name: 'disease_name_vi', type: 'varchar', length: 180, nullable: true })
+  diseaseNameVi!: string | null;
+
   @Column({ name: 'summary', type: 'text', nullable: true })
   summary!: string | null;
 

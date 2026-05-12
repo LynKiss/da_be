@@ -106,6 +106,7 @@ export class RiceDiagnosisService {
         diseaseName:
           matchedDisease?.diseaseName ??
           this.humanizePredictionLabel(prediction.canonicalLabel),
+        diseaseNameVi: matchedDisease?.diseaseNameVi ?? null,
         diseaseSlug: matchedDisease?.diseaseSlug ?? null,
       };
     });
@@ -957,6 +958,7 @@ export class RiceDiagnosisService {
       diseaseKey: disease.diseaseKey,
       diseaseSlug: disease.diseaseSlug,
       diseaseName: disease.diseaseName,
+      diseaseNameVi: disease.diseaseNameVi ?? null,
       summary: disease.summary,
       symptoms: disease.symptoms,
       causes: disease.causes,

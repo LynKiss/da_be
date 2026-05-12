@@ -1195,16 +1195,19 @@ export class ProductsService {
       }));
 
     const appliedDiscount = await this.findApplicableDiscount(product);
-    const basePrice = Number(product.productPriceSale ?? product.productPrice);
+    const regularPrice = Number(product.productPrice);
+    const salePriceNum = product.productPriceSale != null ? Number(product.productPriceSale) : null;
+    const activeSalePrice = salePriceNum != null && salePriceNum > 0 ? salePriceNum : null;
+    const priceBeforeDiscount = activeSalePrice ?? regularPrice;
     const discountAmount = appliedDiscount
-      ? this.calculateDiscountAmount(appliedDiscount, basePrice)
+      ? this.calculateDiscountAmount(appliedDiscount, priceBeforeDiscount)
       : 0;
-    const effectivePrice = Math.max(0, basePrice - discountAmount).toFixed(2);
+    const effectivePrice = Math.max(0, priceBeforeDiscount - discountAmount).toFixed(2);
 
     return {
       ...product,
       primaryImageUrl: primaryImage?.imageUrl ?? null,
-      basePrice: basePrice.toFixed(2),
+      basePrice: regularPrice.toFixed(2),
       effectivePrice,
       appliedDiscount: appliedDiscount
         ? {
@@ -1289,7 +1292,10 @@ export class ProductsService {
 
     let bestDiscount: DiscountEntity | null = null;
     let bestValue = 0;
-    const basePrice = Number(product.productPriceSale ?? product.productPrice);
+    const salePriceNum = product.productPriceSale != null ? Number(product.productPriceSale) : null;
+    const basePrice = salePriceNum != null && salePriceNum > 0
+      ? salePriceNum
+      : Number(product.productPrice);
 
     for (const discount of validDiscounts) {
       let applicable = false;
