@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -177,6 +177,79 @@ export class UsersService {
 
   async hashPassword(password: string): Promise<string> {
     return bcrypt.hash(password, 10);
+  }
+
+  async createPasswordResetOtp(email: string) {
+    const user = await this.usersRepository.findOne({
+      where: { email: email.trim() },
+    });
+
+    if (!user || !user.isActive || !user.passwordHash) {
+      return null;
+    }
+
+    const otp = randomInt(0, 1_000_000).toString().padStart(6, '0');
+    user.resetPasswordCode = await this.hashPassword(otp);
+    user.resetPasswordExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    await this.usersRepository.save(user);
+
+    return {
+      email: user.email,
+      fullName: user.fullName,
+      username: user.username,
+      otp,
+      expiresInMinutes: 10,
+    };
+  }
+
+  async resetPasswordByOtp(email: string, otp: string, newPassword: string) {
+    const user = await this.usersRepository.findOne({
+      where: { email: email.trim() },
+    });
+
+    if (!user || !user.isActive) {
+      throw new BadRequestException('Email hoac ma OTP khong hop le');
+    }
+
+    if (!user.resetPasswordCode || !user.resetPasswordExpiresAt) {
+      throw new BadRequestException('Ma OTP khong hop le hoac da het han');
+    }
+
+    if (user.resetPasswordExpiresAt.getTime() <= Date.now()) {
+      user.resetPasswordCode = null;
+      user.resetPasswordExpiresAt = null;
+      await this.usersRepository.save(user);
+      throw new BadRequestException('Ma OTP da het han');
+    }
+
+    const isValidOtp = await this.checkUserPassword(
+      otp,
+      user.resetPasswordCode,
+    );
+    if (!isValidOtp) {
+      throw new BadRequestException('Ma OTP khong hop le');
+    }
+
+    if (
+      user.passwordHash &&
+      (await this.checkUserPassword(newPassword, user.passwordHash))
+    ) {
+      throw new BadRequestException('Mat khau moi phai khac mat khau cu');
+    }
+
+    user.passwordHash = await this.hashPassword(newPassword);
+    user.resetPasswordCode = null;
+    user.resetPasswordExpiresAt = null;
+    const savedUser = await this.usersRepository.save(user);
+
+    await this.refreshTokensRepository.update(
+      { userId: savedUser.userId, isRevoked: false },
+      { isRevoked: true },
+    );
+
+    return {
+      message: 'Dat lai mat khau thanh cong',
+    };
   }
 
   async createAdminUser(

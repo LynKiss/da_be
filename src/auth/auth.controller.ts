@@ -16,6 +16,8 @@ import {
 import { RegisterUserDto } from '../users/dto/create-user.dto';
 import type { IUser } from '../users/users.interface';
 import { AuthService } from './auth.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { LocalAuthGuard } from './local-auth.guard';
 
 @Controller()
@@ -46,6 +48,20 @@ export class AuthController {
   @ResponseMessage('Register a new user')
   register(@Body() registerUserDto: RegisterUserDto) {
     return this.authService.register(registerUserDto);
+  }
+
+  @Public()
+  @Post('/auth/forgot-password')
+  @ResponseMessage('Send password reset OTP')
+  forgotPassword(@Body() forgotPasswordDto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(forgotPasswordDto);
+  }
+
+  @Public()
+  @Post('/auth/reset-password')
+  @ResponseMessage('Reset password by OTP')
+  resetPassword(@Body() resetPasswordDto: ResetPasswordDto) {
+    return this.authService.resetPassword(resetPasswordDto);
   }
 
   @Post('/auth/logout')
