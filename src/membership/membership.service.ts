@@ -43,16 +43,35 @@ export class MembershipService {
       const user = await this.usersRepo.findOne({ where: { userId } });
       if (!user) return;
 
-      const deliveredOrders = await this.ordersRepo
+      // FIX HIGH: include cả DELIVERED + PARTIAL_DELIVERED + PARTIAL_RETURNED
+      // (PARTIAL_RETURNED vẫn còn doanh thu thật của phần đã giao + chưa refund)
+      const completedOrders = await this.ordersRepo
         .createQueryBuilder('o')
         .where('o.user_id = :userId', { userId })
-        .andWhere('o.order_status = :status', { status: OrderStatus.DELIVERED })
+        .andWhere('o.order_status IN (:...statuses)', {
+          statuses: [
+            OrderStatus.DELIVERED,
+            OrderStatus.PARTIAL_DELIVERED,
+            OrderStatus.PARTIAL_RETURNED,
+          ],
+        })
         .getMany();
 
-      const totalSpent = deliveredOrders.reduce(
+      const grossSpent = completedOrders.reduce(
         (sum, o) => sum + parseFloat(o.totalPayment),
         0,
       );
+
+      // Trừ refund amounts đã hoàn cho user này (return.status = REFUNDED)
+      const refundRow = await this.ordersRepo.manager
+        .createQueryBuilder()
+        .select('COALESCE(SUM(r.refund_amount), 0)', 'total')
+        .from('returns', 'r')
+        .where('r.user_id = :uid', { uid: userId })
+        .andWhere(`r.return_status = 'refunded'`)
+        .getRawOne<{ total: string }>();
+      const refunded = Number(refundRow?.total ?? 0);
+      const totalSpent = Math.max(0, grossSpent - refunded);
 
       const configs = await this.getTierConfigs();
       const oldTier = user.membershipTier;

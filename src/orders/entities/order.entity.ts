@@ -15,6 +15,7 @@ export enum OrderStatus {
   SHIPPING = 'shipping',
   DELIVERED = 'delivered',
   PARTIAL_DELIVERED = 'partial_delivered',
+  PARTIAL_RETURNED = 'partial_returned',
   CANCELLED = 'cancelled',
   RETURNED = 'returned',
 }
@@ -33,6 +34,7 @@ export enum PaymentStatus {
   UNPAID = 'unpaid',
   PAID = 'paid',
   FAILED = 'failed',
+  PARTIAL_REFUNDED = 'partial_refunded',
   REFUNDED = 'refunded',
 }
 

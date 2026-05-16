@@ -24,6 +24,12 @@ type SupportBotIntent =
   | 'identity'
   | 'my_orders'
   | 'order_lookup'
+  | 'expiry_info'
+  | 'cancel_order'
+  | 'short_delivery_report'
+  | 'rice_diagnosis_help'
+  | 'promotion'
+  | 'warranty'
   | 'human_handoff'
   | 'general';
 
@@ -101,35 +107,67 @@ const UUID_PATTERN =
 const PHONE_PATTERN = /(?:\+?84|0)(?:[\s.]?\d){8,10}/;
 
 const BUSINESS_POLICIES = [
-  'Giao hang toan quoc trong 2-4 ngay lam viec. Don tu 500.000d duoc freeship.',
-  'Phi van chuyen thuong tu 25.000d tuy khu vuc.',
-  'Doi tra trong 7 ngay neu san pham loi hoac sai mo ta. Khach can giu bao bi va hoa don.',
-  'Hoan tien thuong duoc xu ly trong 3-5 ngay lam viec sau khi duyet tra hang.',
-  'Ho tro COD, chuyen khoan ngan hang, MoMo, VNPay va ZaloPay.',
-  'Hotline 1800 6863, email support@cultivatedledger.vn, gio ho tro 7:00-21:00 hang ngay.',
-  'Neu cau hoi lien quan den chan doan benh cay trong hoac huong dan su dung thuoc, uu tien chuyen nhan vien hoac tinh nang rice diagnosis thay vi khang dinh tuyet doi.',
+  'Giao hàng toàn quốc trong 2–4 ngày làm việc. Đơn từ 500.000₫ được miễn phí vận chuyển.',
+  'Phí vận chuyển thông thường từ 25.000₫ tuỳ khu vực.',
+  'Đổi trả trong 7 ngày nếu sản phẩm lỗi hoặc sai mô tả. Khách cần giữ nguyên bao bì và hoá đơn.',
+  'Hoàn tiền thường được xử lý trong 3–5 ngày làm việc sau khi duyệt yêu cầu trả hàng.',
+  'Hỗ trợ thanh toán: COD, chuyển khoản ngân hàng, MoMo, VNPay, ZaloPay; có hạn mức mua nợ cho khách doanh nghiệp được duyệt.',
+  'Hotline 1800 6863, email support@cultivatedledger.vn, giờ hỗ trợ 7:00–21:00 mỗi ngày.',
+  'Kho áp dụng FIFO/FEFO — luôn ưu tiên xuất lô gần hết hạn trước; sản phẩm khách nhận sẽ có HSD còn lại tối thiểu 3 tháng, trừ lô đang giảm giá vì cận date.',
+  'Khách có thể tự huỷ đơn khi đang ở trạng thái "Chờ xử lý"; đơn đã xác nhận hoặc đang giao cần liên hệ nhân viên.',
+  'Đối với chẩn đoán bệnh cây trồng hoặc hướng dẫn sử dụng thuốc nông nghiệp, ưu tiên chuyển nhân viên kỹ thuật hoặc dùng tính năng Chẩn đoán lúa AI thay vì khẳng định tuyệt đối.',
 ];
 
 const FAQ_RULES: Array<{ keywords: string[]; reply: string }> = [
   {
     keywords: ['giao hang', 'van chuyen', 'ship'],
     reply:
-      'Chung toi giao hang toan quoc trong 2-4 ngay lam viec. Don tu 500.000d duoc freeship, con lai phi ship thuong tu 25.000d tuy khu vuc.',
+      '🚚 Chúng tôi giao hàng toàn quốc trong 2–4 ngày làm việc. Đơn từ 500.000₫ được freeship, còn lại phí ship từ 25.000₫ tuỳ khu vực.',
   },
   {
     keywords: ['doi tra', 'tra hang', 'hoan tien'],
     reply:
-      'Chinh sach doi tra la 7 ngay neu san pham loi hoac sai mo ta. Sau khi duyet, hoan tien thuong mat 3-5 ngay lam viec ve phuong thuc thanh toan ban dau.',
+      '↩️ Đổi trả áp dụng trong 7 ngày nếu sản phẩm lỗi hoặc sai mô tả. Sau khi duyệt, hoàn tiền mất 3–5 ngày làm việc về phương thức thanh toán ban đầu. Bạn có thể tự tạo yêu cầu trả hàng ngay trong trang "Đơn hàng của tôi".',
   },
   {
     keywords: ['thanh toan', 'momo', 'vnpay', 'zalopay', 'cod'],
     reply:
-      'He thong dang ho tro COD, chuyen khoan ngan hang, MoMo, VNPay va ZaloPay.',
+      '💳 Hệ thống đang hỗ trợ: COD (trả khi nhận), chuyển khoản ngân hàng, MoMo, VNPay, ZaloPay. Khách doanh nghiệp được duyệt còn có hình thức mua nợ.',
   },
   {
     keywords: ['hotline', 'lien he', 'so dien thoai', 'email'],
     reply:
-      'Ban co the lien he 1800 6863 hoac email support@cultivatedledger.vn. Khung gio ho tro la 7:00-21:00 hang ngay.',
+      '📞 Hotline: 1800 6863 (miễn phí). Email: support@cultivatedledger.vn. Giờ hỗ trợ: 7:00–21:00 mỗi ngày.',
+  },
+  {
+    keywords: ['han su dung', 'hsd', 'het han', 'date', 'lo hang'],
+    reply:
+      '⏱️ Kho áp dụng FIFO/FEFO — luôn xuất lô sắp hết hạn trước. HSD còn lại của sản phẩm bạn nhận tối thiểu 3 tháng (trừ khi bạn chọn lô đang giảm giá vì cận date).',
+  },
+  {
+    keywords: ['huy don', 'cancel'],
+    reply:
+      '❌ Bạn có thể tự huỷ đơn khi đang ở trạng thái "Chờ xử lý" — vào trang "Đơn hàng của tôi" và bấm "Huỷ đơn hàng". Đơn đã xác nhận hoặc đang giao cần chuyển tab "Nhân viên".',
+  },
+  {
+    keywords: ['nhan thieu', 'thieu hang', 'giao thieu'],
+    reply:
+      '⚠️ Nếu shipper giao thiếu hàng, bạn vào "Đơn hàng của tôi" → đơn đang giao → bấm "Báo nhận thiếu" → nhập số lượng thực nhận. Admin sẽ xác minh với đơn vị vận chuyển và xử lý hoàn tiền/giao bù phần thiếu.',
+  },
+  {
+    keywords: ['benh lua', 'chan doan'],
+    reply:
+      '🌾 Vào menu "Chẩn đoán lúa AI" trên trang chính → chụp hoặc tải ảnh lá lúa → AI gợi ý bệnh và thuốc. Kết quả mang tính tham khảo; cây bị nặng nên hỏi nhân viên kỹ thuật.',
+  },
+  {
+    keywords: ['khuyen mai', 'giam gia', 'voucher', 'coupon'],
+    reply:
+      '🎁 Khuyến mãi xem ở banner trang chủ hoặc filter "Đang giảm giá" trong trang Sản phẩm. Mã voucher hiển thị ở "Ví voucher" sau khi đăng nhập.',
+  },
+  {
+    keywords: ['bao hanh', 'warranty'],
+    reply:
+      '🛡️ Bảo hành theo chính sách nhà sản xuất. Vui lòng giữ hoá đơn để được hỗ trợ tốt nhất; với máy móc nông nghiệp, bảo hành tiêu chuẩn 12 tháng.',
   },
 ];
 
@@ -498,6 +536,63 @@ export class SupportBotService {
       normalizedMessage.includes('ship')
     ) {
       return 'shipping';
+    }
+
+    // ── Intents bổ sung (mở rộng phạm vi chatbot) ──
+    if (
+      normalizedMessage.includes('han su dung') ||
+      normalizedMessage.includes('hsd') ||
+      normalizedMessage.includes('het han') ||
+      normalizedMessage.includes('con han') ||
+      normalizedMessage.includes('date') ||
+      normalizedMessage.includes('lo hang') ||
+      normalizedMessage.includes('batch')
+    ) {
+      return 'expiry_info';
+    }
+
+    if (
+      normalizedMessage.includes('huy don') ||
+      normalizedMessage.includes('cancel order') ||
+      normalizedMessage.includes('huy bo don')
+    ) {
+      return 'cancel_order';
+    }
+
+    if (
+      normalizedMessage.includes('nhan thieu') ||
+      normalizedMessage.includes('thieu hang') ||
+      normalizedMessage.includes('giao thieu') ||
+      normalizedMessage.includes('khong du hang')
+    ) {
+      return 'short_delivery_report';
+    }
+
+    if (
+      normalizedMessage.includes('benh lua') ||
+      normalizedMessage.includes('chan doan') ||
+      normalizedMessage.includes('lua bi') ||
+      normalizedMessage.includes('cay bi')
+    ) {
+      return 'rice_diagnosis_help';
+    }
+
+    if (
+      normalizedMessage.includes('khuyen mai') ||
+      normalizedMessage.includes('giam gia') ||
+      normalizedMessage.includes('voucher') ||
+      normalizedMessage.includes('ma giam') ||
+      normalizedMessage.includes('coupon') ||
+      normalizedMessage.includes('sale')
+    ) {
+      return 'promotion';
+    }
+
+    if (
+      normalizedMessage.includes('bao hanh') ||
+      normalizedMessage.includes('warranty')
+    ) {
+      return 'warranty';
     }
 
     return 'general';
@@ -1280,14 +1375,32 @@ export class SupportBotService {
 
   private buildSystemPrompt() {
     return [
-      'Ban la chatbot CSKH cho Cultivated Ledger, mot he thong ecommerce vat tu nong nghiep.',
-      'Tra loi bang tieng Viet, gon, ro, uu tien tinh dung nghiep vu.',
-      'Chi duoc tra loi dua tren thong tin trong BUSINESS CONTEXT.',
-      'Khong duoc tu dat ra gia, ton kho, trang thai don, chinh sach, khuyen mai, hoac huong dan su dung thuoc nong nghiep neu khong co du lieu xac thuc.',
-      'Neu thieu du lieu, phai noi ro la chua xac nhan duoc va huong dan chuyen sang nhan vien.',
-      'Chi thuc hien hanh dong gio hang khi backend da tra ve ket qua hanh dong trong BUSINESS CONTEXT.',
-      'Khong tu dong tao don hang neu chua co xac nhan dia chi, giao hang va thanh toan.',
-      'Neu nguoi dung muon gap nguoi that, khieu nai, doi tra phuc tap, hoac hoi sang chan doan/thuoc cho cay trong, uu tien huong dan qua tab Nhan vien.',
+      'Bạn là CHATBOT CSKH cho Cultivated Ledger — hệ thống thương mại điện tử vật tư nông nghiệp.',
+      '',
+      'NGÔN NGỮ:',
+      '- BẮT BUỘC trả lời bằng tiếng Việt CÓ DẤU ĐẦY ĐỦ. Tuyệt đối không viết kiểu "khong dau".',
+      '- Văn phong: ngắn gọn, lịch sự, thân thiện, dùng "anh/chị" hoặc "bạn".',
+      '- Định dạng số tiền có "₫" và dấu phân cách ngàn. Định dạng ngày kiểu dd/mm/yyyy.',
+      '- Có thể dùng emoji nhẹ (📦 🚚 ✅ ⚠️) để dễ đọc, nhưng không lạm dụng.',
+      '',
+      'NGUYÊN TẮC CHẤT LƯỢNG:',
+      '- CHỈ được trả lời dựa trên thông tin có trong BUSINESS CONTEXT bên dưới.',
+      '- TUYỆT ĐỐI KHÔNG tự bịa giá, tồn kho, trạng thái đơn, chính sách, khuyến mãi, hay hướng dẫn sử dụng thuốc nông nghiệp nếu không có dữ liệu xác thực.',
+      '- Nếu thiếu dữ liệu, phải nói rõ "tôi chưa xác nhận được thông tin này" và đề xuất chuyển sang tab "Nhân viên" hoặc gọi hotline.',
+      '- Chỉ thực hiện hành động giỏ hàng (thêm/xóa) khi BUSINESS CONTEXT đã trả về kết quả hành động hợp lệ.',
+      '- Không tự ý tạo đơn hàng khi chưa có xác nhận địa chỉ + giao hàng + thanh toán.',
+      '',
+      'KHI NÀO CHUYỂN NHÂN VIÊN:',
+      '- Khách muốn gặp người thật, khiếu nại, đổi/trả phức tạp, tranh chấp.',
+      '- Hỏi chẩn đoán bệnh cây trồng cụ thể, kê đơn thuốc nông nghiệp.',
+      '- Yêu cầu vượt thẩm quyền của chatbot (sửa giá, hoàn tiền, override stock).',
+      '→ Hướng dẫn khách bấm tab "Nhân viên" trong widget chat.',
+      '',
+      'CẤU TRÚC PHẢN HỒI MONG MUỐN:',
+      '1) Câu trả lời chính (1–3 câu).',
+      '2) Nếu có sản phẩm liên quan → liệt kê tối đa 3 mục dạng bullet.',
+      '3) Nếu cần action tiếp theo → đề xuất 1 bước rõ ràng (vd: "Bấm Thêm vào giỏ" hoặc "Vui lòng đăng nhập").',
+      '4) Không viết đoạn dài lê thê quá 6 dòng.',
     ].join('\n');
   }
 
@@ -1302,20 +1415,20 @@ export class SupportBotService {
         ? history
             .map(
               (item) =>
-                `${item.role === 'user' ? 'Khach' : 'Bot'}: ${item.content}`,
+                `${item.role === 'user' ? 'Khách' : 'Bot'}: ${item.content}`,
             )
             .join('\n')
-        : 'Khong co lich su hoi thoai truoc do.';
+        : 'Không có lịch sử hội thoại trước đó.';
 
     const productBlock =
       context.products.length > 0
         ? context.products
             .map(
               (product, index) =>
-                `${index + 1}. ${product.productName} | gia ${this.formatCurrency(product.effectivePrice)} | ton ${product.quantityAvailable}${product.unit ? ` | don vi ${product.unit}` : ''}`,
+                `${index + 1}. ${product.productName} | giá ${this.formatCurrency(product.effectivePrice)} | tồn ${product.quantityAvailable}${product.unit ? ` ${product.unit}` : ''}`,
             )
             .join('\n')
-        : 'Khong co goi y san pham xac thuc.';
+        : 'Không có gợi ý sản phẩm xác thực.';
 
     const orderBlock = context.orderSummary
       ? context.orderSummary
@@ -1327,11 +1440,11 @@ export class SupportBotService {
             ? context.myOrdersSummary
             : context.myOrdersError
               ? context.myOrdersError
-              : 'Khong co du lieu don hang nao duoc xac thuc.';
+              : 'Không có dữ liệu đơn hàng nào được xác thực trong request này.';
 
     const userBlock = context.userSummary
       ? context.userSummary
-      : 'Khach chua dang nhap hoac request khong co token.';
+      : 'Khách chưa đăng nhập hoặc request không có token.';
 
     const cartBlock = context.cartActionSummary
       ? context.cartActionSummary
@@ -1339,33 +1452,35 @@ export class SupportBotService {
         ? context.cartActionError
         : context.cartSummary
           ? context.cartSummary
-          : 'Khong co du lieu gio hang trong request nay.';
+          : 'Không có dữ liệu giỏ hàng trong request này.';
 
     return [
-      'BUSINESS CONTEXT',
-      `Intent: ${context.intent}`,
-      `Can uu tien chuyen nhan vien: ${handoffSuggested ? 'co' : 'khong'}`,
+      '=== BUSINESS CONTEXT ===',
+      `Ý định (intent): ${context.intent}`,
+      `Cần ưu tiên chuyển nhân viên: ${handoffSuggested ? 'CÓ' : 'KHÔNG'}`,
       '',
-      'Tai khoan hien tai:',
+      '--- Tài khoản hiện tại ---',
       userBlock,
-      'Chinh sach:',
-      ...context.policies.map((policy) => `- ${policy}`),
       '',
-      'Gio hang / hanh dong gio hang:',
+      '--- Chính sách áp dụng ---',
+      ...context.policies.map((policy) => `• ${policy}`),
+      '',
+      '--- Giỏ hàng / Hành động giỏ hàng ---',
       cartBlock,
       '',
-      'Du lieu don hang:',
+      '--- Dữ liệu đơn hàng ---',
       orderBlock,
       '',
-      'San pham lien quan:',
+      '--- Sản phẩm liên quan ---',
       productBlock,
       '',
-      'Lich su hoi thoai:',
+      '--- Lịch sử hội thoại ---',
       historyBlock,
       '',
-      `Cau hoi hien tai cua khach: ${message}`,
+      '=== CÂU HỎI HIỆN TẠI ===',
+      message,
       '',
-      'Hay tra loi dung nghiep vu, neu khong du du lieu thi noi ro va huong dan tab Nhan vien.',
+      'Hãy trả lời TIẾNG VIỆT CÓ DẤU đầy đủ, đúng nghiệp vụ, dựa vào BUSINESS CONTEXT bên trên. Nếu thiếu dữ liệu, nói rõ và đề xuất tab Nhân viên hoặc hotline.',
     ].join('\n');
   }
 

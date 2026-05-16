@@ -7,11 +7,13 @@ import { SimpleCacheService } from '../common/simple-cache.service';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
+import { ReturnEntity } from '../orders/entities/return.entity';
 import {
   OrderEntity,
   OrderStatus,
   PaymentStatus,
 } from '../orders/entities/order.entity';
+import { ProductBatchEntity } from '../products/entities/product-batch.entity';
 import { PurchaseOrderEntity, PurchaseOrderStatus } from '../procurement/entities/purchase-order.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
@@ -48,16 +50,26 @@ export class ReportsService {
     @InjectRepository(PurchaseOrderEntity)
     private readonly poRepository: Repository<PurchaseOrderEntity>,
 
+    @InjectRepository(ReturnEntity)
+    private readonly returnsRepository: Repository<ReturnEntity>,
+
+    @InjectRepository(ProductBatchEntity)
+    private readonly batchRepository: Repository<ProductBatchEntity>,
+
     private readonly cache: SimpleCacheService,
   ) {}
 
   async getDashboard() {
+    // Revenue statuses: include partial-returned (vẫn còn phần đã giao = doanh thu thật)
+    // KHÔNG include fully RETURNED hay CANCELLED.
+    // PARTIAL_RETURNED có doanh thu = totalPayment - SUM(refunded returns).
     const revenueStatuses = [
       OrderStatus.CONFIRMED,
       OrderStatus.PROCESSING,
       OrderStatus.SHIPPING,
       OrderStatus.DELIVERED,
       OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
     ];
 
     const now = new Date();
@@ -502,9 +514,29 @@ export class ReportsService {
       take: 8,
     });
 
-    const totalRevenue = Number(revenueRow?.revenue ?? 0);
-    const todayRevenue = Number(todayRevenueRow?.revenue ?? 0);
-    const yesterdayRevenue = Number(yesterdayRevenueRow?.revenue ?? 0);
+    // Trừ refund (PARTIAL_REFUNDED + REFUNDED) khỏi doanh thu thực tế.
+    // SUM(refunds.refund_amount WHERE return_status = REFUNDED) — chỉ tính các return ĐÃ hoàn tiền.
+    const refundAggregate = async (from?: Date, to?: Date) => {
+      const qb = this.returnsRepository
+        .createQueryBuilder('r')
+        .select('COALESCE(SUM(r.refund_amount), 0)', 'total')
+        .where('r.return_status = :st', { st: 'refunded' });
+      if (from) qb.andWhere('r.updated_at >= :from', { from });
+      if (to) qb.andWhere('r.updated_at < :to', { to });
+      const row = await qb.getRawOne<{ total: string }>();
+      return Number(row?.total ?? 0);
+    };
+    const [grossRevenue, grossToday, grossYesterday, refundAll, refundToday, refundYesterday] = await Promise.all([
+      Promise.resolve(Number(revenueRow?.revenue ?? 0)),
+      Promise.resolve(Number(todayRevenueRow?.revenue ?? 0)),
+      Promise.resolve(Number(yesterdayRevenueRow?.revenue ?? 0)),
+      refundAggregate(),
+      refundAggregate(todayStart, now),
+      refundAggregate(yesterdayStart, todayStart),
+    ]);
+    const totalRevenue = Math.max(0, grossRevenue - refundAll);
+    const todayRevenue = Math.max(0, grossToday - refundToday);
+    const yesterdayRevenue = Math.max(0, grossYesterday - refundYesterday);
 
     return {
       refreshedAt: now.toISOString(),
@@ -784,13 +816,31 @@ export class ReportsService {
         retailPrice: string;
       }>();
 
+    // Tính FIFO valuation theo batches (chuẩn hơn avgCost).
+    // SUM(qty_remaining × unit_cost) per product, chỉ batches còn hàng.
+    const batchValuations = await this.batchRepository
+      .createQueryBuilder('b')
+      .select('b.product_id', 'productId')
+      .addSelect('SUM(b.qty_remaining)', 'totalBatchQty')
+      .addSelect('SUM(b.qty_remaining * b.unit_cost)', 'totalBatchValue')
+      .where('b.qty_remaining > 0')
+      .groupBy('b.product_id')
+      .getRawMany<{ productId: string; totalBatchQty: string; totalBatchValue: string }>();
+    const batchMap = new Map<string, { qty: number; value: number }>();
+    for (const r of batchValuations) {
+      batchMap.set(r.productId, { qty: Number(r.totalBatchQty), value: Number(r.totalBatchValue) });
+    }
+
     const items = products.map((p) => {
       const qtyAvail = Number(p.qtyAvailable) || 0;
       const qtyResv = Number(p.qtyReserved) || 0;
       const avgCost = Number(p.avgCost) || 0;
       const retail = Number(p.retailPrice) || 0;
       const totalQty = qtyAvail + qtyResv;
-      const totalValue = totalQty * avgCost;
+      // FIX HIGH: nếu có batch data → dùng FIFO valuation; nếu không → fallback avgCost.
+      const batchEntry = batchMap.get(p.productId);
+      const fifoValue = batchEntry ? batchEntry.value : null;
+      const totalValue = fifoValue ?? totalQty * avgCost;
       const potentialRevenue = totalQty * retail;
       const potentialProfit = potentialRevenue - totalValue;
       return {
@@ -802,6 +852,9 @@ export class ReportsService {
         avgCost,
         lastCost: Number(p.lastCost ?? 0),
         retailPrice: retail,
+        // valuationMethod: 'fifo' nếu có batch data, 'avg' nếu fallback (cho audit)
+        valuationMethod: fifoValue !== null ? 'fifo' : 'avg',
+        batchQty: batchEntry?.qty ?? null,
         totalValue,
         potentialRevenue,
         potentialProfit,

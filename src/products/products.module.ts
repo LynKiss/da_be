@@ -10,6 +10,7 @@ import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { InventoryTransactionEntity } from './entities/inventory-transaction.entity';
 import { OriginEntity } from './entities/origin.entity';
+import { ProductBatchEntity } from './entities/product-batch.entity';
 import { ProductDescriptionImageEntity } from './entities/product-description-image.entity';
 import { ProductImageEntity } from './entities/product-image.entity';
 import { ProductTagEntity } from './entities/product-tag.entity';
@@ -17,9 +18,11 @@ import { ProductEntity } from './entities/product.entity';
 import { SubcategoryEntity } from './entities/subcategory.entity';
 import { TagEntity } from './entities/tag.entity';
 import { WishlistEntity } from './entities/wishlist.entity';
+import { BatchesController } from './batches.controller';
 import { InventoryController } from './inventory.controller';
 import { OriginsController } from './origins.controller';
 import { OriginsService } from './origins.service';
+import { ProductBatchService } from './product-batch.service';
 import { ProductsController } from './products.controller';
 import { ProductsService } from './products.service';
 import { SubcategoriesController } from './subcategories.controller';
@@ -41,6 +44,7 @@ import { WishlistController } from './wishlist.controller';
       ProductDescriptionImageEntity,
       ProductTagEntity,
       InventoryTransactionEntity,
+      ProductBatchEntity,
       WishlistEntity,
       WarehouseEntity,
       WarehouseStockEntity,
@@ -53,17 +57,19 @@ import { WishlistController } from './wishlist.controller';
   controllers: [
     ProductsController,
     InventoryController,
+    BatchesController,
     WishlistController,
     OriginsController,
     SubcategoriesController,
     TagsController,
   ],
-  providers: [ProductsService, OriginsService, SubcategoriesService, TagsService],
+  providers: [ProductsService, OriginsService, SubcategoriesService, TagsService, ProductBatchService],
   exports: [
     ProductsService,
     OriginsService,
     SubcategoriesService,
     TagsService,
+    ProductBatchService,
     TypeOrmModule,
   ],
 })

@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderEntity, OrderStatus } from '../orders/entities/order.entity';
 import { ProductImageEntity } from '../products/entities/product-image.entity';
+import { ProductBatchEntity } from '../products/entities/product-batch.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { QueryDemandForecastDto } from './dto/query-demand-forecast.dto';
 import { QueryProductRecommendationsDto } from './dto/query-product-recommendations.dto';
@@ -84,12 +85,17 @@ type RidgeRegressionTrainingResult =
       reason: string;
     };
 
+// Include PARTIAL_RETURNED: phần lớn order vẫn đã được fulfill, chỉ 1 phần được refund.
+// Lưu ý: forecast hiện KHÔNG trừ qty đã refund — admin nên điều chỉnh manually nếu
+// có nhiều partial-return. Improvement future: JOIN returns table để trừ qty refunded
+// theo orderItem.
 const DEMAND_ORDER_STATUSES = [
   OrderStatus.CONFIRMED,
   OrderStatus.PROCESSING,
   OrderStatus.SHIPPING,
   OrderStatus.DELIVERED,
   OrderStatus.PARTIAL_DELIVERED,
+  OrderStatus.PARTIAL_RETURNED,
 ];
 
 @Injectable()
@@ -101,6 +107,8 @@ export class IntelligenceService {
     private readonly orderItemsRepository: Repository<OrderItemEntity>,
     @InjectRepository(ProductEntity)
     private readonly productsRepository: Repository<ProductEntity>,
+    @InjectRepository(ProductBatchEntity)
+    private readonly batchRepository: Repository<ProductBatchEntity>,
   ) {}
 
   async getProductRecommendations(query: QueryProductRecommendationsDto) {
@@ -262,8 +270,8 @@ export class IntelligenceService {
     ]);
 
     const demandByProduct = this.groupDemandByProduct(rawDemand, historyDays);
-    const suggestions = products
-      .map((product) =>
+    const rawSuggestions = await Promise.all(
+      products.map((product) =>
         this.buildReorderSuggestion(
           product,
           demandByProduct.get(product.productId) ??
@@ -271,7 +279,9 @@ export class IntelligenceService {
           leadTimeDays,
           coverageDays,
         ),
-      )
+      ),
+    );
+    const suggestions = rawSuggestions
       .filter((item) => includeAll || item.shouldReorder)
       .sort((left, right) => {
         const urgencyOrder = { high: 0, medium: 1, low: 2, none: 3 };
@@ -769,7 +779,7 @@ export class IntelligenceService {
     return result;
   }
 
-  private buildReorderSuggestion(
+  private async buildReorderSuggestion(
     product: ProductEntity,
     demand: DailyDemandPoint[],
     leadTimeDays: number,
@@ -801,23 +811,44 @@ export class IntelligenceService {
     );
     const reorderPoint = Math.ceil(leadTimeDemand + safetyStock);
     const targetStock = Math.ceil(coverageDemand + safetyStock);
+
+    // FIX MEDIUM: Tính qty sẽ hết hạn trong leadTime + coverage window.
+    // Nếu nhiều lô sắp hết hạn → effective stock thấp hơn → tăng urgency + đề xuất nhập sớm hơn.
+    const horizonDays = leadTimeDays + planningForecast.length;
+    const horizonDate = new Date(Date.now() + horizonDays * 86_400_000);
+    const expiringBatches = await this.batchRepository
+      .createQueryBuilder('b')
+      .where('b.productId = :pid', { pid: product.productId })
+      .andWhere('b.qtyRemaining > 0')
+      .andWhere('b.expDate IS NOT NULL AND b.expDate <= :horizon', { horizon: horizonDate })
+      .getMany();
+    const nearExpiryQty = expiringBatches.reduce((s, b) => s + b.qtyRemaining, 0);
+    const effectiveStock = Math.max(0, product.quantityAvailable - nearExpiryQty);
+
     const suggestedOrderQty = Math.max(
       0,
-      targetStock - product.quantityAvailable,
+      targetStock - effectiveStock,
     );
     const daysUntilStockout =
       avgDailyDemand > 0
-        ? Number((product.quantityAvailable / avgDailyDemand).toFixed(1))
+        ? Number((effectiveStock / avgDailyDemand).toFixed(1))
         : null;
     const shouldReorder =
-      avgDailyDemand > 0 && product.quantityAvailable <= reorderPoint;
-    const urgency = this.getReorderUrgency(
+      avgDailyDemand > 0 && effectiveStock <= reorderPoint;
+    let urgency = this.getReorderUrgency(
       shouldReorder,
-      product.quantityAvailable,
+      effectiveStock,
       reorderPoint,
       daysUntilStockout,
       leadTimeDays,
     );
+    // Bump urgency lên 1 cấp nếu có nhiều lô sắp expire mà chưa critical
+    if (nearExpiryQty > 0 && urgency === 'low') urgency = 'medium';
+    if (nearExpiryQty > 0 && urgency === 'none' && shouldReorder) urgency = 'low';
+
+    const expiryReason = nearExpiryQty > 0
+      ? ` ${nearExpiryQty} đơn vị sẽ hết hạn trong ${horizonDays} ngày → effective stock = ${effectiveStock}.`
+      : '';
 
     return {
       product: this.mapProduct(product),
@@ -831,6 +862,8 @@ export class IntelligenceService {
       daysUntilStockoutValue: daysUntilStockout ?? Number.POSITIVE_INFINITY,
       shouldReorder,
       urgency,
+      nearExpiryQty,
+      effectiveStock,
       model:
         forecastModel.status === 'trained'
           ? {
@@ -843,11 +876,11 @@ export class IntelligenceService {
               reason: forecastModel.reason,
             },
       reason: this.buildReorderReason(
-        product.quantityAvailable,
+        effectiveStock,
         reorderPoint,
         daysUntilStockout,
         leadTimeDays,
-      ),
+      ) + expiryReason,
     };
   }
 

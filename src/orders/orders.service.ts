@@ -27,6 +27,7 @@ import {
   InventoryTransactionType,
 } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductBatchService } from '../products/product-batch.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OrdersAdminPublisher } from './orders-admin.publisher';
 import { SettingsService } from '../settings/settings.service';
@@ -117,6 +118,7 @@ export class OrdersService {
     private readonly ordersAdminPublisher: OrdersAdminPublisher,
     private readonly settingsService: SettingsService,
     private readonly membershipService: MembershipService,
+    private readonly batchService: ProductBatchService,
   ) {}
 
   private async syncDefaultWarehouseStock(
@@ -631,8 +633,15 @@ export class OrdersService {
         OrderStatus.PARTIAL_DELIVERED,
         OrderStatus.RETURNED,
       ],
-      [OrderStatus.PARTIAL_DELIVERED]: [OrderStatus.RETURNED],
-      [OrderStatus.DELIVERED]: [OrderStatus.RETURNED],
+      [OrderStatus.PARTIAL_DELIVERED]: [
+        OrderStatus.RETURNED,
+        OrderStatus.PARTIAL_RETURNED,
+      ],
+      [OrderStatus.DELIVERED]: [
+        OrderStatus.RETURNED,
+        OrderStatus.PARTIAL_RETURNED,
+      ],
+      [OrderStatus.PARTIAL_RETURNED]: [OrderStatus.RETURNED],
       [OrderStatus.CANCELLED]: [],
       [OrderStatus.RETURNED]: [],
     };
@@ -666,6 +675,13 @@ export class OrdersService {
         await productRepository.save(product);
 
         if (entityManager) {
+          // Hoàn lại từng batch theo lịch sử consumption (idempotent — query NET)
+          await this.restoreBatchesFromOrder(
+            entityManager,
+            orderId,
+            item.productId,
+            item.quantity,
+          );
           await this.syncDefaultWarehouseStock(
             entityManager,
             item.productId,
@@ -674,6 +690,59 @@ export class OrdersService {
         }
       }
     }
+  }
+
+  /**
+   * Hoàn batch theo lịch sử consumption của order.
+   *
+   * - Truy vấn NET consumption (export - return_in) cho cặp (orderId, productId)
+   * - Hoàn dần qty cần restock vào các batch theo thứ tự LIFO (consume mới nhất hoàn trước)
+   * - Log RETURN_IN inventory_transaction với batchId
+   * - Idempotent: nếu đã hoàn rồi (NET = 0) thì không làm gì
+   *
+   * Trường hợp legacy (không có batch_id trong txn) → bỏ qua, restock đã được làm
+   * ở caller bằng quantityAvailable += qty.
+   */
+  private async restoreBatchesFromOrder(
+    em: EntityManager,
+    orderId: string,
+    productId: string,
+    qtyToRestore: number,
+  ): Promise<void> {
+    if (qtyToRestore <= 0) return;
+
+    const netMap = await this.batchService.getOrderBatchConsumption(em, orderId, productId);
+    if (netMap.size === 0) return; // legacy order, không có batch info
+
+    // Sort theo NET descending để hoàn từ batch còn consumed nhiều nhất
+    const sorted = Array.from(netMap.entries())
+      .filter(([_, net]) => net > 0)
+      .sort((a, b) => b[1] - a[1]);
+
+    let remaining = qtyToRestore;
+    for (const [batchId, net] of sorted) {
+      if (remaining <= 0) break;
+      const restore = Math.min(net, remaining);
+      await this.batchService.restoreInTx(em, batchId, restore);
+
+      await em.save(
+        InventoryTransactionEntity,
+        em.create(InventoryTransactionEntity, {
+          productId,
+          performedBy: null,
+          transactionType: InventoryTransactionType.RETURN_IN,
+          quantityChange: restore,
+          referenceType: 'ORDER',
+          referenceId: orderId,
+          batchId,
+          note: `Restock batch by order ${orderId}`,
+          relatedOrderId: orderId,
+        }),
+      );
+      remaining -= restore;
+    }
+    // Nếu remaining > 0 mà hết batch → có thể là partial-batch legacy mix,
+    // tổng quantityAvailable đã được cộng nên không thiếu, chỉ là batch detail không đủ.
   }
 
   /**
@@ -1153,28 +1222,79 @@ export class OrdersService {
           }
 
           const qtyBefore = product.quantityAvailable;
+
+          // FIFO/FEFO consumption: pick batches theo chiến lược hybrid
+          // (exp_date ASC, NULL last, tie-break created_at ASC).
+          // Có 2 nhánh:
+          //  - Product có batch (sau khi đã migrate): consume từng batch + log txn/batch
+          //  - Product KHÔNG có batch (legacy): fallback trừ quantityAvailable thuần
+          //    để không break flow cũ. Migration script sẽ tạo legacy batch sau.
+          const batchPick = await this.batchService.consumeInTx(
+            entityManager,
+            product.productId,
+            cartItem.quantity,
+          ).catch(async (err) => {
+            // Nếu lỗi do KHÔNG có batch nào (legacy product), fallback
+            const hasAnyBatch = await entityManager
+              .createQueryBuilder()
+              .select('1')
+              .from('product_batches', 'b')
+              .where('b.product_id = :pid', { pid: product.productId })
+              .limit(1)
+              .getRawOne();
+            if (hasAnyBatch) {
+              // Có batch nhưng không đủ → ném lỗi thật
+              throw err;
+            }
+            return null; // legacy → fallback
+          });
+
           product.quantityAvailable -= cartItem.quantity;
           product.quantityReserved =
             (product.quantityReserved ?? 0) + cartItem.quantity;
           await transactionalProductsRepository.save(product);
 
-          const inventoryTransaction =
-            transactionalInventoryTransactionsRepository.create({
-              productId: product.productId,
-              performedBy: userId,
-              transactionType: InventoryTransactionType.EXPORT,
-              quantityChange: -cartItem.quantity,
-              quantityBefore: qtyBefore,
-              quantityAfter: product.quantityAvailable,
-              referenceType: 'ORDER',
-              referenceId: orderId,
-              unitCostAtTime: product.avgCost ?? null,
-              note: 'Export by order checkout',
-              relatedOrderId: orderId,
-            });
-          await transactionalInventoryTransactionsRepository.save(
-            inventoryTransaction,
-          );
+          if (batchPick && batchPick.success) {
+            // Log 1 txn per batch để truy vết FIFO chính xác
+            let runningBefore = qtyBefore;
+            for (const line of batchPick.lines) {
+              const after = runningBefore - line.qty;
+              await transactionalInventoryTransactionsRepository.save(
+                transactionalInventoryTransactionsRepository.create({
+                  productId: product.productId,
+                  performedBy: userId,
+                  transactionType: InventoryTransactionType.EXPORT,
+                  quantityChange: -line.qty,
+                  quantityBefore: runningBefore,
+                  quantityAfter: after,
+                  referenceType: 'ORDER',
+                  referenceId: orderId,
+                  batchId: line.batchId,
+                  unitCostAtTime: line.unitCost.toFixed(4),
+                  note: `Export by order checkout · lô ${line.batchCode}`,
+                  relatedOrderId: orderId,
+                }),
+              );
+              runningBefore = after;
+            }
+          } else {
+            // Legacy fallback: log 1 txn không có batchId
+            await transactionalInventoryTransactionsRepository.save(
+              transactionalInventoryTransactionsRepository.create({
+                productId: product.productId,
+                performedBy: userId,
+                transactionType: InventoryTransactionType.EXPORT,
+                quantityChange: -cartItem.quantity,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                referenceType: 'ORDER',
+                referenceId: orderId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: 'Export by order checkout (legacy — no batch)',
+                relatedOrderId: orderId,
+              }),
+            );
+          }
 
           await this.syncDefaultWarehouseStock(
             entityManager,
@@ -2132,12 +2252,11 @@ export class OrdersService {
             continue;
           }
 
-          // Auto-cancel + restock
+          // Auto-cancel + restock (hoàn batch theo lịch sử consumption)
           await this.ordersRepository.manager.transaction(async (em) => {
             const items = await em.find(OrderItemEntity, {
               where: { orderId: order.orderId },
             });
-            // Restock từng item
             for (const item of items) {
               const product = await em.findOne(ProductEntity, {
                 where: { productId: item.productId },
@@ -2151,19 +2270,54 @@ export class OrdersService {
                 );
                 await em.save(ProductEntity, product);
               }
-              await em.save(
-                InventoryTransactionEntity,
-                em.create(InventoryTransactionEntity, {
-                  productId: item.productId,
-                  performedBy: null,
-                  transactionType: InventoryTransactionType.RETURN_IN,
-                  quantityChange: item.quantity,
-                  referenceType: 'ORDER',
-                  referenceId: order.orderId,
-                  note: 'Auto-cancel by reconciliation (unpaid > 30min)',
-                  relatedOrderId: order.orderId,
-                }),
+
+              // Hoàn batch nếu có lịch sử consumption với batchId, đồng thời log RETURN_IN
+              const netMap = await this.batchService.getOrderBatchConsumption(
+                em,
+                order.orderId,
+                item.productId,
               );
+              if (netMap.size > 0) {
+                let remaining = item.quantity;
+                const sorted = Array.from(netMap.entries())
+                  .filter(([_, n]) => n > 0)
+                  .sort((a, b) => b[1] - a[1]);
+                for (const [batchId, net] of sorted) {
+                  if (remaining <= 0) break;
+                  const restore = Math.min(net, remaining);
+                  await this.batchService.restoreInTx(em, batchId, restore);
+                  await em.save(
+                    InventoryTransactionEntity,
+                    em.create(InventoryTransactionEntity, {
+                      productId: item.productId,
+                      performedBy: null,
+                      transactionType: InventoryTransactionType.RETURN_IN,
+                      quantityChange: restore,
+                      referenceType: 'ORDER',
+                      referenceId: order.orderId,
+                      batchId,
+                      note: 'Auto-cancel by reconciliation (unpaid > 30min)',
+                      relatedOrderId: order.orderId,
+                    }),
+                  );
+                  remaining -= restore;
+                }
+              } else {
+                // Legacy fallback: không có batch info → log txn không có batchId
+                await em.save(
+                  InventoryTransactionEntity,
+                  em.create(InventoryTransactionEntity, {
+                    productId: item.productId,
+                    performedBy: null,
+                    transactionType: InventoryTransactionType.RETURN_IN,
+                    quantityChange: item.quantity,
+                    referenceType: 'ORDER',
+                    referenceId: order.orderId,
+                    note: 'Auto-cancel by reconciliation (unpaid > 30min, legacy)',
+                    relatedOrderId: order.orderId,
+                  }),
+                );
+              }
             }
             order.orderStatus = OrderStatus.CANCELLED;
             order.paymentStatus = PaymentStatus.FAILED;
@@ -2272,8 +2426,29 @@ export class OrdersService {
     await this.ensureUserExists(userId);
     const order = await this.findOwnedOrder(userId, createReturnDto.orderId);
 
-    if (order.orderStatus !== OrderStatus.DELIVERED) {
-      throw new BadRequestException('Only delivered orders can be returned');
+    // Cho phép tạo return ở các status:
+    //  - SHIPPING: client báo "nhận thiếu" (short_delivery) trước khi confirm
+    //  - DELIVERED / PARTIAL_DELIVERED / PARTIAL_RETURNED: trả hàng bình thường sau khi đã nhận
+    const allowedStatuses: OrderStatus[] = [
+      OrderStatus.SHIPPING,
+      OrderStatus.DELIVERED,
+      OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
+    ];
+    if (!allowedStatuses.includes(order.orderStatus)) {
+      throw new BadRequestException(
+        `Không thể tạo yêu cầu trả ở trạng thái ${order.orderStatus}. Chỉ chấp nhận: ${allowedStatuses.join(', ')}.`,
+      );
+    }
+
+    // Nếu order đang SHIPPING → bắt buộc reason là short_delivery để phân biệt rõ
+    if (
+      order.orderStatus === OrderStatus.SHIPPING &&
+      createReturnDto.reason !== 'short_delivery'
+    ) {
+      throw new BadRequestException(
+        'Đơn đang giao chỉ chấp nhận lý do "short_delivery" (báo nhận thiếu).',
+      );
     }
 
     const orderItem = await this.orderItemsRepository.findOneBy({
@@ -2284,12 +2459,25 @@ export class OrdersService {
       throw new NotFoundException('Order item not found');
     }
 
-    const existingReturn = await this.returnsRepository.findOneBy({
-      userId,
-      orderItemId: createReturnDto.orderItemId,
+    // Chỉ block nếu đã có return ĐANG MỞ (OPEN) cho item này.
+    // REJECTED hoặc REFUNDED → cho phép tạo mới (có thể bị từ chối oan, hoặc trả thêm).
+    const openStatuses: ReturnStatus[] = [
+      ReturnStatus.REQUESTED,
+      ReturnStatus.APPROVED,
+      ReturnStatus.RECEIVED,
+      ReturnStatus.INSPECTED,
+    ];
+    const openReturn = await this.returnsRepository.findOne({
+      where: openStatuses.map((s) => ({
+        userId,
+        orderItemId: createReturnDto.orderItemId,
+        returnStatus: s,
+      })),
     });
-    if (existingReturn) {
-      throw new BadRequestException('Return request already exists');
+    if (openReturn) {
+      throw new BadRequestException(
+        `Đã có yêu cầu trả hàng đang xử lý (${openReturn.returnStatus}). Đợi xử lý xong trước khi tạo mới.`,
+      );
     }
 
     const created = this.returnsRepository.create({
@@ -2339,13 +2527,17 @@ export class OrdersService {
     });
 
     return items.map((item) => ({
-      id: item.returnId,
+      returnId: item.returnId,
       orderId: item.orderId,
       userId: item.userId,
       orderItemId: item.orderItemId,
       reason: item.reason,
       description: item.description,
-      status: item.returnStatus,
+      returnStatus: item.returnStatus,
+      inspectionStatus: item.inspectionStatus,
+      inspectionNote: item.inspectionNote,
+      inspectedBy: item.inspectedBy,
+      inspectedAt: item.inspectedAt,
       refundAmount: item.refundAmount,
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
@@ -2391,13 +2583,65 @@ export class OrdersService {
     if (updateReturnStatusDto.status === ReturnStatus.REFUNDED) {
       returnRequest.refundAmount =
         updateReturnStatusDto.refundAmount ?? orderItem.lineTotal;
+
+      // PHẢI lưu return trước khi tính tổng — vì query bên dưới sẽ đọc lại từ DB
+      await this.returnsRepository.save(returnRequest);
+
       const order = await this.findAnyOrder(returnRequest.orderId);
-      order.orderStatus = OrderStatus.RETURNED;
-      order.paymentStatus =
-        order.paymentStatus === PaymentStatus.PAID
-          ? PaymentStatus.REFUNDED
-          : PaymentStatus.FAILED;
+      const orderItems = await this.orderItemsRepository.findBy({
+        orderId: order.orderId,
+      });
+      const refundedReturns = await this.returnsRepository.find({
+        where: { orderId: order.orderId, returnStatus: ReturnStatus.REFUNDED },
+      });
+
+      // Đếm số orderItem ĐÃ có return REFUNDED (unique theo orderItemId)
+      const refundedItemIds = new Set(refundedReturns.map((r) => r.orderItemId));
+      const allRefunded = orderItems.every((it) => refundedItemIds.has(it.orderItemId));
+
+      // FIX HIGH: nếu là CREDIT order → trừ refundAmount khỏi currentDebt
+      const refundAmt = Number(returnRequest.refundAmount ?? 0);
+      if (order.paymentMethod === PaymentMethod.CREDIT && refundAmt > 0) {
+        await this.creditLimitRepository
+          .createQueryBuilder()
+          .update()
+          .set({ currentDebt: () => `GREATEST(0, current_debt - ${refundAmt})` })
+          .where('user_id = :uid', { uid: order.userId })
+          .execute();
+      }
+
+      if (allRefunded) {
+        // Tất cả item đã được hoàn → full return
+        order.orderStatus = OrderStatus.RETURNED;
+        order.paymentStatus =
+          order.paymentStatus === PaymentStatus.PAID ||
+          order.paymentStatus === PaymentStatus.PARTIAL_REFUNDED
+            ? PaymentStatus.REFUNDED
+            : PaymentStatus.FAILED;
+      } else {
+        // Chỉ refund 1 phần → đánh dấu partial
+        order.orderStatus = OrderStatus.PARTIAL_RETURNED;
+        if (order.paymentStatus === PaymentStatus.PAID) {
+          order.paymentStatus = PaymentStatus.PARTIAL_REFUNDED;
+        }
+      }
       await this.ordersRepository.save(order);
+
+      // FIX HIGH: trigger membership recalc — totalSpent giờ phải trừ refund
+      void this.membershipService.recalculateAndReward(returnRequest.userId);
+
+      // Trả về saved bản return (đã save trên dòng trên rồi)
+      await this.notificationsService.createNotification({
+        userId: returnRequest.userId,
+        title: 'Yeu cau tra hang da thay doi trang thai',
+        message: `Yeu cau tra hang ${returnRequest.returnId} da chuyen sang ${returnRequest.returnStatus}.`,
+        metadata: {
+          returnId: returnRequest.returnId,
+          status: returnRequest.returnStatus,
+          orderId: returnRequest.orderId,
+        },
+      });
+      return returnRequest;
     }
 
     const savedReturn = await this.returnsRepository.save(returnRequest);
@@ -2495,28 +2739,62 @@ export class OrdersService {
               0,
               (product.quantityReserved ?? 0) - releaseReserved,
             );
-            // Cộng lại phần thiếu vào available
+            // Cộng lại phần thiếu vào available + hoàn batch
             if (undeliveredQty > 0) {
               const qtyBefore = product.quantityAvailable;
               product.quantityAvailable += undeliveredQty;
               await em.save(ProductEntity, product);
 
-              await em.save(
-                InventoryTransactionEntity,
-                em.create(InventoryTransactionEntity, {
-                  productId: product.productId,
-                  performedBy: currentUser._id,
-                  transactionType: InventoryTransactionType.RETURN_IN,
-                  quantityChange: undeliveredQty,
-                  quantityBefore: qtyBefore,
-                  quantityAfter: product.quantityAvailable,
-                  referenceType: 'ORDER',
-                  referenceId: order.orderId,
-                  unitCostAtTime: product.avgCost ?? null,
-                  note: `Partial delivery: ${dto.deliveredQty}/${oi.quantity} delivered, ${undeliveredQty} restocked`,
-                  relatedOrderId: order.orderId,
-                }),
+              const netMap = await this.batchService.getOrderBatchConsumption(
+                em,
+                order.orderId,
+                product.productId,
               );
+              if (netMap.size > 0) {
+                let remaining = undeliveredQty;
+                const sorted = Array.from(netMap.entries())
+                  .filter(([_, n]) => n > 0)
+                  .sort((a, b) => b[1] - a[1]);
+                for (const [batchId, net] of sorted) {
+                  if (remaining <= 0) break;
+                  const restore = Math.min(net, remaining);
+                  await this.batchService.restoreInTx(em, batchId, restore);
+                  await em.save(
+                    InventoryTransactionEntity,
+                    em.create(InventoryTransactionEntity, {
+                      productId: product.productId,
+                      performedBy: currentUser._id,
+                      transactionType: InventoryTransactionType.RETURN_IN,
+                      quantityChange: restore,
+                      referenceType: 'ORDER',
+                      referenceId: order.orderId,
+                      batchId,
+                      unitCostAtTime: product.avgCost ?? null,
+                      note: `Partial delivery: ${dto.deliveredQty}/${oi.quantity} delivered, ${restore} restocked to batch`,
+                      relatedOrderId: order.orderId,
+                    }),
+                  );
+                  remaining -= restore;
+                }
+              } else {
+                // Legacy fallback
+                await em.save(
+                  InventoryTransactionEntity,
+                  em.create(InventoryTransactionEntity, {
+                    productId: product.productId,
+                    performedBy: currentUser._id,
+                    transactionType: InventoryTransactionType.RETURN_IN,
+                    quantityChange: undeliveredQty,
+                    quantityBefore: qtyBefore,
+                    quantityAfter: product.quantityAvailable,
+                    referenceType: 'ORDER',
+                    referenceId: order.orderId,
+                    unitCostAtTime: product.avgCost ?? null,
+                    note: `Partial delivery: ${dto.deliveredQty}/${oi.quantity} delivered, ${undeliveredQty} restocked (legacy)`,
+                    relatedOrderId: order.orderId,
+                  }),
+                );
+              }
               await this.syncDefaultWarehouseStock(
                 em,
                 product.productId,
@@ -2626,22 +2904,87 @@ export class OrdersService {
         product.quantityAvailable += orderItem.quantity;
         await em.save(ProductEntity, product);
 
-        await em.save(
-          InventoryTransactionEntity,
-          em.create(InventoryTransactionEntity, {
-            productId: product.productId,
-            performedBy: currentUser._id,
-            transactionType: InventoryTransactionType.RETURN_IN,
-            quantityChange: orderItem.quantity,
-            quantityBefore: qtyBefore,
-            quantityAfter: product.quantityAvailable,
-            referenceType: 'RETURN',
-            referenceId: String(returnRequest.returnId),
-            unitCostAtTime: product.avgCost ?? null,
-            note: note ?? 'Return inspection: USABLE — restocked',
-            relatedOrderId: returnRequest.orderId,
-          }),
+        // FIX CRITICAL: hoàn batch theo NET consumption history.
+        // Lúc checkout consumed từ batch A 3 + batch B 2 → restock cũng phải vào
+        // chính các batch đó, KHÔNG được chỉ cộng quantityAvailable.
+        const netMap = await this.batchService.getOrderBatchConsumption(
+          em,
+          returnRequest.orderId,
+          product.productId,
         );
+        if (netMap.size > 0) {
+          let remaining = orderItem.quantity;
+          const sorted = Array.from(netMap.entries())
+            .filter(([_, n]) => n > 0)
+            .sort((a, b) => b[1] - a[1]);
+          let runningBefore = qtyBefore;
+          for (const [batchId, net] of sorted) {
+            if (remaining <= 0) break;
+            const restore = Math.min(net, remaining);
+            await this.batchService.restoreInTx(em, batchId, restore);
+            await em.save(
+              InventoryTransactionEntity,
+              em.create(InventoryTransactionEntity, {
+                productId: product.productId,
+                performedBy: currentUser._id,
+                transactionType: InventoryTransactionType.RETURN_IN,
+                quantityChange: restore,
+                quantityBefore: runningBefore,
+                quantityAfter: runningBefore + restore,
+                referenceType: 'RETURN',
+                referenceId: String(returnRequest.returnId),
+                batchId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: note ?? `Return inspection: USABLE — restocked ${restore} to batch`,
+                relatedOrderId: returnRequest.orderId,
+              }),
+            );
+            runningBefore += restore;
+            remaining -= restore;
+          }
+          // Nếu còn remaining > 0 (lệch do partial-deliver hoặc legacy txn không có batch_id)
+          // → tạo "return batch" mới với unit_cost = avgCost để giữ tổng đúng.
+          if (remaining > 0) {
+            await this.batchService.createInTx(em, {
+              productId: product.productId,
+              grId: null,
+              batchCode: `RETURN-${returnRequest.returnId}`,
+              mfgDate: null,
+              expDate: product.expiredAt ?? null,
+              qtyReceived: remaining,
+              unitCost: Number(product.avgCost ?? 0),
+              note: `Return restock — không khớp batch history, tạo batch mới`,
+            });
+          }
+        } else {
+          // Legacy order không có batch info → tạo "return batch" mới
+          await this.batchService.createInTx(em, {
+            productId: product.productId,
+            grId: null,
+            batchCode: `RETURN-${returnRequest.returnId}`,
+            mfgDate: null,
+            expDate: product.expiredAt ?? null,
+            qtyReceived: orderItem.quantity,
+            unitCost: Number(product.avgCost ?? 0),
+            note: `Return restock (legacy) — orderItem ${orderItem.orderItemId}`,
+          });
+          await em.save(
+            InventoryTransactionEntity,
+            em.create(InventoryTransactionEntity, {
+              productId: product.productId,
+              performedBy: currentUser._id,
+              transactionType: InventoryTransactionType.RETURN_IN,
+              quantityChange: orderItem.quantity,
+              quantityBefore: qtyBefore,
+              quantityAfter: product.quantityAvailable,
+              referenceType: 'RETURN',
+              referenceId: String(returnRequest.returnId),
+              unitCostAtTime: product.avgCost ?? null,
+              note: note ?? 'Return inspection: USABLE — restocked (new batch)',
+              relatedOrderId: returnRequest.orderId,
+            }),
+          );
+        }
         await this.syncDefaultWarehouseStock(
           em,
           product.productId,

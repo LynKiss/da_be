@@ -10,6 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { ProductEntity } from '../products/entities/product.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { ProductsModule } from '../products/products.module';
 import { PermissionsModule } from '../permissions/permissions.module';
 import { RolesModule } from '../roles/roles.module';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
@@ -42,6 +43,7 @@ import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-cr
     RolesModule,
     SettingsModule,
     MembershipModule,
+    ProductsModule,
     TypeOrmModule.forFeature([
       DeliveryMethodEntity,
       ShippingAddressEntity,

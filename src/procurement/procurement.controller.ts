@@ -9,6 +9,7 @@ import {
   Request,
 } from '@nestjs/common';
 import { RequirePermissions, ResponseMessage } from '../decorator/customize';
+import { ConfirmGrDto } from './dto/confirm-gr.dto';
 import { CreateGrDto } from './dto/create-gr.dto';
 import { CreatePoDto } from './dto/create-po.dto';
 import { CreateSrDto } from './dto/create-sr.dto';
@@ -99,8 +100,8 @@ export class ProcurementController {
   @Patch('goods-receipts/:id/confirm')
   @RequirePermissions('manage_products')
   @ResponseMessage('Confirm goods receipt')
-  confirmGr(@Param('id') id: string, @Request() req: any) {
-    return this.service.confirmGr(id, getPerformer(req, getIp(req)));
+  confirmGr(@Param('id') id: string, @Body() dto: ConfirmGrDto, @Request() req: any) {
+    return this.service.confirmGr(id, getPerformer(req, getIp(req)), dto);
   }
 
   @Patch('goods-receipts/:id/cancel')

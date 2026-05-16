@@ -61,6 +61,11 @@ export class InventoryTransactionEntity {
   @Column({ name: 'reference_id', type: 'varchar', length: 36, nullable: true })
   referenceId: string | null;
 
+  // Lô hàng FIFO/FEFO bị ảnh hưởng. Nullable để tương thích với transaction cũ
+  // (trước khi bật batch tracking) và các nghiệp vụ không cần batch như ADJUSTMENT tổng.
+  @Column({ name: 'batch_id', type: 'char', length: 36, nullable: true })
+  batchId: string | null;
+
   @Column({ name: 'note', type: 'varchar', length: 500, nullable: true })
   note: string | null;
 

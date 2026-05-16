@@ -15,8 +15,10 @@ import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderStatusHistoryEntity } from '../orders/entities/order-status-history.entity';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductBatchService } from '../products/product-batch.service';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
+import { ConfirmGrDto, GrItemBatchDto } from './dto/confirm-gr.dto';
 import { CreateGrDto } from './dto/create-gr.dto';
 import { CreatePoDto } from './dto/create-po.dto';
 import { CreateSrDto } from './dto/create-sr.dto';
@@ -118,6 +120,7 @@ export class ProcurementService {
     private readonly dataSource: DataSource,
     private readonly auditLogs: AuditLogsService,
     private readonly cache: SimpleCacheService,
+    private readonly batchService: ProductBatchService,
   ) {}
 
   private readonly procurementLogger = new Logger(ProcurementService.name);
@@ -486,11 +489,44 @@ export class ProcurementService {
    *  4. Tạo inventory_transaction (type = import)
    *  5. Nếu có PO → cập nhật qty_received + status PO
    */
-  async confirmGr(id: string, performer?: { userId: string; username: string; ip?: string }) {
+  async confirmGr(
+    id: string,
+    performer?: { userId: string; username: string; ip?: string },
+    dto?: ConfirmGrDto,
+  ) {
     const gr = await this.findOneGr(id);
 
     if (gr.status !== GoodsReceiptStatus.DRAFT) {
       throw new BadRequestException('Phiếu nhận hàng đã được xử lý');
+    }
+
+    // Build map productId → batch splits (nếu admin cung cấp)
+    const splitMap = new Map<string, GrItemBatchDto[]>();
+    if (dto?.itemBatches?.length) {
+      for (const split of dto.itemBatches) {
+        if (splitMap.has(split.productId)) {
+          throw new BadRequestException(`Trùng productId ${split.productId} trong itemBatches.`);
+        }
+        splitMap.set(split.productId, split.batches);
+      }
+      // Validate: mỗi productId trong splitMap phải có trong gr.items
+      for (const pid of splitMap.keys()) {
+        if (!gr.items.some((it) => it.productId === pid)) {
+          throw new BadRequestException(`productId ${pid} không có trong phiếu nhận hàng.`);
+        }
+      }
+      // Validate: tổng qty mỗi split phải == qtyGood của GR item tương ứng
+      for (const it of gr.items) {
+        const splits = splitMap.get(it.productId);
+        if (!splits) continue;
+        const qtyGood = it.qtyReceived - it.qtyReturned;
+        const sum = splits.reduce((s, b) => s + b.qty, 0);
+        if (sum !== qtyGood) {
+          throw new BadRequestException(
+            `Tổng qty batches của sản phẩm ${it.productId} (${sum}) phải bằng số lượng hàng đạt ${qtyGood}.`,
+          );
+        }
+      }
     }
 
     await withDeadlockRetry(() => this.dataSource.transaction(async (em) => {
@@ -542,23 +578,63 @@ export class ProcurementService {
         });
         await em.save(ProductCostHistoryEntity, hist);
 
-        // 4. Inventory transaction
-        const tx = em.create(InventoryTransactionEntity, {
-          productId: item.productId,
-          performedBy: performer?.userId ?? null,
-          transactionType: InventoryTransactionType.IMPORT,
-          quantityChange: qtyGood,
-          quantityBefore: qtyBefore,
-          quantityAfter: qtyAfter,
-          referenceType: 'GR',
-          referenceId: gr.grId,
-          unitCostAtTime: item.landedCost,
-          note: `Nhập kho từ phiếu ${gr.grCode}`,
-          relatedOrderId: gr.grId,
-        });
-        await em.save(InventoryTransactionEntity, tx);
+        // 4. Tạo ProductBatch records cho FIFO/FEFO
+        //    - Nếu admin truyền splits: tạo theo splits (đã validate tổng qty)
+        //    - Nếu không: tạo 1 batch single với batch_code auto-gen, expDate = product.expiredAt
+        const splits = splitMap.get(item.productId);
+        const createdBatches: Array<{ batchId: string; batchCode: string; qty: number; expDate: Date | null }> = [];
+        if (splits?.length) {
+          for (let i = 0; i < splits.length; i++) {
+            const s = splits[i];
+            const batch = await this.batchService.createInTx(em, {
+              productId: item.productId,
+              grId: gr.grId,
+              batchCode: s.batchCode,
+              mfgDate: s.mfgDate ?? null,
+              expDate: s.expDate ?? null,
+              qtyReceived: s.qty,
+              unitCost: Number(item.landedCost),
+              note: s.note ?? null,
+            });
+            createdBatches.push({ batchId: batch.batchId, batchCode: batch.batchCode, qty: s.qty, expDate: batch.expDate });
+          }
+        } else {
+          const autoCode = `${gr.grCode}-${item.productId.slice(0, 6)}`;
+          const batch = await this.batchService.createInTx(em, {
+            productId: item.productId,
+            grId: gr.grId,
+            batchCode: autoCode,
+            mfgDate: null,
+            expDate: product.expiredAt ?? null,
+            qtyReceived: qtyGood,
+            unitCost: Number(item.landedCost),
+            note: `Auto-tạo từ ${gr.grCode}`,
+          });
+          createdBatches.push({ batchId: batch.batchId, batchCode: batch.batchCode, qty: qtyGood, expDate: batch.expDate });
+        }
 
-        // 5. Cập nhật warehouse_stock cho kho mặc định
+        // 5. Inventory transaction — 1 record / batch (để truy vết FIFO chính xác)
+        let runningQtyBefore = qtyBefore;
+        for (const cb of createdBatches) {
+          const tx = em.create(InventoryTransactionEntity, {
+            productId: item.productId,
+            performedBy: performer?.userId ?? null,
+            transactionType: InventoryTransactionType.IMPORT,
+            quantityChange: cb.qty,
+            quantityBefore: runningQtyBefore,
+            quantityAfter: runningQtyBefore + cb.qty,
+            referenceType: 'GR',
+            referenceId: gr.grId,
+            batchId: cb.batchId,
+            unitCostAtTime: item.landedCost,
+            note: `Nhập kho từ ${gr.grCode} · lô ${cb.batchCode}${cb.expDate ? ' · HSD ' + cb.expDate.toISOString().slice(0, 10) : ''}`,
+            relatedOrderId: gr.grId,
+          });
+          await em.save(InventoryTransactionEntity, tx);
+          runningQtyBefore += cb.qty;
+        }
+
+        // 6. Cập nhật warehouse_stock cho kho mặc định
         if (defaultWarehouse) {
           const stock = await em.findOne(WarehouseStockEntity, {
             where: { warehouseId: defaultWarehouse.warehouseId, productId: item.productId },
@@ -575,7 +651,7 @@ export class ProcurementService {
           }
         }
 
-        // 6. Cập nhật qty_received trên PO item (nếu có)
+        // 7. Cập nhật qty_received trên PO item (nếu có)
         if (gr.poId) {
           await em
             .createQueryBuilder()

@@ -47,6 +47,7 @@ import {
 import { OriginEntity } from './entities/origin.entity';
 import { ProductDescriptionImageEntity } from './entities/product-description-image.entity';
 import { ProductEntity } from './entities/product.entity';
+import { ProductBatchService } from './product-batch.service';
 import { ProductImageEntity } from './entities/product-image.entity';
 import { ProductTagEntity } from './entities/product-tag.entity';
 import { SubcategoryEntity } from './entities/subcategory.entity';
@@ -93,6 +94,7 @@ export class ProductsService {
     private readonly discountProductsRepository: Repository<DiscountProductEntity>,
     private readonly notificationsService: NotificationsService,
     private readonly dataSource: DataSource,
+    private readonly batchService: ProductBatchService,
   ) {}
 
   private async syncDefaultWarehouseStock(
@@ -779,22 +781,67 @@ export class ProductsService {
       throw new BadRequestException('Damage quantity exceeds available stock');
     }
 
-    product.quantityAvailable -= dto.quantity;
-
     let transactionId: string;
     await this.dataSource.transaction(async (em) => {
-      await em.save(ProductEntity, product);
-
-      const tx = em.create(InventoryTransactionEntity, {
-        productId: product.productId,
-        performedBy,
-        transactionType: InventoryTransactionType.DAMAGE,
-        quantityChange: -dto.quantity,
-        note: dto.note ?? 'Damage/expired goods recorded',
-        relatedOrderId: null,
+      const lockedProduct = await em.findOne(ProductEntity, {
+        where: { productId: dto.productId },
+        lock: { mode: 'pessimistic_write' },
       });
-      const saved = await em.save(InventoryTransactionEntity, tx);
-      transactionId = saved.transactionId;
+      if (!lockedProduct) throw new NotFoundException('Product not found');
+
+      const qtyBefore = lockedProduct.quantityAvailable;
+      lockedProduct.quantityAvailable -= dto.quantity;
+      await em.save(ProductEntity, lockedProduct);
+
+      // FIX CRITICAL: trừ từ batches theo FEFO (lô gần hết hạn trước — ưu tiên hủy lô sắp hỏng).
+      // Nếu product có batches: pick + decrement qty_remaining + log 1 txn per batch.
+      // Nếu KHÔNG có batches (legacy): log 1 txn không batch_id.
+      try {
+        const pick = await this.batchService.consumeInTx(em, dto.productId, dto.quantity);
+        let runningBefore = qtyBefore;
+        let lastTxId = '';
+        for (const line of pick.lines) {
+          const tx = em.create(InventoryTransactionEntity, {
+            productId: product.productId,
+            performedBy,
+            transactionType: InventoryTransactionType.DAMAGE,
+            quantityChange: -line.qty,
+            quantityBefore: runningBefore,
+            quantityAfter: runningBefore - line.qty,
+            referenceType: 'DAMAGE',
+            batchId: line.batchId,
+            unitCostAtTime: String(line.unitCost),
+            note: `${dto.note ?? 'Damage recorded'} · lô ${line.batchCode}`,
+            relatedOrderId: null,
+          });
+          const saved = await em.save(InventoryTransactionEntity, tx);
+          lastTxId = saved.transactionId;
+          runningBefore -= line.qty;
+        }
+        transactionId = lastTxId;
+      } catch (err) {
+        // Fallback legacy: product không có batch nào
+        const hasAnyBatch = await em
+          .createQueryBuilder()
+          .select('1')
+          .from('product_batches', 'b')
+          .where('b.product_id = :pid', { pid: dto.productId })
+          .limit(1)
+          .getRawOne();
+        if (hasAnyBatch) throw err; // có batch nhưng không đủ → ném thật
+        const tx = em.create(InventoryTransactionEntity, {
+          productId: product.productId,
+          performedBy,
+          transactionType: InventoryTransactionType.DAMAGE,
+          quantityChange: -dto.quantity,
+          quantityBefore: qtyBefore,
+          quantityAfter: qtyBefore - dto.quantity,
+          note: `${dto.note ?? 'Damage recorded'} (legacy — no batch)`,
+          relatedOrderId: null,
+        });
+        const saved = await em.save(InventoryTransactionEntity, tx);
+        transactionId = saved.transactionId;
+      }
 
       await this.syncDefaultWarehouseStock(
         em,
@@ -805,7 +852,7 @@ export class ProductsService {
 
     return {
       productId: product.productId,
-      quantityAvailable: product.quantityAvailable,
+      quantityAvailable: product.quantityAvailable - dto.quantity,
       transactionId: transactionId!,
     };
   }
@@ -862,15 +909,28 @@ export class ProductsService {
         'user',
         'user.user_id = transaction.performed_by',
       )
+      .leftJoin(
+        'product_batches',
+        'batch',
+        'batch.batch_id = transaction.batch_id',
+      )
       .select([
         'transaction.transactionId AS id',
         'transaction.productId AS productId',
         'transaction.transactionType AS transactionType',
         'transaction.quantityChange AS quantityChange',
+        'transaction.quantityBefore AS quantityBefore',
+        'transaction.quantityAfter AS quantityAfter',
+        'transaction.referenceType AS referenceType',
+        'transaction.referenceId AS referenceId',
+        'transaction.batchId AS batchId',
+        'transaction.unitCostAtTime AS unitCostAtTime',
         'transaction.note AS note',
         'transaction.relatedOrderId AS relatedOrderId',
         'transaction.createdAt AS createdAt',
         'product.product_name AS productName',
+        'batch.batch_code AS batchCode',
+        'batch.exp_date AS batchExpDate',
       ])
       .addSelect(
         'COALESCE(user.username, user.email, transaction.performed_by)',

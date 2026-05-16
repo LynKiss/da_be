@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderEntity } from '../orders/entities/order.entity';
+import { ProductBatchEntity } from '../products/entities/product-batch.entity';
 import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { IntelligenceController } from './intelligence.controller';
@@ -13,6 +14,7 @@ import { IntelligenceService } from './intelligence.service';
       OrderEntity,
       OrderItemEntity,
       ProductEntity,
+      ProductBatchEntity,
       ProductImageEntity,
     ]),
   ],
