@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, In, MoreThanOrEqual, LessThanOrEqual, Repository } from 'typeorm';
 import { CategoryEntity } from '../categories/entities/category.entity';
@@ -1053,12 +1053,16 @@ export class ReportsService {
 
   async getAgingDebt(query: QueryAgingDebtDto) {
     const asOf = query.asOf ? new Date(query.asOf) : new Date();
+    const asOfDate = asOf.toISOString().split('T')[0];
 
     const qb = this.poRepository
       .createQueryBuilder('po')
       .where('po.payment_status != :paid', { paid: 'paid' })
       .andWhere('po.status NOT IN (:...excl)', {
         excl: [PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.CANCELLED],
+      })
+      .andWhere('(po.orderDate IS NULL OR po.orderDate <= :asOfDate)', {
+        asOfDate,
       })
       .orderBy('po.orderDate', 'ASC');
 
@@ -1075,7 +1079,7 @@ export class ReportsService {
       over90: [] as typeof pos,
     };
 
-    for (const po of pos) {
+    const enrichedItems = pos.map((po) => {
       const refDate = po.orderDate ? new Date(po.orderDate) : new Date(po.createdAt);
       const diffDays = Math.floor((asOf.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
       const outstanding = Number(po.totalAmount) - Number(po.paidAmount);
@@ -1087,13 +1091,15 @@ export class ReportsService {
       else if (diffDays <= 60) buckets.days31_60.push(enriched as typeof po);
       else if (diffDays <= 90) buckets.days61_90.push(enriched as typeof po);
       else buckets.over90.push(enriched as typeof po);
-    }
+
+      return enriched;
+    });
 
     const sumOutstanding = (arr: typeof pos) =>
       arr.reduce((s, po) => s + Number((po as any).outstanding ?? Number(po.totalAmount) - Number(po.paidAmount)), 0);
 
     const summary = {
-      asOf: asOf.toISOString().split('T')[0],
+      asOf: asOfDate,
       totalPos: pos.length,
       totalOutstanding: sumOutstanding(pos),
       buckets: {
@@ -1106,15 +1112,27 @@ export class ReportsService {
       },
     };
 
-    return { summary, items: pos };
+    return { summary, items: enrichedItems };
   }
 
   async recordPoPayment(dto: RecordPoPaymentDto, userId?: string) {
     const po = await this.poRepository.findOne({ where: { poId: dto.poId } });
     if (!po) throw new NotFoundException('Không tìm thấy đơn đặt hàng');
 
-    const newPaid = Number(po.paidAmount) + Number(dto.amount);
+    const amount = Number(dto.amount);
+    const paid = Number(po.paidAmount);
     const total = Number(po.totalAmount);
+    const outstanding = total - paid;
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('So tien thanh toan phai lon hon 0');
+    }
+
+    if (amount > outstanding) {
+      throw new BadRequestException('So tien thanh toan khong duoc vuot qua so con no');
+    }
+
+    const newPaid = paid + amount;
     const paymentStatus = newPaid >= total ? 'paid' : newPaid > 0 ? 'partial' : 'unpaid';
 
     await this.poRepository.update({ poId: dto.poId }, {

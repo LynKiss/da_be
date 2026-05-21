@@ -9,6 +9,7 @@ import { OrderEntity } from '../orders/entities/order.entity';
 import { PaymentTransactionEntity } from '../orders/entities/payment-transaction.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { WishlistEntity } from '../products/entities/wishlist.entity';
 import { RefreshTokenEntity } from './entities/refresh-token.entity';
 import { UserEntity } from './entities/user.entity';
@@ -29,6 +30,7 @@ import { UsersService } from './users.service';
       OrderItemEntity,
       PaymentTransactionEntity,
       ReturnEntity,
+      ProductImageEntity,
       WishlistEntity,
     ]),
   ],

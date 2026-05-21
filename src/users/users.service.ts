@@ -18,6 +18,7 @@ import { OrderEntity } from '../orders/entities/order.entity';
 import { PaymentTransactionEntity } from '../orders/entities/payment-transaction.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { In, Repository } from 'typeorm';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { CreateAdminUserDto } from './dto/create-admin-user.dto';
@@ -64,6 +65,8 @@ export class UsersService {
     private readonly ordersRepository: Repository<OrderEntity>,
     @InjectRepository(OrderItemEntity)
     private readonly orderItemsRepository: Repository<OrderItemEntity>,
+    @InjectRepository(ProductImageEntity)
+    private readonly productImagesRepository: Repository<ProductImageEntity>,
     @InjectRepository(ReturnEntity)
     private readonly returnsRepository: Repository<ReturnEntity>,
     @InjectRepository(PaymentTransactionEntity)
@@ -701,6 +704,9 @@ export class UsersService {
       where: { orderId: order.orderId },
       order: { createdAt: 'ASC', orderItemId: 'ASC' },
     });
+    const productImageByProductId = await this.getPrimaryImageMap(
+      items.map((item) => item.productId),
+    );
 
     return {
       ...this.toOrderSummaryResponse(order),
@@ -715,11 +721,33 @@ export class UsersService {
         id: item.orderItemId,
         productId: item.productId,
         productName: item.productName,
+        primaryImageUrl: productImageByProductId.get(item.productId) ?? null,
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
       })),
     };
+  }
+
+  private async getPrimaryImageMap(productIds: string[]) {
+    const uniqueProductIds = [...new Set(productIds.filter(Boolean))];
+    if (uniqueProductIds.length === 0) {
+      return new Map<string, string>();
+    }
+
+    const images = await this.productImagesRepository.find({
+      where: { productId: In(uniqueProductIds) },
+      order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
+    });
+
+    const imageByProductId = new Map<string, string>();
+    for (const image of images) {
+      if (!imageByProductId.has(image.productId)) {
+        imageByProductId.set(image.productId, image.imageUrl);
+      }
+    }
+
+    return imageByProductId;
   }
 
   async findAdminUserDetail(userId: string) {

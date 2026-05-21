@@ -43,6 +43,20 @@ type SupportBotProductSuggestion = {
   primaryImageUrl: string | null;
 };
 
+type SupportBotAction = {
+  type:
+    | 'navigate'
+    | 'switch_tab'
+    | 'send_message'
+    | 'login'
+    | 'view_product'
+    | 'add_to_cart';
+  label: string;
+  target: string;
+};
+
+type SupportBotSeverity = 'info' | 'warning' | 'success';
+
 type ProductSearchResult = SupportBotProductSuggestion & {
   productSlug?: string;
 };
@@ -282,7 +296,7 @@ export class SupportBotService {
   ) {
     const message = createSupportBotReplyDto.message.trim();
     if (!message) {
-      throw new BadRequestException('Noi dung cau hoi khong duoc de trong');
+      throw new BadRequestException('Nội dung câu hỏi không được để trống');
     }
 
     const history = this.normalizeHistory(createSupportBotReplyDto.history);
@@ -309,8 +323,9 @@ export class SupportBotService {
         source: 'fallback' as const,
         handoffSuggested,
         products: context.products,
-        intent: context.intent,
+        intent: this.toPublicIntent(context.intent),
         cartChanged: Boolean(context.cartActionSummary),
+        ...this.buildReplyMeta(context),
       };
     }
 
@@ -320,8 +335,9 @@ export class SupportBotService {
         source: 'fallback' as const,
         handoffSuggested,
         products: context.products,
-        intent: context.intent,
+        intent: this.toPublicIntent(context.intent),
         cartChanged: Boolean(context.cartActionSummary),
+        ...this.buildReplyMeta(context),
       };
     }
 
@@ -339,8 +355,9 @@ export class SupportBotService {
           source: 'fallback' as const,
           handoffSuggested,
           products: context.products,
-          intent: context.intent,
+          intent: this.toPublicIntent(context.intent),
           cartChanged: Boolean(context.cartActionSummary),
+          ...this.buildReplyMeta(context),
         };
       }
 
@@ -349,8 +366,9 @@ export class SupportBotService {
         source: 'ai' as const,
         handoffSuggested,
         products: context.products,
-        intent: context.intent,
+        intent: this.toPublicIntent(context.intent),
         cartChanged: Boolean(context.cartActionSummary),
+        ...this.buildReplyMeta(context),
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -361,10 +379,131 @@ export class SupportBotService {
         source: 'fallback' as const,
         handoffSuggested,
         products: context.products,
-        intent: context.intent,
+        intent: this.toPublicIntent(context.intent),
         cartChanged: Boolean(context.cartActionSummary),
+        ...this.buildReplyMeta(context),
       };
     }
+  }
+
+  private buildReplyMeta(context: SupportBotContext): {
+    actions: SupportBotAction[];
+    suggestedQuestions: string[];
+    severity: SupportBotSeverity;
+  } {
+    const actions: SupportBotAction[] = [];
+    const pushAction = (action: SupportBotAction) => {
+      if (!actions.some((item) => item.type === action.type && item.target === action.target)) {
+        actions.push(action);
+      }
+    };
+
+    if (context.intent === 'human_handoff') {
+      pushAction({ type: 'switch_tab', label: 'Gặp nhân viên', target: 'support' });
+    }
+
+    if (
+      context.intent === 'my_orders' ||
+      context.intent === 'order_lookup' ||
+      context.intent === 'cancel_order' ||
+      context.orderSummary ||
+      context.orderLookupInstruction ||
+      context.myOrdersSummary
+    ) {
+      pushAction({ type: 'navigate', label: 'Xem đơn hàng', target: '/client/orders' });
+    }
+
+    if (context.intent === 'cart_view' || context.intent === 'cart_add' || context.cartActionSummary) {
+      pushAction({ type: 'navigate', label: 'Mở giỏ hàng', target: '/client/cart' });
+    }
+
+    if (context.intent === 'checkout') {
+      pushAction({ type: 'navigate', label: 'Thanh toán', target: '/client/checkout' });
+    }
+
+    if (context.products.length > 0 || context.intent === 'product_search' || context.intent === 'product_recommendation') {
+      pushAction({ type: 'navigate', label: 'Xem sản phẩm', target: '/client/products' });
+    }
+
+    if (context.intent === 'promotion') {
+      pushAction({ type: 'navigate', label: 'Ví voucher', target: '/client/vouchers' });
+    }
+
+    if (context.intent === 'rice_diagnosis_help') {
+      pushAction({ type: 'navigate', label: 'Chẩn đoán lúa', target: '/client/rice-diagnosis' });
+      pushAction({ type: 'switch_tab', label: 'Gặp kỹ thuật viên', target: 'support' });
+    }
+
+    if (context.intent === 'identity' && !context.userSummary) {
+      pushAction({ type: 'login', label: 'Đăng nhập', target: '/client/login' });
+    }
+
+    if (context.orderLookupError || context.cartActionError) {
+      pushAction({ type: 'switch_tab', label: 'Gặp nhân viên', target: 'support' });
+    }
+
+    const suggestedQuestions = this.buildSuggestedQuestions(context);
+    const severity: SupportBotSeverity =
+      context.orderLookupError ||
+      context.cartActionError ||
+      context.intent === 'human_handoff' ||
+      context.intent === 'rice_diagnosis_help'
+        ? 'warning'
+        : context.cartActionSummary || context.orderSummary || context.myOrdersSummary
+          ? 'success'
+          : 'info';
+
+    return {
+      actions: actions.slice(0, 4),
+      suggestedQuestions,
+      severity,
+    };
+  }
+
+  private buildSuggestedQuestions(context: SupportBotContext) {
+    const byIntent: Partial<Record<SupportBotIntent, string[]>> = {
+      greeting: ['Chính sách giao hàng?', 'Tìm phân NPK', 'Đơn hàng của tôi đang ở đâu?'],
+      shipping: ['Đơn hàng của tôi đang ở đâu?', 'Tôi muốn hủy đơn', 'Gặp nhân viên'],
+      returns: ['Bao lâu được hoàn tiền?', 'Tôi muốn đổi trả hàng', 'Gặp nhân viên'],
+      payment: ['Các hình thức thanh toán?', 'Mã giảm giá hôm nay', 'Thanh toán đơn hàng'],
+      product_search: ['Tìm phân NPK', 'Tư vấn hạt giống lúa', 'Chẩn đoán bệnh lúa'],
+      product_recommendation: ['Tìm phân NPK', 'Tư vấn hạt giống lúa', 'Gặp nhân viên'],
+      cart_add: ['Mở giỏ hàng', 'Thanh toán đơn hàng', 'Tìm thêm sản phẩm'],
+      cart_view: ['Thanh toán đơn hàng', 'Tìm thêm sản phẩm', 'Mã giảm giá hôm nay'],
+      checkout: ['Mã giảm giá hôm nay', 'Các hình thức thanh toán?', 'Chính sách giao hàng?'],
+      my_orders: ['Tôi muốn hủy đơn', 'Đổi trả như thế nào?', 'Gặp nhân viên'],
+      order_lookup: ['Đơn hàng của tôi đang ở đâu?', 'Tôi muốn hủy đơn', 'Gặp nhân viên'],
+      rice_diagnosis_help: ['Mở chẩn đoán bệnh lúa', 'Gặp kỹ thuật viên', 'Tìm thuốc BVTV'],
+      promotion: ['Mã giảm giá hôm nay', 'Tìm sản phẩm đang giảm giá', 'Mở ví voucher'],
+      identity: ['Đơn hàng của tôi đang ở đâu?', 'Mở giỏ hàng', 'Quên mật khẩu'],
+      general: ['Chính sách giao hàng?', 'Tìm phân NPK', 'Gặp nhân viên'],
+    };
+
+    return (byIntent[context.intent] ?? byIntent.general ?? []).slice(0, 3);
+  }
+
+  private toPublicIntent(intent: SupportBotIntent) {
+    const map: Partial<Record<SupportBotIntent, string>> = {
+      shipping: 'shipping_policy',
+      returns: 'return_refund',
+      expiry_info: 'product_policy',
+      cancel_order: 'order_tracking',
+      short_delivery_report: 'return_refund',
+      rice_diagnosis_help: 'rice_diagnosis',
+      my_orders: 'order_tracking',
+      order_lookup: 'order_tracking',
+      product_recommendation: 'product_search',
+      cart_add: 'cart',
+      cart_view: 'cart',
+      human_handoff: 'human_handoff',
+      identity: 'account',
+      greeting: 'account',
+      promotion: 'promotion',
+      checkout: 'checkout',
+      payment: 'payment',
+    };
+
+    return map[intent] ?? intent;
   }
 
   private normalizeHistory(history?: SupportBotHistoryItemDto[]) {
@@ -796,7 +935,7 @@ export class SupportBotService {
     product: SupportBotProductSuggestion,
   ) {
     if (!productQuery) {
-      return 'San pham dang hien thi trong catalog va co du lieu gia/ton kho xac thuc.';
+      return 'Sản phẩm đang hiển thị trong catalog và có dữ liệu giá/tồn kho xác thực.';
     }
 
     const normalizedName = this.normalizeText(product.productName);
@@ -805,10 +944,10 @@ export class SupportBotService {
     );
 
     if (matchedTokens.length > 0) {
-      return `Phu hop vi ten san pham khop cac tu khoa: ${matchedTokens.slice(0, 4).join(', ')}.`;
+      return `Phù hợp vì tên sản phẩm khớp các từ khóa: ${matchedTokens.slice(0, 4).join(', ')}.`;
     }
 
-    return 'Phu hop de ban xem them trong nhom san pham lien quan.';
+    return 'Phù hợp để bạn xem thêm trong nhóm sản phẩm liên quan.';
   }
 
   private async buildCartContext(
@@ -831,7 +970,7 @@ export class SupportBotService {
         cartSummary: null,
         cartActionSummary: null,
         cartActionError:
-          'Ban can dang nhap de toi xem gio hang hoac them san pham vao gio.',
+          'Bạn cần đăng nhập để tôi xem giỏ hàng hoặc thêm sản phẩm vào giỏ.',
       };
     }
 
@@ -844,8 +983,8 @@ export class SupportBotService {
             cartActionSummary: null,
             cartActionError:
               products.length > 1
-                ? 'Toi tim thay nhieu san pham gan dung. Ban hay bam vao san pham can mua hoac nhap ten cu the hon truoc khi them vao gio.'
-                : 'Toi chua xac dinh duoc san pham can them vao gio. Ban hay noi ro ten san pham, vi du: "them 2 phan NPK vao gio".',
+                ? 'Tôi tìm thấy nhiều sản phẩm gần đúng. Bạn hãy bấm vào sản phẩm cần mua hoặc nhập tên cụ thể hơn trước khi thêm vào giỏ.'
+                : 'Tôi chưa xác định được sản phẩm cần thêm vào giỏ. Bạn hãy nói rõ tên sản phẩm, ví dụ: "thêm 2 phân NPK vào giỏ".',
           };
         }
 
@@ -859,9 +998,9 @@ export class SupportBotService {
         return {
           cartSummary: this.formatCartSummary(cart),
           cartActionSummary: [
-            `Da them ${quantity} x ${addedItem.productName ?? product.productName} vao gio hang.`,
-            `Gio hang hien co ${cart.totalQuantity} san pham, tam tinh ${this.formatCurrency(cart.totalAmount)}.`,
-            'Ban co the vao gio hang de kiem tra lai va thanh toan.',
+            `Đã thêm ${quantity} x ${addedItem.productName ?? product.productName} vào giỏ hàng.`,
+            `Giỏ hàng hiện có ${cart.totalQuantity} sản phẩm, tạm tính ${this.formatCurrency(cart.totalAmount)}.`,
+            'Bạn có thể vào giỏ hàng để kiểm tra lại và thanh toán.',
           ].join('\n'),
           cartActionError: null,
         };
@@ -898,7 +1037,7 @@ export class SupportBotService {
       return {
         myOrdersSummary: null,
         myOrdersError:
-          'Ban can dang nhap de toi xem danh sach don hang cua tai khoan hien tai.',
+          'Bạn cần đăng nhập để tôi xem danh sách đơn hàng của tài khoản hiện tại.',
       };
     }
 
@@ -943,7 +1082,7 @@ export class SupportBotService {
       return {
         orderSummary: null,
         orderLookupInstruction:
-          'Neu ban can tra cuu don hang, hay gui ma don dang UUID. Don guest can them so dien thoai dat hang; don cua tai khoan dang ky thi vui long dang nhap de xem.',
+          'Nếu bạn cần tra cứu đơn hàng, hãy gửi mã đơn dạng UUID. Đơn khách vãng lai cần thêm số điện thoại đặt hàng; đơn của tài khoản đăng ký thì vui lòng đăng nhập để xem.',
         orderLookupError: null,
       };
     }
@@ -953,7 +1092,7 @@ export class SupportBotService {
       return {
         orderSummary: null,
         orderLookupInstruction:
-          'Toi da nhan duoc ma don. Neu day la don guest, ban vui long gui them so dien thoai dat hang de toi tra cuu. Neu day la don cua tai khoan da dang ky, vui long dang nhap de xem chi tiet don.',
+          'Tôi đã nhận được mã đơn. Nếu đây là đơn khách vãng lai, bạn vui lòng gửi thêm số điện thoại đặt hàng để tôi tra cứu. Nếu đây là đơn của tài khoản đã đăng ký, vui lòng đăng nhập để xem chi tiết đơn.',
         orderLookupError: null,
       };
     }
@@ -974,7 +1113,7 @@ export class SupportBotService {
         orderSummary: null,
         orderLookupInstruction: null,
         orderLookupError:
-          'Toi chua tra cuu duoc don hang nay. Ban vui long kiem tra lai ma don, so dien thoai, hoac chuyen sang tab Nhan vien de duoc ho tro truc tiep.',
+          'Tôi chưa tra cứu được đơn hàng này. Bạn vui lòng kiểm tra lại mã đơn, số điện thoại, hoặc chuyển sang tab Nhân viên để được hỗ trợ trực tiếp.',
       };
     }
   }
@@ -1010,34 +1149,34 @@ export class SupportBotService {
 
     if (context.intent === 'identity') {
       if (!context.userSummary) {
-        return 'Ban chua dang nhap nen toi chua xac dinh duoc tai khoan hien tai. Hay dang nhap de toi ho tro theo dung thong tin cua ban.';
+        return 'Bạn chưa đăng nhập nên tôi chưa xác định được tài khoản hiện tại. Hãy đăng nhập để tôi hỗ trợ theo đúng thông tin của bạn.';
       }
 
       return [
-        'Ban dang dang nhap voi thong tin:',
+        'Bạn đang đăng nhập với thông tin:',
         context.userSummary,
-        'Toi chi dung thong tin cua chinh tai khoan nay de ho tro, khong truy cap du lieu cua nguoi dung khac.',
+        'Tôi chỉ dùng thông tin của chính tài khoản này để hỗ trợ, không truy cập dữ liệu của người dùng khác.',
       ].join('\n');
     }
 
     if (context.intent === 'cart_view') {
       return (
         context.cartSummary ??
-        'Toi chua doc duoc gio hang. Neu ban chua dang nhap, hay dang nhap de xem gio hang cua minh.'
+        'Tôi chưa đọc được giỏ hàng. Nếu bạn chưa đăng nhập, hãy đăng nhập để xem giỏ hàng của mình.'
       );
     }
 
     if (context.intent === 'checkout') {
       return [
-        context.cartSummary ?? 'Toi chua doc duoc gio hang hien tai.',
-        'De dat hang an toan, ban vui long vao trang gio hang/thanh toan de xac nhan dia chi, phuong thuc giao hang va thanh toan. Toi co the ho tro them san pham vao gio truoc khi ban checkout.',
+        context.cartSummary ?? 'Tôi chưa đọc được giỏ hàng hiện tại.',
+        'Để đặt hàng an toàn, bạn vui lòng vào trang giỏ hàng/thanh toán để xác nhận địa chỉ, phương thức giao hàng và thanh toán. Tôi có thể hỗ trợ thêm sản phẩm vào giỏ trước khi bạn checkout.',
       ].join('\n');
     }
 
     if (context.intent === 'human_handoff') {
       return [
-        'Toi co the chuyen huong sang ho tro truc tiep.',
-        'Ban hay mo tab "Nhan vien" de chat voi CSKH, hoac goi 1800 6863 neu can xu ly nhanh.',
+        'Tôi có thể chuyển hướng sang hỗ trợ trực tiếp.',
+        'Bạn hãy mở tab "Nhân viên" để chat với CSKH, hoặc gọi 1800 6863 nếu cần xử lý nhanh.',
       ].join('\n');
     }
 
@@ -1056,10 +1195,10 @@ export class SupportBotService {
 
       return [
         context.productQuery
-          ? `Toi goi y cac san pham phu hop voi nhu cau "${context.productQuery}":`
-          : 'Toi goi y mot so san pham dang co trong catalog:',
+          ? `Tôi gợi ý các sản phẩm phù hợp với nhu cầu "${context.productQuery}":`
+          : 'Tôi gợi ý một số sản phẩm đang có trong catalog:',
         ...lines,
-        'Ban co the bam vao the san pham de xem chi tiet. Neu can chan doan benh cay trong hoac cach dung thuoc, hay chuyen sang tab Nhan vien/Rice diagnosis de duoc ho tro dung hon.',
+        'Bạn có thể bấm vào thẻ sản phẩm để xem chi tiết. Nếu cần chẩn đoán bệnh cây trồng hoặc cách dùng thuốc, hãy chuyển sang tab Nhân viên/Chẩn đoán lúa để được hỗ trợ đúng hơn.',
       ].join('\n');
     }
 
@@ -1073,15 +1212,15 @@ export class SupportBotService {
 
       return [
         context.productQuery
-          ? `Toi da tim thay ${context.products.length} goi y phu hop voi "${context.productQuery}":`
-          : `Hien co ${context.products.length} san pham dang hien thi:`,
+          ? `Tôi đã tìm thấy ${context.products.length} gợi ý phù hợp với "${context.productQuery}":`
+          : `Hiện có ${context.products.length} sản phẩm đang hiển thị:`,
         ...lines,
-        'Ban co the bam vao goi y de xem chi tiet, hoac chuyen sang tab Nhan vien neu can tu van ky hon.',
+        'Bạn có thể bấm vào gợi ý để xem chi tiết, hoặc chuyển sang tab Nhân viên nếu cần tư vấn kỹ hơn.',
       ].join('\n');
     }
 
     if (context.intent === 'product_search') {
-      return 'Toi chua tim thay san pham phu hop. Ban thu mo ta ro hon ten hang hoa, cong dung, hoac chuyen sang tab Nhan vien de duoc tu van san pham.';
+      return 'Tôi chưa tìm thấy sản phẩm phù hợp. Bạn thử mô tả rõ hơn tên hàng hóa, công dụng, hoặc chuyển sang tab Nhân viên để được tư vấn sản phẩm.';
     }
 
     const faqReply = this.matchFaqReply(message);
@@ -1090,15 +1229,15 @@ export class SupportBotService {
     }
 
     if (context.intent === 'greeting') {
-      return 'Chao ban. Toi co the ho tro giao hang, thanh toan, doi tra, tim san pham, hoac huong dan tra cuu don hang.';
+      return 'Chào bạn. Tôi có thể hỗ trợ giao hàng, thanh toán, đổi trả, tìm sản phẩm, hoặc hướng dẫn tra cứu đơn hàng.';
     }
 
     return [
-      'Toi co the ho tro cac viec sau:',
-      '- Giai dap chinh sach giao hang, doi tra, thanh toan',
-      '- Tim san pham phu hop tu catalog hien co',
-      '- Huong dan tra cuu don guest bang ma don + so dien thoai',
-      '- Chuyen sang nhan vien khi ban can xu ly nghiep vu chi tiet',
+      'Tôi có thể hỗ trợ các việc sau:',
+      '- Giải đáp chính sách giao hàng, đổi trả, thanh toán',
+      '- Tìm sản phẩm phù hợp từ catalog hiện có',
+      '- Hướng dẫn tra cứu đơn khách vãng lai bằng mã đơn + số điện thoại',
+      '- Chuyển sang nhân viên khi bạn cần xử lý nghiệp vụ chi tiết',
     ].join('\n');
   }
 
@@ -1197,21 +1336,21 @@ export class SupportBotService {
     }>;
   }) {
     if (cart.items.length === 0) {
-      return 'Gio hang cua ban dang trong.';
+      return 'Giỏ hàng của bạn đang trống.';
     }
 
     const lines = cart.items
       .slice(0, 5)
       .map(
         (item, index) =>
-          `${index + 1}. ${item.productName ?? 'San pham'} x${item.quantity} - ${this.formatCurrency(item.lineTotal)}`,
+          `${index + 1}. ${item.productName ?? 'Sản phẩm'} x${item.quantity} - ${this.formatCurrency(item.lineTotal)}`,
       );
 
     return [
-      `Gio hang hien co ${cart.totalQuantity} san pham, tam tinh ${this.formatCurrency(cart.totalAmount)}:`,
+      `Giỏ hàng hiện có ${cart.totalQuantity} sản phẩm, tạm tính ${this.formatCurrency(cart.totalAmount)}:`,
       ...lines,
       cart.items.length > 5
-        ? `Con ${cart.items.length - 5} dong san pham khac.`
+        ? `Còn ${cart.items.length - 5} dòng sản phẩm khác.`
         : '',
     ]
       .filter(Boolean)
@@ -1220,7 +1359,7 @@ export class SupportBotService {
 
   private formatMyOrdersSummary(orders: MyOrderSummaryResult[], total: number) {
     if (orders.length === 0) {
-      return 'Tai khoan cua ban hien chua co don hang nao.';
+      return 'Tài khoản của bạn hiện chưa có đơn hàng nào.';
     }
 
     const lines = orders.map((order, index) => {
@@ -1230,13 +1369,13 @@ export class SupportBotService {
         year: 'numeric',
       }).format(new Date(order.createdAt));
 
-      return `${index + 1}. Don ${this.shortId(order.id)} - ${this.mapOrderStatus(order.status)} - ${this.formatCurrency(order.totalPayment)} - ${order.totalQuantity} san pham - ngay ${createdAt}`;
+      return `${index + 1}. Đơn ${this.shortId(order.id)} - ${this.mapOrderStatus(order.status)} - ${this.formatCurrency(order.totalPayment)} - ${order.totalQuantity} sản phẩm - ngày ${createdAt}`;
     });
 
     return [
-      `Ban co ${total} don hang. ${orders.length < total ? `Day la ${orders.length} don moi nhat:` : 'Danh sach don hang:'}`,
+      `Bạn có ${total} đơn hàng. ${orders.length < total ? `Đây là ${orders.length} đơn mới nhất:` : 'Danh sách đơn hàng:'}`,
       ...lines,
-      'Neu muon xem chi tiet mot don, hay gui ma don hoac vao muc Tai khoan > Don hang.',
+      'Nếu muốn xem chi tiết một đơn, hãy gửi mã đơn hoặc vào mục Tài khoản > Đơn hàng.',
     ].join('\n');
   }
 
@@ -1248,15 +1387,15 @@ export class SupportBotService {
       .join('\n');
 
     const summaryLines = [
-      `Don hang ${order.id}`,
-      `Trang thai: ${statusLabel}`,
-      `Tong tien: ${this.formatCurrency(order.totalPayment)}`,
-      `So luong: ${order.totalQuantity} san pham`,
-      `Nguoi nhan: ${order.fullName} - ${order.phone}`,
+      `Đơn hàng ${order.id}`,
+      `Trạng thái: ${statusLabel}`,
+      `Tổng tiền: ${this.formatCurrency(order.totalPayment)}`,
+      `Số lượng: ${order.totalQuantity} sản phẩm`,
+      `Người nhận: ${order.fullName} - ${order.phone}`,
     ];
 
     if (itemsPreview) {
-      summaryLines.push('Mat hang tieu bieu:');
+      summaryLines.push('Mặt hàng tiêu biểu:');
       summaryLines.push(itemsPreview);
     }
 
@@ -1265,15 +1404,15 @@ export class SupportBotService {
 
   private mapOrderStatus(status: string) {
     const labels: Record<string, string> = {
-      pending: 'Cho xu ly',
-      backordered: 'Cho hang',
-      confirmed: 'Da xac nhan',
-      processing: 'Dang xu ly',
-      shipping: 'Dang giao',
-      delivered: 'Da giao',
-      partial_delivered: 'Giao mot phan',
-      cancelled: 'Da huy',
-      returned: 'Da tra hang',
+      pending: 'Chờ xử lý',
+      backordered: 'Chờ hàng',
+      confirmed: 'Đã xác nhận',
+      processing: 'Đang xử lý',
+      shipping: 'Đang giao',
+      delivered: 'Đã giao',
+      partial_delivered: 'Giao một phần',
+      cancelled: 'Đã hủy',
+      returned: 'Đã trả hàng',
     };
 
     return labels[status] ?? status;
@@ -1289,7 +1428,7 @@ export class SupportBotService {
       return String(value);
     }
 
-    return `${amount.toLocaleString('vi-VN')}d`;
+    return `${amount.toLocaleString('vi-VN')}đ`;
   }
 
   private normalizeText(value: string) {
