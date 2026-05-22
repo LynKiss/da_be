@@ -23,6 +23,11 @@ export class CreateOrderDto {
   @MaxLength(50)
   discountCode?: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  cartHash?: string;
+
   /**
    * Cho phép đặt hàng khi hết kho — đơn sẽ ở trạng thái BACKORDERED,
    * không trừ stock. Khi nhập hàng về (GR confirmed), admin có thể fulfill.

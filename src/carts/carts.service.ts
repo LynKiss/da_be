@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   BadRequestException,
   Injectable,
@@ -41,14 +42,60 @@ export class CartsService {
     return sale != null && sale > 0 ? product.productPriceSale! : product.productPrice;
   }
 
+  private toMoney(value: string | number | null | undefined) {
+    return Number(value ?? 0).toFixed(2);
+  }
+
+  private getStockIssue(item: CartItemEntity, product?: ProductEntity | null) {
+    if (!product || !product.isShow) {
+      return 'unavailable';
+    }
+    if (product.quantityAvailable <= 0) {
+      return 'out_of_stock';
+    }
+    if (item.quantity > product.quantityAvailable) {
+      return 'insufficient_stock';
+    }
+    return null;
+  }
+
+  private buildCartHash(
+    items: Array<{
+      productId: string;
+      quantity: number;
+      unitPrice: string;
+      isUnavailable: boolean;
+      stockIssue: string | null;
+    }>,
+  ) {
+    const stableItems = items
+      .map((item) => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        unitPrice: this.toMoney(item.unitPrice),
+        isUnavailable: item.isUnavailable,
+        stockIssue: item.stockIssue,
+      }))
+      .sort((a, b) => a.productId.localeCompare(b.productId));
+
+    return createHash('sha256')
+      .update(JSON.stringify(stableItems))
+      .digest('hex');
+  }
+
   private toCartItemResponse(
     item: CartItemEntity,
     product?: ProductEntity | null,
     primaryImageUrl?: string | null,
   ) {
-    const unitPrice = item.priceAtAdded;
+    const unitPrice = product
+      ? this.toMoney(this.getEffectivePrice(product))
+      : this.toMoney(item.priceAtAdded);
+    const priceAtAdded = this.toMoney(item.priceAtAdded);
     const quantity = item.quantity;
     const lineTotal = (Number(unitPrice) * quantity).toFixed(2);
+    const stockIssue = this.getStockIssue(item, product);
+    const isUnavailable = !product || !product.isShow;
 
     return {
       id: item.cartItemId,
@@ -57,6 +104,10 @@ export class CartsService {
       primaryImageUrl: primaryImageUrl ?? null,
       quantity,
       unitPrice,
+      priceAtAdded,
+      priceChanged: unitPrice !== priceAtAdded,
+      isUnavailable,
+      stockIssue,
       lineTotal,
       availableQuantity: product?.quantityAvailable ?? null,
       createdAt: item.createdAt,
@@ -138,12 +189,23 @@ export class CartsService {
     const totalAmount = mappedItems
       .reduce((sum, item) => sum + Number(item.lineTotal), 0)
       .toFixed(2);
+    const cartHash = this.buildCartHash(mappedItems);
+    const hasBlockedItem = mappedItems.some(
+      (item) => item.isUnavailable || item.stockIssue,
+    );
+    const hasPriceChange = mappedItems.some((item) => item.priceChanged);
 
     return {
       id: cart.cartId,
       totalItems: mappedItems.length,
       totalQuantity,
       totalAmount,
+      cartHash,
+      validationStatus: hasBlockedItem
+        ? 'blocked'
+        : hasPriceChange
+          ? 'needs_review'
+          : 'ok',
       items: mappedItems,
       createdAt: cart.createdAt,
       updatedAt: cart.updatedAt,

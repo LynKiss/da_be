@@ -1,7 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -422,6 +422,67 @@ export class OrdersService {
     return Math.max(0, Math.min(finalDiscount, subtotalAmount));
   }
 
+  private getEffectivePrice(product: ProductEntity) {
+    const sale =
+      product.productPriceSale != null ? Number(product.productPriceSale) : null;
+    return sale != null && sale > 0
+      ? product.productPriceSale!
+      : product.productPrice;
+  }
+
+  private toMoney(value: string | number | null | undefined) {
+    return Number(value ?? 0).toFixed(2);
+  }
+
+  private getCartStockIssue(
+    quantity: number,
+    product?: ProductEntity | null,
+  ) {
+    if (!product || !product.isShow) {
+      return 'unavailable';
+    }
+    if (product.quantityAvailable <= 0) {
+      return 'out_of_stock';
+    }
+    if (quantity > product.quantityAvailable) {
+      return 'insufficient_stock';
+    }
+    return null;
+  }
+
+  private buildCartHash(
+    items: Array<{
+      productId: string;
+      quantity: number;
+      unitPrice: string;
+      isUnavailable: boolean;
+      stockIssue: string | null;
+    }>,
+  ) {
+    const stableItems = items
+      .map((item) => ({
+        productId: item.productId,
+        quantity: item.quantity,
+        unitPrice: this.toMoney(item.unitPrice),
+        isUnavailable: item.isUnavailable,
+        stockIssue: item.stockIssue,
+      }))
+      .sort((a, b) => a.productId.localeCompare(b.productId));
+
+    return createHash('sha256')
+      .update(JSON.stringify(stableItems))
+      .digest('hex');
+  }
+
+  private throwCartChanged(message?: string): never {
+    throw new ConflictException({
+      message:
+        message ??
+        'Giỏ hàng đã thay đổi. Vui lòng kiểm tra lại giá và tồn kho trước khi đặt hàng.',
+      error: 'CART_CHANGED',
+    });
+  }
+
   private async validateDiscountForCheckout(
     userId: string,
     discountCode: string | undefined,
@@ -467,7 +528,7 @@ export class OrdersService {
           return sum;
         }
 
-        return sum + Number(item.priceAtAdded) * item.quantity;
+        return sum + Number(this.getEffectivePrice(product)) * item.quantity;
       }, 0);
     }
 
@@ -477,11 +538,12 @@ export class OrdersService {
       });
       const productIds = new Set(productMappings.map((item) => item.productId));
       eligibleSubtotal = cartItems.reduce((sum, item) => {
-        if (!productIds.has(item.productId)) {
+        const product = productsById.get(item.productId);
+        if (!product || !productIds.has(item.productId)) {
           return sum;
         }
 
-        return sum + Number(item.priceAtAdded) * item.quantity;
+        return sum + Number(this.getEffectivePrice(product)) * item.quantity;
       }, 0);
     }
 
@@ -1004,6 +1066,406 @@ export class OrdersService {
   }
 
   async createOrder(
+    userId: string,
+    createOrderDto: CreateOrderDto,
+    idempotencyKey?: string,
+  ) {
+    const currentUser = await this.ensureUserExists(userId);
+    await this.ensurePaymentMethodEnabled(createOrderDto.paymentMethod);
+    const allowBackorder = Boolean(createOrderDto.allowBackorder);
+
+    if (allowBackorder && !currentUser.isWholesale) {
+      throw new BadRequestException(
+        'Backorder chỉ dành cho khách sỉ/B2B đã được cấu hình.',
+      );
+    }
+
+    if (idempotencyKey) {
+      const existing = await this.ordersRepository.findOne({
+        where: { idempotencyKey, userId },
+      });
+      if (existing) {
+        return this.buildOrderDetail(
+          await this.findOwnedOrder(userId, existing.orderId),
+        );
+      }
+    }
+
+    const cart = await this.cartsRepository.findOneBy({ userId });
+    if (!cart) {
+      throw new BadRequestException('Cart is empty');
+    }
+
+    const [cartItems, shippingAddress, deliveryMethod] = await Promise.all([
+      this.cartItemsRepository.find({
+        where: { cartId: cart.cartId },
+        order: { createdAt: 'ASC', cartItemId: 'ASC' },
+      }),
+      this.shippingAddressesRepository.findOneBy({
+        shippingAddressId: createOrderDto.shippingAddressId,
+        userId,
+      }),
+      this.deliveryMethodsRepository.findOneBy({
+        deliveryId: createOrderDto.deliveryId,
+      }),
+    ]);
+
+    if (cartItems.length === 0) {
+      throw new BadRequestException('Cart is empty');
+    }
+
+    if (!shippingAddress) {
+      throw new NotFoundException('Shipping address not found');
+    }
+
+    if (!deliveryMethod || !deliveryMethod.isActive) {
+      throw new NotFoundException('Delivery method not found');
+    }
+
+    if (createOrderDto.paymentMethod === PaymentMethod.CREDIT && !currentUser.isWholesale) {
+      throw new BadRequestException(
+        'Phương thức "Mua nợ" chỉ dành cho khách sỉ được cấp hạn mức tín dụng',
+      );
+    }
+
+    const productIds = [...new Set(cartItems.map((item) => item.productId))];
+    const addressSnapshot = this.buildAddressSnapshot(shippingAddress);
+    const orderId = randomUUID();
+    let createdOrderId: string = orderId;
+    let createdOrderWasNew = false;
+
+    await withDeadlockRetry(() =>
+      this.ordersRepository.manager.transaction(async (entityManager) => {
+        const transactionalOrdersRepository =
+          entityManager.getRepository(OrderEntity);
+        const transactionalOrderItemsRepository =
+          entityManager.getRepository(OrderItemEntity);
+        const transactionalHistoryRepository = entityManager.getRepository(
+          OrderStatusHistoryEntity,
+        );
+        const transactionalProductsRepository =
+          entityManager.getRepository(ProductEntity);
+        const transactionalCartItemsRepository =
+          entityManager.getRepository(CartItemEntity);
+        const transactionalInventoryTransactionsRepository =
+          entityManager.getRepository(InventoryTransactionEntity);
+        const transactionalDiscountsRepository =
+          entityManager.getRepository(DiscountEntity);
+        const transactionalCouponUsageRepository =
+          entityManager.getRepository(CouponUsageEntity);
+        const transactionalCreditLimitRepository =
+          entityManager.getRepository(CustomerCreditLimitEntity);
+
+        if (idempotencyKey) {
+          const dup = await transactionalOrdersRepository.findOne({
+            where: { idempotencyKey, userId },
+          });
+          if (dup) {
+            createdOrderId = dup.orderId;
+            return;
+          }
+        }
+
+        const lockedProductsById = new Map<string, ProductEntity>();
+        for (const productId of [...productIds].sort()) {
+          const product = await transactionalProductsRepository.findOne({
+            where: { productId },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (product) {
+            lockedProductsById.set(productId, product);
+          }
+        }
+
+        let subtotalAmount = 0;
+        let totalQuantity = 0;
+        let isBackorder = false;
+        const cartHashLines: Array<{
+          productId: string;
+          quantity: number;
+          unitPrice: string;
+          isUnavailable: boolean;
+          stockIssue: string | null;
+        }> = [];
+
+        for (const cartItem of cartItems) {
+          const product = lockedProductsById.get(cartItem.productId);
+          const isUnavailable = !product || !product.isShow;
+          const stockIssue = this.getCartStockIssue(
+            cartItem.quantity,
+            product,
+          );
+          const unitPrice = product
+            ? this.toMoney(this.getEffectivePrice(product))
+            : this.toMoney(cartItem.priceAtAdded);
+
+          cartHashLines.push({
+            productId: cartItem.productId,
+            quantity: cartItem.quantity,
+            unitPrice,
+            isUnavailable,
+            stockIssue,
+          });
+
+          if (isUnavailable) {
+            if (createOrderDto.cartHash) {
+              this.throwCartChanged(
+                'Một hoặc nhiều sản phẩm trong giỏ đã ngừng bán. Vui lòng kiểm tra lại giỏ hàng.',
+              );
+            }
+            throw new BadRequestException(
+              'One or more products are unavailable',
+            );
+          }
+
+          if (stockIssue) {
+            const productName = product?.productName ?? 'Sản phẩm';
+            if (!allowBackorder) {
+              if (createOrderDto.cartHash) {
+                this.throwCartChanged(
+                  `Sản phẩm ${productName} không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.`,
+                );
+              }
+              throw new BadRequestException(
+                `Sản phẩm ${productName} không đủ tồn kho`,
+              );
+            }
+            isBackorder = true;
+          }
+
+          subtotalAmount += Number(unitPrice) * cartItem.quantity;
+          totalQuantity += cartItem.quantity;
+        }
+
+        if (createOrderDto.cartHash) {
+          const currentCartHash = this.buildCartHash(cartHashLines);
+          if (currentCartHash !== createOrderDto.cartHash) {
+            this.throwCartChanged();
+          }
+        }
+
+        const discountContext = await this.validateDiscountForCheckout(
+          userId,
+          createOrderDto.discountCode,
+          subtotalAmount,
+          cartItems,
+          lockedProductsById,
+        );
+        const discount = discountContext?.discount ?? null;
+        const discountAmount = discountContext
+          ? this.calculateDiscountAmount(
+              discountContext.discount,
+              discountContext.eligibleSubtotal,
+            )
+          : 0;
+        const deliveryCost = this.calculateDeliveryCost(
+          deliveryMethod,
+          subtotalAmount,
+        );
+        const totalPayment = subtotalAmount - discountAmount + deliveryCost;
+
+        let creditLimit: CustomerCreditLimitEntity | null = null;
+        if (createOrderDto.paymentMethod === PaymentMethod.CREDIT) {
+          creditLimit = await transactionalCreditLimitRepository.findOne({
+            where: { userId, isActive: true as unknown as boolean },
+            lock: { mode: 'pessimistic_write' },
+          });
+          if (!creditLimit) {
+            throw new BadRequestException(
+              'Bạn chưa được cấp hạn mức tín dụng. Vui lòng liên hệ shop để được hỗ trợ',
+            );
+          }
+          const available =
+            Number(creditLimit.creditLimit) -
+            Number(creditLimit.currentDebt ?? 0);
+          if (totalPayment > available) {
+            throw new BadRequestException(
+              `Vượt hạn mức tín dụng. Hạn mức còn lại: ${Math.max(0, available).toLocaleString('vi-VN')}₫`,
+            );
+          }
+        }
+
+        const order = transactionalOrdersRepository.create({
+          orderId,
+          userId,
+          shippingAddressId: shippingAddress.shippingAddressId,
+          deliveryId: deliveryMethod.deliveryId,
+          discountId: discount?.discountId ?? null,
+          orderStatus: isBackorder
+            ? OrderStatus.BACKORDERED
+            : OrderStatus.PENDING,
+          paymentMethod: createOrderDto.paymentMethod,
+          paymentStatus: PaymentStatus.UNPAID,
+          subtotalAmount: subtotalAmount.toFixed(2),
+          discountAmount: discountAmount.toFixed(2),
+          deliveryCost: deliveryCost.toFixed(2),
+          totalPayment: totalPayment.toFixed(2),
+          totalQuantity,
+          note: createOrderDto.note ?? null,
+          fullName: shippingAddress.recipientName,
+          phone: shippingAddress.phone,
+          address: addressSnapshot,
+          idempotencyKey: idempotencyKey ?? null,
+        });
+
+        await transactionalOrdersRepository.save(order);
+
+        for (const cartItem of cartItems) {
+          const product = lockedProductsById.get(cartItem.productId);
+          if (!product || !product.isShow) {
+            this.throwCartChanged(
+              'Một hoặc nhiều sản phẩm trong giỏ đã ngừng bán. Vui lòng kiểm tra lại giỏ hàng.',
+            );
+          }
+
+          const isLineBackorder =
+            cartItem.quantity > product.quantityAvailable;
+          if (isLineBackorder && !allowBackorder) {
+            this.throwCartChanged(
+              `Sản phẩm ${product.productName} không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.`,
+            );
+          }
+
+          const unitPrice = this.toMoney(this.getEffectivePrice(product));
+          const lineTotal = Number(unitPrice) * cartItem.quantity;
+
+          const orderItem = transactionalOrderItemsRepository.create({
+            orderId,
+            productId: cartItem.productId,
+            productName: product.productName,
+            quantity: cartItem.quantity,
+            unitPrice,
+            lineTotal: lineTotal.toFixed(2),
+          });
+          await transactionalOrderItemsRepository.save(orderItem);
+
+          if (isLineBackorder) {
+            continue;
+          }
+
+          const qtyBefore = product.quantityAvailable;
+
+          const batchPick = await this.batchService
+            .consumeInTx(entityManager, product.productId, cartItem.quantity)
+            .catch(async (err) => {
+              const hasAnyBatch = await entityManager
+                .createQueryBuilder()
+                .select('1')
+                .from('product_batches', 'b')
+                .where('b.product_id = :pid', { pid: product.productId })
+                .limit(1)
+                .getRawOne();
+              if (hasAnyBatch) {
+                throw err;
+              }
+              return null;
+            });
+
+          product.quantityAvailable -= cartItem.quantity;
+          product.quantityReserved =
+            (product.quantityReserved ?? 0) + cartItem.quantity;
+          await transactionalProductsRepository.save(product);
+
+          if (batchPick && batchPick.success) {
+            let runningBefore = qtyBefore;
+            for (const line of batchPick.lines) {
+              const after = runningBefore - line.qty;
+              await transactionalInventoryTransactionsRepository.save(
+                transactionalInventoryTransactionsRepository.create({
+                  productId: product.productId,
+                  performedBy: userId,
+                  transactionType: InventoryTransactionType.EXPORT,
+                  quantityChange: -line.qty,
+                  quantityBefore: runningBefore,
+                  quantityAfter: after,
+                  referenceType: 'ORDER',
+                  referenceId: orderId,
+                  batchId: line.batchId,
+                  unitCostAtTime: line.unitCost.toFixed(4),
+                  note: `Export by order checkout - batch ${line.batchCode}`,
+                  relatedOrderId: orderId,
+                }),
+              );
+              runningBefore = after;
+            }
+          } else {
+            await transactionalInventoryTransactionsRepository.save(
+              transactionalInventoryTransactionsRepository.create({
+                productId: product.productId,
+                performedBy: userId,
+                transactionType: InventoryTransactionType.EXPORT,
+                quantityChange: -cartItem.quantity,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                referenceType: 'ORDER',
+                referenceId: orderId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: 'Export by order checkout (legacy - no batch)',
+                relatedOrderId: orderId,
+              }),
+            );
+          }
+
+          await this.syncDefaultWarehouseStock(
+            entityManager,
+            product.productId,
+            -cartItem.quantity,
+          );
+        }
+
+        if (discount) {
+          discount.usedCount += 1;
+          await transactionalDiscountsRepository.save(discount);
+
+          const couponUsage = transactionalCouponUsageRepository.create({
+            discountId: discount.discountId,
+            userId,
+            orderId,
+          });
+          await transactionalCouponUsageRepository.save(couponUsage);
+        }
+
+        if (creditLimit) {
+          creditLimit.currentDebt = (
+            Number(creditLimit.currentDebt ?? 0) + totalPayment
+          ).toFixed(2);
+          await transactionalCreditLimitRepository.save(creditLimit);
+        }
+
+        const history = transactionalHistoryRepository.create({
+          orderId,
+          oldStatus: null,
+          newStatus: isBackorder
+            ? OrderStatus.BACKORDERED
+            : OrderStatus.PENDING,
+          changedBy: userId,
+          note: isBackorder
+            ? 'Đơn hàng được tạo ở trạng thái chờ nhập kho'
+            : 'Đơn hàng đã được tạo',
+        });
+        await transactionalHistoryRepository.save(history);
+
+        await transactionalCartItemsRepository.delete({ cartId: cart.cartId });
+        createdOrderWasNew = true;
+      }),
+    );
+
+    if (!createdOrderWasNew) {
+      return this.buildOrderDetail(
+        await this.findOwnedOrder(userId, createdOrderId),
+      );
+    }
+
+    const createdOrder = await this.findOwnedOrder(userId, createdOrderId);
+    await this.notificationsService.sendOrderCreatedNotification(
+      userId,
+      createdOrderId,
+    );
+    await this.notifyAdminsAboutNewOrder(createdOrder);
+    return this.buildOrderDetail(createdOrder);
+  }
+
+  private async createOrderLegacyUnused(
     userId: string,
     createOrderDto: CreateOrderDto,
     idempotencyKey?: string,
@@ -2097,7 +2559,11 @@ export class OrdersService {
       await this.paymentTransactionsRepository.save(newTx);
     }
 
-    order.paymentStatus = paymentStatus;
+    order.paymentStatus = success
+      ? PaymentStatus.PAID
+      : order.paymentStatus === PaymentStatus.PAID
+        ? PaymentStatus.PAID
+        : PaymentStatus.UNPAID;
     await this.ordersRepository.save(order);
 
     await this.notificationsService.sendPaymentNotification(
@@ -2185,7 +2651,11 @@ export class OrdersService {
       await this.paymentTransactionsRepository.save(transaction);
     }
 
-    order.paymentStatus = paymentStatus;
+    order.paymentStatus = paymentCallbackDto.success
+      ? PaymentStatus.PAID
+      : order.paymentStatus === PaymentStatus.PAID
+        ? PaymentStatus.PAID
+        : PaymentStatus.UNPAID;
     await this.ordersRepository.save(order);
     await this.notificationsService.sendPaymentNotification(
       order.userId,
@@ -2217,8 +2687,8 @@ export class OrdersService {
       const cutoff = new Date(Date.now() - this.stalePaymentTtlMs);
       const stale = await this.ordersRepository.find({
         where: {
-          orderStatus: OrderStatus.PENDING,
-          paymentStatus: PaymentStatus.UNPAID,
+          orderStatus: In([OrderStatus.PENDING, OrderStatus.BACKORDERED]),
+          paymentStatus: In([PaymentStatus.UNPAID, PaymentStatus.FAILED]),
           paymentMethod: In([
             PaymentMethod.MOMO,
             PaymentMethod.VNPAY,
@@ -2254,19 +2724,44 @@ export class OrdersService {
 
           // Auto-cancel + restock (hoàn batch theo lịch sử consumption)
           await this.ordersRepository.manager.transaction(async (em) => {
+            const oldStatus = order.orderStatus;
             const items = await em.find(OrderItemEntity, {
               where: { orderId: order.orderId },
             });
             for (const item of items) {
+              const netRaw = await em
+                .createQueryBuilder(InventoryTransactionEntity, 'tx')
+                .select('COALESCE(SUM(tx.quantity_change), 0)', 'net')
+                .where('tx.related_order_id = :orderId', {
+                  orderId: order.orderId,
+                })
+                .andWhere('tx.product_id = :productId', {
+                  productId: item.productId,
+                })
+                .andWhere('tx.transaction_type IN (:...types)', {
+                  types: [
+                    InventoryTransactionType.EXPORT,
+                    InventoryTransactionType.RETURN_IN,
+                  ],
+                })
+                .getRawOne<{ net: string }>();
+              const restockQty = Math.min(
+                item.quantity,
+                Math.max(0, -Number(netRaw?.net ?? 0)),
+              );
+              if (restockQty <= 0) {
+                continue;
+              }
+
               const product = await em.findOne(ProductEntity, {
                 where: { productId: item.productId },
                 lock: { mode: 'pessimistic_write' },
               });
               if (product) {
-                product.quantityAvailable += item.quantity;
+                product.quantityAvailable += restockQty;
                 product.quantityReserved = Math.max(
                   0,
-                  (product.quantityReserved ?? 0) - item.quantity,
+                  (product.quantityReserved ?? 0) - restockQty,
                 );
                 await em.save(ProductEntity, product);
               }
@@ -2278,7 +2773,7 @@ export class OrdersService {
                 item.productId,
               );
               if (netMap.size > 0) {
-                let remaining = item.quantity;
+                let remaining = restockQty;
                 const sorted = Array.from(netMap.entries())
                   .filter(([_, n]) => n > 0)
                   .sort((a, b) => b[1] - a[1]);
@@ -2310,7 +2805,7 @@ export class OrdersService {
                     productId: item.productId,
                     performedBy: null,
                     transactionType: InventoryTransactionType.RETURN_IN,
-                    quantityChange: item.quantity,
+                    quantityChange: restockQty,
                     referenceType: 'ORDER',
                     referenceId: order.orderId,
                     note: 'Auto-cancel by reconciliation (unpaid > 30min, legacy)',
@@ -2326,7 +2821,7 @@ export class OrdersService {
               OrderStatusHistoryEntity,
               em.create(OrderStatusHistoryEntity, {
                 orderId: order.orderId,
-                oldStatus: OrderStatus.PENDING,
+                oldStatus,
                 newStatus: OrderStatus.CANCELLED,
                 changedBy: null,
                 note: 'Auto-cancelled by reconciliation cron (unpaid > 30 min)',

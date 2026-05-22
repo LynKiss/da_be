@@ -14,7 +14,7 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { ContactEntity } from '../contacts/entities/contact.entity';
 import { NotificationEntity } from '../notifications/entities/notification.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
-import { OrderEntity } from '../orders/entities/order.entity';
+import { OrderEntity, OrderStatus } from '../orders/entities/order.entity';
 import { PaymentTransactionEntity } from '../orders/entities/payment-transaction.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
@@ -674,7 +674,12 @@ export class UsersService {
     await this.ensureUserExists(userId);
 
     const where: Record<string, unknown> = { userId };
-    if (opts.status && opts.status !== 'all') where.status = opts.status;
+    if (opts.status && opts.status !== 'all') {
+      if (!Object.values(OrderStatus).includes(opts.status as OrderStatus)) {
+        throw new BadRequestException('Trạng thái đơn hàng không hợp lệ');
+      }
+      where.orderStatus = opts.status;
+    }
 
     const [orders, total] = await this.ordersRepository.findAndCount({
       where,
