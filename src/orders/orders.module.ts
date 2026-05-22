@@ -22,6 +22,7 @@ import { OrdersController } from './orders.controller';
 import { PaymentsController } from './payments.controller';
 import { ReturnsController } from './returns.controller';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
+import { DeliveryMethodAreaEntity } from './entities/delivery-method-area.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
 import { OrderTrackingEntity } from './entities/order-tracking.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
@@ -46,6 +47,7 @@ import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-cr
     ProductsModule,
     TypeOrmModule.forFeature([
       DeliveryMethodEntity,
+      DeliveryMethodAreaEntity,
       ShippingAddressEntity,
       OrderEntity,
       OrderTrackingEntity,

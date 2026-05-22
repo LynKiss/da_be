@@ -13,6 +13,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { PaymentMethod } from '../entities/order.entity';
+import { PickupContactDto } from './create-order.dto';
 
 export class GuestOrderItemDto {
   @IsString()
@@ -56,9 +57,15 @@ export class GuestShippingDto {
 }
 
 export class CreateGuestOrderDto {
+  @IsOptional()
   @ValidateNested()
   @Type(() => GuestShippingDto)
-  shipping: GuestShippingDto;
+  shipping?: GuestShippingDto;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PickupContactDto)
+  pickupContact?: PickupContactDto;
 
   @IsString()
   @MaxLength(20)

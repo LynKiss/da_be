@@ -39,6 +39,21 @@ export class DeliveryMethodEntity {
   })
   minOrderAmount: string;
 
+  @Column({
+    name: 'free_shipping_threshold',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    nullable: true,
+  })
+  freeShippingThreshold: string | null;
+
+  @Column({ name: 'eta_min_days', type: 'int', nullable: true })
+  etaMinDays: number | null;
+
+  @Column({ name: 'eta_max_days', type: 'int', nullable: true })
+  etaMaxDays: number | null;
+
   @Column({ name: 'region', type: 'varchar', length: 150, nullable: true })
   region: string | null;
 

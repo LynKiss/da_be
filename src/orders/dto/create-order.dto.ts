@@ -1,10 +1,29 @@
-import { IsBoolean, IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsBoolean,
+  IsEnum,
+  IsOptional,
+  IsString,
+  MaxLength,
+  ValidateNested,
+} from 'class-validator';
 import { PaymentMethod } from '../entities/order.entity';
 
-export class CreateOrderDto {
+export class PickupContactDto {
+  @IsString()
+  @MaxLength(150)
+  recipientName: string;
+
   @IsString()
   @MaxLength(20)
-  shippingAddressId: string;
+  phone: string;
+}
+
+export class CreateOrderDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  shippingAddressId?: string;
 
   @IsString()
   @MaxLength(20)
@@ -27,6 +46,11 @@ export class CreateOrderDto {
   @IsString()
   @MaxLength(128)
   cartHash?: string;
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PickupContactDto)
+  pickupContact?: PickupContactDto;
 
   /**
    * Cho phép đặt hàng khi hết kho — đơn sẽ ở trạng thái BACKORDERED,

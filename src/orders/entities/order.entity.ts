@@ -121,6 +121,46 @@ export class OrderEntity {
   deliveryCost: string;
 
   @Column({
+    name: 'fulfillment_type',
+    type: 'varchar',
+    length: 20,
+    default: 'delivery',
+  })
+  fulfillmentType: 'delivery' | 'pickup';
+
+  @Column({
+    name: 'delivery_method_name_snapshot',
+    type: 'varchar',
+    length: 150,
+    nullable: true,
+  })
+  deliveryMethodNameSnapshot: string | null;
+
+  @Column({
+    name: 'free_shipping_applied',
+    type: 'tinyint',
+    width: 1,
+    default: () => '0',
+  })
+  freeShippingApplied: boolean;
+
+  @Column({
+    name: 'pickup_contact_name',
+    type: 'varchar',
+    length: 150,
+    nullable: true,
+  })
+  pickupContactName: string | null;
+
+  @Column({
+    name: 'pickup_contact_phone',
+    type: 'varchar',
+    length: 20,
+    nullable: true,
+  })
+  pickupContactPhone: string | null;
+
+  @Column({
     name: 'total_payment',
     type: 'decimal',
     precision: 15,

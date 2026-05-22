@@ -46,6 +46,7 @@ import { UpdateOrderTrackingModeDto } from './dto/update-order-tracking-mode.dto
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
+import { DeliveryMethodAreaEntity } from './entities/delivery-method-area.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
 import {
   OrderTrackingEntity,
@@ -70,6 +71,7 @@ import {
 import { ShippingAddressEntity } from './entities/shipping-address.entity';
 import { MembershipService } from '../membership/membership.service';
 import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-credit-limit.entity';
+import { quoteDeliveryMethod } from './delivery-method.util';
 
 @Injectable()
 export class OrdersService {
@@ -80,6 +82,8 @@ export class OrdersService {
   constructor(
     @InjectRepository(DeliveryMethodEntity)
     private readonly deliveryMethodsRepository: Repository<DeliveryMethodEntity>,
+    @InjectRepository(DeliveryMethodAreaEntity)
+    private readonly deliveryMethodAreasRepository: Repository<DeliveryMethodAreaEntity>,
     @InjectRepository(ShippingAddressEntity)
     private readonly shippingAddressesRepository: Repository<ShippingAddressEntity>,
     @InjectRepository(OrderEntity)
@@ -393,12 +397,52 @@ export class OrdersService {
     deliveryMethod: DeliveryMethodEntity,
     subtotalAmount: number,
   ) {
-    const minOrderAmount = Number(deliveryMethod.minOrderAmount);
-    if (subtotalAmount >= minOrderAmount) {
+    if (deliveryMethod.isPickup) {
+      return 0;
+    }
+
+    const freeShippingThreshold = Number(
+      deliveryMethod.freeShippingThreshold ?? 0,
+    );
+    if (freeShippingThreshold > 0 && subtotalAmount >= freeShippingThreshold) {
       return 0;
     }
 
     return Number(deliveryMethod.basePrice);
+  }
+
+  private async quoteMethodForOrder(
+    deliveryMethod: DeliveryMethodEntity,
+    subtotalAmount: number,
+    location?: { province?: string | null; district?: string | null },
+  ) {
+    const areas = await this.deliveryMethodAreasRepository.find({
+      where: { deliveryId: deliveryMethod.deliveryId },
+    });
+    return quoteDeliveryMethod(deliveryMethod, areas, subtotalAmount, location);
+  }
+
+  private async assertDeliveryMethodEligible(
+    deliveryMethod: DeliveryMethodEntity,
+    subtotalAmount: number,
+    location?: { province?: string | null; district?: string | null },
+  ) {
+    const quote = await this.quoteMethodForOrder(
+      deliveryMethod,
+      subtotalAmount,
+      location,
+    );
+    if (!quote.minimumOrderMet) {
+      throw new BadRequestException(
+        `Đơn hàng chưa đạt giá trị tối thiểu để chọn ${deliveryMethod.name}`,
+      );
+    }
+    if (!quote.areaMatched) {
+      throw new BadRequestException(
+        `${deliveryMethod.name} không áp dụng cho khu vực nhận hàng này`,
+      );
+    }
+    return quote;
   }
 
   private calculateDiscountAmount(
@@ -615,6 +659,11 @@ export class OrdersService {
       subtotalAmount: order.subtotalAmount,
       discountAmount: order.discountAmount,
       deliveryCost: order.deliveryCost,
+      fulfillmentType: order.fulfillmentType,
+      deliveryMethodName: order.deliveryMethodNameSnapshot,
+      freeShippingApplied: order.freeShippingApplied,
+      pickupContactName: order.pickupContactName,
+      pickupContactPhone: order.pickupContactPhone,
       totalPayment: order.totalPayment,
       totalQuantity: order.totalQuantity,
       note: order.note,
@@ -661,6 +710,8 @@ export class OrdersService {
       status: order.orderStatus,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
+      fulfillmentType: order.fulfillmentType,
+      deliveryMethodName: order.deliveryMethodNameSnapshot,
       totalPayment: order.totalPayment,
       totalQuantity: order.totalQuantity,
       fullName: order.fullName,
@@ -881,6 +932,14 @@ export class OrdersService {
     if (!deliveryMethod || !deliveryMethod.isActive) {
       throw new NotFoundException('Phương thức giao hàng không khả dụng');
     }
+    if (deliveryMethod.isPickup && !dto.pickupContact) {
+      throw new BadRequestException(
+        'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
+      );
+    }
+    if (!deliveryMethod.isPickup && !dto.shipping) {
+      throw new BadRequestException('Giao hàng cần địa chỉ nhận hàng');
+    }
 
     const productIds = [...new Set(dto.items.map((it) => it.productId))];
     const products = await this.productsRepository.findBy(
@@ -915,18 +974,34 @@ export class OrdersService {
       totalQuantity += item.quantity;
     }
 
-    const deliveryCost = this.calculateDeliveryCost(deliveryMethod, subtotalAmount);
+    const deliveryQuote = await this.assertDeliveryMethodEligible(
+      deliveryMethod,
+      subtotalAmount,
+      {
+        province: dto.shipping?.province,
+        district: dto.shipping?.district,
+      },
+    );
+    const deliveryCost = deliveryQuote.shippingFee;
     const totalPayment = subtotalAmount + deliveryCost;
     const orderId = randomUUID();
     const guestUserId = randomUUID();
-    const addressSnapshot = [
-      dto.shipping.addressLine,
-      dto.shipping.ward,
-      dto.shipping.district,
-      dto.shipping.province,
-    ]
-      .filter(Boolean)
-      .join(', ');
+    const addressSnapshot = deliveryMethod.isPickup
+      ? `Nhận tại cửa hàng - ${deliveryMethod.name}`
+      : [
+          dto.shipping?.addressLine,
+          dto.shipping?.ward,
+          dto.shipping?.district,
+          dto.shipping?.province,
+        ]
+          .filter(Boolean)
+          .join(', ');
+    const recipientName = deliveryMethod.isPickup
+      ? dto.pickupContact!.recipientName
+      : dto.shipping!.recipientName;
+    const recipientPhone = deliveryMethod.isPickup
+      ? dto.pickupContact!.phone
+      : dto.shipping!.phone;
 
     await withDeadlockRetry(() =>
       this.ordersRepository.manager.transaction(async (entityManager) => {
@@ -955,13 +1030,22 @@ export class OrdersService {
           subtotalAmount: subtotalAmount.toFixed(2),
           discountAmount: '0.00',
           deliveryCost: deliveryCost.toFixed(2),
+          fulfillmentType: deliveryQuote.type,
+          deliveryMethodNameSnapshot: deliveryMethod.name,
+          freeShippingApplied: deliveryQuote.freeShippingApplied,
+          pickupContactName: deliveryMethod.isPickup
+            ? dto.pickupContact!.recipientName
+            : null,
+          pickupContactPhone: deliveryMethod.isPickup
+            ? dto.pickupContact!.phone
+            : null,
           totalPayment: totalPayment.toFixed(2),
           totalQuantity,
           note:
             (dto.note ? `${dto.note}\n` : '') +
-            `[GUEST] ${dto.shipping.email ?? ''}`.trim(),
-          fullName: dto.shipping.recipientName,
-          phone: dto.shipping.phone,
+            `[GUEST] ${dto.shipping?.email ?? ''}`.trim(),
+          fullName: recipientName,
+          phone: recipientPhone,
           address: addressSnapshot,
           idempotencyKey: idempotencyKey ?? null,
         });
@@ -1096,14 +1180,10 @@ export class OrdersService {
       throw new BadRequestException('Cart is empty');
     }
 
-    const [cartItems, shippingAddress, deliveryMethod] = await Promise.all([
+    const [cartItems, deliveryMethod] = await Promise.all([
       this.cartItemsRepository.find({
         where: { cartId: cart.cartId },
         order: { createdAt: 'ASC', cartItemId: 'ASC' },
-      }),
-      this.shippingAddressesRepository.findOneBy({
-        shippingAddressId: createOrderDto.shippingAddressId,
-        userId,
       }),
       this.deliveryMethodsRepository.findOneBy({
         deliveryId: createOrderDto.deliveryId,
@@ -1114,12 +1194,26 @@ export class OrdersService {
       throw new BadRequestException('Cart is empty');
     }
 
-    if (!shippingAddress) {
-      throw new NotFoundException('Shipping address not found');
-    }
-
     if (!deliveryMethod || !deliveryMethod.isActive) {
       throw new NotFoundException('Delivery method not found');
+    }
+    if (deliveryMethod.isPickup && !createOrderDto.pickupContact) {
+      throw new BadRequestException(
+        'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
+      );
+    }
+    if (!deliveryMethod.isPickup && !createOrderDto.shippingAddressId) {
+      throw new BadRequestException('Giao hàng cần địa chỉ nhận hàng');
+    }
+
+    const shippingAddress = deliveryMethod.isPickup
+      ? null
+      : await this.shippingAddressesRepository.findOneBy({
+          shippingAddressId: createOrderDto.shippingAddressId,
+          userId,
+        });
+    if (!deliveryMethod.isPickup && !shippingAddress) {
+      throw new NotFoundException('Shipping address not found');
     }
 
     if (createOrderDto.paymentMethod === PaymentMethod.CREDIT && !currentUser.isWholesale) {
@@ -1129,7 +1223,9 @@ export class OrdersService {
     }
 
     const productIds = [...new Set(cartItems.map((item) => item.productId))];
-    const addressSnapshot = this.buildAddressSnapshot(shippingAddress);
+    const addressSnapshot = shippingAddress
+      ? this.buildAddressSnapshot(shippingAddress)
+      : `Nhận tại cửa hàng - ${deliveryMethod.name}`;
     const orderId = randomUUID();
     let createdOrderId: string = orderId;
     let createdOrderWasNew = false;
@@ -1258,10 +1354,15 @@ export class OrdersService {
               discountContext.eligibleSubtotal,
             )
           : 0;
-        const deliveryCost = this.calculateDeliveryCost(
+        const deliveryQuote = await this.assertDeliveryMethodEligible(
           deliveryMethod,
           subtotalAmount,
+          {
+            province: shippingAddress?.province,
+            district: shippingAddress?.district,
+          },
         );
+        const deliveryCost = deliveryQuote.shippingFee;
         const totalPayment = subtotalAmount - discountAmount + deliveryCost;
 
         let creditLimit: CustomerCreditLimitEntity | null = null;
@@ -1288,7 +1389,7 @@ export class OrdersService {
         const order = transactionalOrdersRepository.create({
           orderId,
           userId,
-          shippingAddressId: shippingAddress.shippingAddressId,
+          shippingAddressId: shippingAddress?.shippingAddressId ?? null,
           deliveryId: deliveryMethod.deliveryId,
           discountId: discount?.discountId ?? null,
           orderStatus: isBackorder
@@ -1299,11 +1400,24 @@ export class OrdersService {
           subtotalAmount: subtotalAmount.toFixed(2),
           discountAmount: discountAmount.toFixed(2),
           deliveryCost: deliveryCost.toFixed(2),
+          fulfillmentType: deliveryQuote.type,
+          deliveryMethodNameSnapshot: deliveryMethod.name,
+          freeShippingApplied: deliveryQuote.freeShippingApplied,
+          pickupContactName: deliveryMethod.isPickup
+            ? createOrderDto.pickupContact!.recipientName
+            : null,
+          pickupContactPhone: deliveryMethod.isPickup
+            ? createOrderDto.pickupContact!.phone
+            : null,
           totalPayment: totalPayment.toFixed(2),
           totalQuantity,
           note: createOrderDto.note ?? null,
-          fullName: shippingAddress.recipientName,
-          phone: shippingAddress.phone,
+          fullName: shippingAddress
+            ? shippingAddress.recipientName
+            : createOrderDto.pickupContact!.recipientName,
+          phone: shippingAddress
+            ? shippingAddress.phone
+            : createOrderDto.pickupContact!.phone,
           address: addressSnapshot,
           idempotencyKey: idempotencyKey ?? null,
         });
