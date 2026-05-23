@@ -71,6 +71,17 @@ export class ReportsService {
     OrderStatus.PARTIAL_DELIVERED,
     OrderStatus.PARTIAL_RETURNED,
   ];
+  private readonly revenuePolicy =
+    'financial_v1_completed_fulfillment_less_completed_refunds';
+
+  private fulfilledLineRevenueSql(orderAlias: string, itemAlias: string) {
+    return `COALESCE(NULLIF(${itemAlias}.net_line_total, 0), ${itemAlias}.line_total)
+      * CASE
+          WHEN ${orderAlias}.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND ${itemAlias}.quantity > 0
+            THEN ${itemAlias}.quantity_delivered / ${itemAlias}.quantity
+          ELSE 1
+        END`;
+  }
 
   private joinCompletedRefunds(
     qb: any,
@@ -88,6 +99,26 @@ export class ReportsService {
           .groupBy('refund.order_id'),
       'completed_refunds',
       `completed_refunds.orderId = ${orderAlias}.order_id`,
+    );
+  }
+
+  private joinCompletedLineRefunds(
+    qb: any,
+    itemAlias: string,
+  ) {
+    return qb.leftJoin(
+      (refundQb) =>
+        refundQb
+          .select('ret.order_item_id', 'orderItemId')
+          .addSelect('SUM(refund.amount)', 'completedRefund')
+          .from(OrderRefundEntity, 'refund')
+          .innerJoin(ReturnEntity, 'ret', 'ret.return_id = refund.return_id')
+          .where('refund.refund_status = :completedRefundStatus', {
+            completedRefundStatus: OrderRefundStatus.COMPLETED,
+          })
+          .groupBy('ret.order_item_id'),
+      'completed_line_refunds',
+      `completed_line_refunds.orderItemId = ${itemAlias}.order_item_id`,
     );
   }
 
@@ -260,19 +291,30 @@ export class ReportsService {
       this.riceDiagnosisHistoryRepository.count(),
     ]);
 
-    const topProducts = await this.orderItemsRepository
+    const topProductsQb = this.joinCompletedLineRefunds(
+      this.orderItemsRepository
       .createQueryBuilder('item')
-      .innerJoin(OrderEntity, 'order', 'order.order_id = item.order_id')
+        .innerJoin(OrderEntity, 'order', 'order.order_id = item.order_id'),
+      'item',
+    );
+    const topProducts = await topProductsQb
       .select('item.product_id', 'productId')
       .addSelect('item.product_name', 'productName')
-      .addSelect('SUM(item.quantity)', 'soldQuantity')
-      .addSelect('SUM(item.line_total)', 'revenue')
+      .addSelect(`SUM(CASE
+        WHEN order.order_status = '${OrderStatus.PARTIAL_DELIVERED}'
+          THEN item.quantity_delivered
+        ELSE item.quantity
+      END)`, 'soldQuantity')
+      .addSelect(
+        `SUM(GREATEST(0, ${this.fulfilledLineRevenueSql('order', 'item')} - COALESCE(completed_line_refunds.completedRefund, 0)))`,
+        'revenue',
+      )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
       .groupBy('item.product_id')
       .addGroupBy('item.product_name')
-      .orderBy('SUM(item.quantity)', 'DESC')
+      .orderBy('soldQuantity', 'DESC')
       .limit(10)
       .getRawMany();
 
@@ -283,11 +325,17 @@ export class ReportsService {
       .groupBy('transaction.transaction_type')
       .getRawMany();
 
-    const salesByDay = await this.ordersRepository
+    const salesByDay = await this.joinCompletedRefunds(
+      this.ordersRepository
       .createQueryBuilder('order')
-      .select('DATE(order.created_at)', 'date')
-      .addSelect('COUNT(*)', 'orders')
-      .addSelect('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .select('DATE(order.created_at)', 'date')
+        .addSelect('COUNT(*)', 'orders')
+        .addSelect(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        ),
+      'order',
+    )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
@@ -296,11 +344,17 @@ export class ReportsService {
       .orderBy('DATE(order.created_at)', 'ASC')
       .getRawMany();
 
-    const salesByMonth = await this.ordersRepository
+    const salesByMonth = await this.joinCompletedRefunds(
+      this.ordersRepository
       .createQueryBuilder('order')
-      .select("DATE_FORMAT(order.created_at, '%Y-%m')", 'period')
-      .addSelect('COUNT(*)', 'orders')
-      .addSelect('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .select("DATE_FORMAT(order.created_at, '%Y-%m')", 'period')
+        .addSelect('COUNT(*)', 'orders')
+        .addSelect(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        ),
+      'order',
+    )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
@@ -309,11 +363,17 @@ export class ReportsService {
       .orderBy('period', 'ASC')
       .getRawMany();
 
-    const salesByHour = await this.ordersRepository
+    const salesByHour = await this.joinCompletedRefunds(
+      this.ordersRepository
       .createQueryBuilder('order')
-      .select('HOUR(order.created_at)', 'hour')
-      .addSelect('COUNT(*)', 'orders')
-      .addSelect('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .select('HOUR(order.created_at)', 'hour')
+        .addSelect('COUNT(*)', 'orders')
+        .addSelect(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        ),
+      'order',
+    )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
@@ -349,21 +409,32 @@ export class ReportsService {
       .orderBy('COUNT(*)', 'DESC')
       .getRawMany();
 
-    const categoryRevenue = await this.orderItemsRepository
+    const categoryRevenueQb = this.joinCompletedLineRefunds(
+      this.orderItemsRepository
       .createQueryBuilder('item')
       .innerJoin(OrderEntity, 'order', 'order.order_id = item.order_id')
       .innerJoin(ProductEntity, 'product', 'product.product_id = item.product_id')
-      .leftJoin(CategoryEntity, 'category', 'category.category_id = product.category_id')
+        .leftJoin(CategoryEntity, 'category', 'category.category_id = product.category_id'),
+      'item',
+    );
+    const categoryRevenue = await categoryRevenueQb
       .select("COALESCE(category.category_name, 'Chua phan loai')", 'categoryName')
       .addSelect('COUNT(DISTINCT order.order_id)', 'orders')
-      .addSelect('SUM(item.quantity)', 'soldQuantity')
-      .addSelect('COALESCE(SUM(item.line_total), 0)', 'revenue')
+      .addSelect(`SUM(CASE
+        WHEN order.order_status = '${OrderStatus.PARTIAL_DELIVERED}'
+          THEN item.quantity_delivered
+        ELSE item.quantity
+      END)`, 'soldQuantity')
+      .addSelect(
+        `COALESCE(SUM(GREATEST(0, ${this.fulfilledLineRevenueSql('order', 'item')} - COALESCE(completed_line_refunds.completedRefund, 0))), 0)`,
+        'revenue',
+      )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
       .groupBy('category.category_id')
       .addGroupBy('category.category_name')
-      .orderBy('SUM(item.line_total)', 'DESC')
+      .orderBy('revenue', 'DESC')
       .limit(8)
       .getRawMany();
 
@@ -586,27 +657,14 @@ export class ReportsService {
 
     // Trừ refund (PARTIAL_REFUNDED + REFUNDED) khỏi doanh thu thực tế.
     // SUM(refunds.refund_amount WHERE return_status = REFUNDED) — chỉ tính các return ĐÃ hoàn tiền.
-    const refundAggregate = async (from?: Date, to?: Date) => {
-      const qb = this.returnsRepository
-        .createQueryBuilder('r')
-        .select('COALESCE(SUM(r.refund_amount), 0)', 'total')
-        .where('r.return_status = :st', { st: 'refunded' });
-      if (from) qb.andWhere('r.updated_at >= :from', { from });
-      if (to) qb.andWhere('r.updated_at < :to', { to });
-      const row = await qb.getRawOne<{ total: string }>();
-      return Number(row?.total ?? 0);
-    };
-    const [grossRevenue, grossToday, grossYesterday, refundAll, refundToday, refundYesterday] = await Promise.all([
+    const [grossRevenue, grossToday, grossYesterday] = await Promise.all([
       Promise.resolve(Number(revenueRow?.revenue ?? 0)),
       Promise.resolve(Number(todayRevenueRow?.revenue ?? 0)),
       Promise.resolve(Number(yesterdayRevenueRow?.revenue ?? 0)),
-      refundAggregate(),
-      refundAggregate(todayStart, now),
-      refundAggregate(yesterdayStart, todayStart),
     ]);
-    const totalRevenue = Math.max(0, grossRevenue - refundAll);
-    const todayRevenue = Math.max(0, grossToday - refundToday);
-    const yesterdayRevenue = Math.max(0, grossYesterday - refundYesterday);
+    const totalRevenue = Math.max(0, grossRevenue);
+    const todayRevenue = Math.max(0, grossToday);
+    const yesterdayRevenue = Math.max(0, grossYesterday);
 
     return {
       refreshedAt: now.toISOString(),
@@ -626,6 +684,7 @@ export class ReportsService {
         deliveredOrders,
         paidOrders,
         revenue: totalRevenue.toFixed(2),
+        revenuePolicy: this.revenuePolicy,
         todayOrders,
         todayRevenue: todayRevenue.toFixed(2),
         yesterdayRevenue: yesterdayRevenue.toFixed(2),
@@ -1048,9 +1107,12 @@ export class ReportsService {
 
     const completedStatuses = this.financialRevenueStatuses;
 
-    const qb = this.orderItemsRepository
+    const qb = this.joinCompletedLineRefunds(
+      this.orderItemsRepository
       .createQueryBuilder('item')
-      .innerJoin(OrderEntity, 'o', 'o.order_id = item.order_id')
+        .innerJoin(OrderEntity, 'o', 'o.order_id = item.order_id'),
+      'item',
+    )
       .where('o.order_status IN (:...statuses)', { statuses: completedStatuses });
 
     if (query.from) qb.andWhere('o.created_at >= :from', { from: query.from });
@@ -1070,14 +1132,7 @@ export class ReportsService {
           'soldQty',
         )
         .addSelect(
-          `SUM(
-            COALESCE(NULLIF(item.net_line_total, 0), item.line_total)
-            * CASE
-                WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND item.quantity > 0
-                  THEN item.quantity_delivered / item.quantity
-                ELSE 1
-              END
-          )`,
+          `SUM(GREATEST(0, ${this.fulfilledLineRevenueSql('o', 'item')} - COALESCE(completed_line_refunds.completedRefund, 0)))`,
           'revenue',
         )
         .groupBy('item.product_id')
@@ -1085,12 +1140,12 @@ export class ReportsService {
         .orderBy('revenue', 'DESC');
 
       const total = await qb.getCount();
-      const rows = await qb.offset((page - 1) * limit).limit(limit).getRawMany<{
+      const rows = (await qb.offset((page - 1) * limit).limit(limit).getRawMany()) as Array<{
         productId: string;
         productName: string;
         soldQty: string;
         revenue: string;
-      }>();
+      }>;
 
       const productIds = rows.map((r) => r.productId);
       const products = productIds.length
@@ -1188,7 +1243,16 @@ export class ReportsService {
         };
       });
 
-      return { items, meta: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+      return {
+        items,
+        meta: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          revenuePolicy: this.revenuePolicy,
+        },
+      };
     }
 
     // Nhóm theo ngày hoặc tháng
@@ -1196,14 +1260,7 @@ export class ReportsService {
     qb
       .select(`DATE_FORMAT(o.created_at, '${dateFormat}')`, 'period')
       .addSelect(
-        `SUM(
-          COALESCE(NULLIF(item.net_line_total, 0), item.line_total)
-          * CASE
-              WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND item.quantity > 0
-                THEN item.quantity_delivered / item.quantity
-              ELSE 1
-            END
-        )`,
+        `SUM(GREATEST(0, ${this.fulfilledLineRevenueSql('o', 'item')} - COALESCE(completed_line_refunds.completedRefund, 0)))`,
         'revenue',
       )
       .addSelect(
@@ -1217,8 +1274,19 @@ export class ReportsService {
       .groupBy('period')
       .orderBy('period', 'ASC');
 
-    const rows = await qb.getRawMany<{ period: string; revenue: string; soldQty: string }>();
-    return { items: rows.map((r) => ({ ...r, revenue: Number(r.revenue), soldQty: Number(r.soldQty) })) };
+    const rows = (await qb.getRawMany()) as Array<{
+      period: string;
+      revenue: string;
+      soldQty: string;
+    }>;
+    return {
+      items: rows.map((r) => ({
+        ...r,
+        revenue: Number(r.revenue),
+        soldQty: Number(r.soldQty),
+      })),
+      meta: { revenuePolicy: this.revenuePolicy },
+    };
   }
 
   // ─── Báo Cáo Tuổi Nợ NCC ──────────────────────────────────────────────────

@@ -366,6 +366,62 @@ export class OrdersService {
     ].includes(method);
   }
 
+  private isTerminalOrderStatus(status: OrderStatus) {
+    return [OrderStatus.CANCELLED, OrderStatus.RETURNED].includes(status);
+  }
+
+  private assertOrderCanAcceptPayment(order: OrderEntity) {
+    if (this.isTerminalOrderStatus(order.orderStatus)) {
+      throw new BadRequestException({
+        message:
+          'Order is already closed and cannot accept a payment confirmation.',
+        error: 'PAYMENT_FOR_CLOSED_ORDER_REQUIRES_RECONCILIATION',
+      });
+    }
+  }
+
+  private async createLatePaymentRefundIfNeeded(params: {
+    order: OrderEntity;
+    amount: number;
+    provider: PaymentMethod;
+    transactionRef: string;
+    note?: string;
+  }) {
+    const { order, amount, provider, transactionRef, note } = params;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return null;
+    }
+
+    const existingOpenRefund = await this.orderRefundsRepository.findOne({
+      where: {
+        orderId: order.orderId,
+        reason: OrderRefundReason.MANUAL_ADJUSTMENT,
+        refundStatus: In([
+          OrderRefundStatus.PENDING,
+          OrderRefundStatus.APPROVED,
+        ]),
+      },
+    });
+    if (existingOpenRefund) {
+      return existingOpenRefund;
+    }
+
+    const refund = this.orderRefundsRepository.create({
+      orderId: order.orderId,
+      returnId: null,
+      reason: OrderRefundReason.MANUAL_ADJUSTMENT,
+      amount: this.toMoney(amount),
+      refundStatus: OrderRefundStatus.PENDING,
+      paymentProvider: provider,
+      manualReference: transactionRef,
+      createdBy: null,
+      note:
+        note ??
+        `Late payment arrived after order was closed. Provider ref: ${transactionRef}`,
+    });
+    return this.orderRefundsRepository.save(refund);
+  }
+
   private async ensurePaymentMethodEnabled(method: PaymentMethod) {
     if (method === PaymentMethod.PAYPAL) {
       throw new BadRequestException('Payment method is not supported');
@@ -573,6 +629,18 @@ export class OrdersService {
     return Math.round(
       (this.getOrderItemNetAmount(item) * quantity * 100) / item.quantity,
     ) / 100;
+  }
+
+  private getReturnableQuantityBase(order: OrderEntity, item: OrderItemEntity) {
+    if (
+      [OrderStatus.PARTIAL_DELIVERED, OrderStatus.PARTIAL_RETURNED].includes(
+        order.orderStatus,
+      )
+    ) {
+      return Math.max(0, Number(item.quantityDelivered ?? 0));
+    }
+
+    return Math.max(0, Number(item.quantity ?? 0));
   }
 
   private async getReservedReturnQuantity(
@@ -2326,47 +2394,17 @@ export class OrdersService {
       const transactionalHistoryRepository = entityManager.getRepository(
         OrderStatusHistoryEntity,
       );
-      const transactionalInventoryTransactionsRepository =
-        entityManager.getRepository(InventoryTransactionEntity);
       const transactionalDiscountsRepository =
         entityManager.getRepository(DiscountEntity);
       const transactionalCouponUsageRepository =
         entityManager.getRepository(CouponUsageEntity);
 
-      const items = await transactionalOrderItemsRepository.find({
-        where: { orderId: order.orderId },
-      });
       await this.restockOrderItems(
         order.orderId,
         transactionalProductsRepository,
         transactionalOrderItemsRepository,
         entityManager,
       );
-
-      for (const item of items) {
-        const product = await transactionalProductsRepository.findOneBy({
-          productId: item.productId,
-        });
-        const inventoryTransaction =
-          transactionalInventoryTransactionsRepository.create({
-            productId: item.productId,
-            performedBy: userId,
-            transactionType: InventoryTransactionType.RETURN_IN,
-            quantityChange: item.quantity,
-            quantityBefore: product
-              ? product.quantityAvailable - item.quantity
-              : null,
-            quantityAfter: product ? product.quantityAvailable : null,
-            referenceType: 'ORDER',
-            referenceId: order.orderId,
-            unitCostAtTime: product?.avgCost ?? null,
-            note: 'Restock by order cancellation',
-            relatedOrderId: order.orderId,
-          });
-        await transactionalInventoryTransactionsRepository.save(
-          inventoryTransaction,
-        );
-      }
 
       await this.revertDiscountUsage(
         order,
@@ -2586,10 +2624,6 @@ export class OrdersService {
           return;
         }
 
-        const items = await transactionalOrderItemsRepository.find({
-          where: { orderId: order.orderId },
-        });
-
         // RETURNED: KHÔNG tự restock, chỉ giải phóng reserved (nếu chưa giao)
         // → Hàng phải qua inspection trước. Stock chỉ được restock khi
         //   admin inspect = USABLE.
@@ -2601,30 +2635,6 @@ export class OrdersService {
             transactionalOrderItemsRepository,
             entityManager,
           );
-          for (const item of items) {
-            const product = await transactionalProductsRepository.findOneBy({
-              productId: item.productId,
-            });
-            const inventoryTransaction =
-              transactionalInventoryTransactionsRepository.create({
-                productId: item.productId,
-                performedBy: currentUser._id,
-                transactionType: InventoryTransactionType.RETURN_IN,
-                quantityChange: item.quantity,
-                quantityBefore: product
-                  ? product.quantityAvailable - item.quantity
-                  : null,
-                quantityAfter: product ? product.quantityAvailable : null,
-                referenceType: 'ORDER',
-                referenceId: order.orderId,
-                unitCostAtTime: product?.avgCost ?? null,
-                note: 'Restock by admin cancellation',
-                relatedOrderId: order.orderId,
-              });
-            await transactionalInventoryTransactionsRepository.save(
-              inventoryTransaction,
-            );
-          }
           await this.revertDiscountUsage(
             order,
             transactionalDiscountsRepository,
@@ -2929,6 +2939,7 @@ export class OrdersService {
     const resultCodeValue = Number(resultCode);
     const success = resultCodeValue === 0;
     const paymentStatus = success ? PaymentStatus.PAID : PaymentStatus.FAILED;
+    const reportedAmount = Number(amount ?? order.totalPayment);
 
     // Update existing transaction status if found, or create a new one
     if (transaction) {
@@ -2958,6 +2969,27 @@ export class OrdersService {
       await this.paymentTransactionsRepository.save(newTx);
     }
 
+    if (success && this.isTerminalOrderStatus(order.orderStatus)) {
+      await this.createLatePaymentRefundIfNeeded({
+        order,
+        amount: reportedAmount,
+        provider: PaymentMethod.MOMO,
+        transactionRef: txRef,
+        note: `MoMo payment arrived after order was ${order.orderStatus}; queued for manual refund.`,
+      });
+      await this.notificationsService.sendPaymentNotification(
+        order.userId,
+        internalOrderId,
+        PaymentStatus.PARTIAL_REFUNDED,
+        PaymentMethod.MOMO,
+      );
+      return {
+        message: 'late payment queued for manual refund',
+        transId,
+        refundStatus: OrderRefundStatus.PENDING,
+      };
+    }
+
     order.paymentStatus = success
       ? PaymentStatus.PAID
       : order.paymentStatus === PaymentStatus.PAID
@@ -2979,6 +3011,15 @@ export class OrdersService {
     provider: string,
     paymentCallbackDto: PaymentCallbackDto,
   ) {
+    if (
+      process.env.NODE_ENV === 'production' &&
+      process.env.ENABLE_UNVERIFIED_PAYMENT_CALLBACKS !== 'true'
+    ) {
+      throw new UnauthorizedException(
+        'Unsigned payment callback is disabled in production',
+      );
+    }
+
     const normalizedProvider = provider.toLowerCase() as PaymentMethod;
     const order = await this.findAnyOrder(paymentCallbackDto.orderId);
 
@@ -3022,6 +3063,7 @@ export class OrdersService {
     const paymentStatus = paymentCallbackDto.success
       ? PaymentStatus.PAID
       : PaymentStatus.FAILED;
+    const reportedAmount = Number(paymentCallbackDto.amount);
 
     if (existingTx) {
       existingTx.transactionStatus = paymentCallbackDto.success
@@ -3048,6 +3090,30 @@ export class OrdersService {
         rawPayload: paymentCallbackDto.rawPayload ?? null,
       });
       await this.paymentTransactionsRepository.save(transaction);
+    }
+
+    if (paymentCallbackDto.success && this.isTerminalOrderStatus(order.orderStatus)) {
+      await this.createLatePaymentRefundIfNeeded({
+        order,
+        amount: reportedAmount,
+        provider: normalizedProvider,
+        transactionRef: paymentCallbackDto.transactionRef,
+        note: `Unsigned/dev callback arrived after order was ${order.orderStatus}; queued for manual refund.`,
+      });
+      await this.notificationsService.sendPaymentNotification(
+        order.userId,
+        order.orderId,
+        PaymentStatus.PARTIAL_REFUNDED,
+        normalizedProvider,
+      );
+      return {
+        orderId: order.orderId,
+        provider: normalizedProvider,
+        transactionRef: paymentCallbackDto.transactionRef,
+        paymentStatus: order.paymentStatus,
+        refundStatus: OrderRefundStatus.PENDING,
+        message: 'late payment queued for manual refund',
+      };
     }
 
     order.paymentStatus = paymentCallbackDto.success
@@ -3598,11 +3664,6 @@ export class OrdersService {
             entityManager.getRepository(ProductEntity);
           const orderItemsRepository =
             entityManager.getRepository(OrderItemEntity);
-          const inventoryTransactionsRepository =
-            entityManager.getRepository(InventoryTransactionEntity);
-          const items = await orderItemsRepository.find({
-            where: { orderId: order.orderId },
-          });
 
           await this.restockOrderItems(
             order.orderId,
@@ -3610,28 +3671,6 @@ export class OrdersService {
             orderItemsRepository,
             entityManager,
           );
-          for (const item of items) {
-            const product = await productsRepository.findOneBy({
-              productId: item.productId,
-            });
-            await inventoryTransactionsRepository.save(
-              inventoryTransactionsRepository.create({
-                productId: item.productId,
-                performedBy: currentUser._id,
-                transactionType: InventoryTransactionType.RETURN_IN,
-                quantityChange: item.quantity,
-                quantityBefore: product
-                  ? product.quantityAvailable - item.quantity
-                  : null,
-                quantityAfter: product ? product.quantityAvailable : null,
-                referenceType: 'ORDER',
-                referenceId: order.orderId,
-                unitCostAtTime: product?.avgCost ?? null,
-                note: 'Restock after paid cancellation refund',
-                relatedOrderId: order.orderId,
-              }),
-            );
-          }
           await this.revertDiscountUsage(
             order,
             entityManager.getRepository(DiscountEntity),
@@ -3732,8 +3771,12 @@ export class OrdersService {
     const alreadyReturnedQuantity = await this.getReservedReturnQuantity(
       orderItem.orderItemId,
     );
+    const returnableQuantityBase = this.getReturnableQuantityBase(
+      order,
+      orderItem,
+    );
     const remainingReturnableQuantity =
-      orderItem.quantity - alreadyReturnedQuantity;
+      returnableQuantityBase - alreadyReturnedQuantity;
     if (
       createReturnDto.returnQuantity <= 0 ||
       createReturnDto.returnQuantity > remainingReturnableQuantity
@@ -3923,7 +3966,8 @@ export class OrdersService {
       }
       const allRefunded = orderItems.every(
         (it) =>
-          (refundedQuantityByLine.get(it.orderItemId) ?? 0) >= it.quantity,
+          (refundedQuantityByLine.get(it.orderItemId) ?? 0) >=
+          this.getReturnableQuantityBase(order, it),
       );
 
       const existingRefund = await this.orderRefundsRepository.findOne({
@@ -4454,6 +4498,8 @@ export class OrdersService {
     await this.ensureUserExists(currentUser._id);
     const order = await this.findAnyOrder(orderId);
 
+    this.assertOrderCanAcceptPayment(order);
+
     if (order.paymentStatus === PaymentStatus.PAID) {
       throw new BadRequestException('Đơn hàng đã được thanh toán');
     }
@@ -4462,6 +4508,24 @@ export class OrdersService {
     }
     if (order.paymentMethod === PaymentMethod.CREDIT) {
       throw new BadRequestException('Đơn hàng mua nợ — công nợ được quản lý riêng qua hạn mức tín dụng');
+    }
+
+    const existingRefund = await this.orderRefundsRepository.findOne({
+      where: {
+        orderId: order.orderId,
+        refundStatus: In([
+          OrderRefundStatus.PENDING,
+          OrderRefundStatus.APPROVED,
+          OrderRefundStatus.COMPLETED,
+        ]),
+      },
+    });
+    if (existingRefund) {
+      throw new BadRequestException({
+        message:
+          'Order already has refund/reconciliation records. Payment confirmation must be handled manually.',
+        error: 'PAYMENT_CONFIRMATION_BLOCKED_BY_REFUND_LEDGER',
+      });
     }
 
     order.paymentStatus = PaymentStatus.PAID;

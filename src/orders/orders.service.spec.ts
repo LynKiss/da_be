@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { OrdersService } from './orders.service';
 import {
   OrderEntity,
@@ -68,6 +68,7 @@ describe('OrdersService', () => {
   let couponUsageRepository: MockRepository;
   let returnsRepository: MockRepository;
   let orderRefundsRepository: MockRepository;
+  let paymentTransactionsRepository: MockRepository;
   let notificationsService: {
     sendOrderCreatedNotification: jest.Mock;
     sendOrderStatusNotification: jest.Mock;
@@ -122,6 +123,7 @@ describe('OrdersService', () => {
     couponUsageRepository = createRepositoryMock();
     returnsRepository = createRepositoryMock();
     orderRefundsRepository = createRepositoryMock();
+    paymentTransactionsRepository = createRepositoryMock();
     notificationsService = {
       sendOrderCreatedNotification: jest.fn(),
       sendOrderStatusNotification: jest.fn(),
@@ -148,7 +150,7 @@ describe('OrdersService', () => {
       couponUsageRepository as never,
       returnsRepository as never,
       orderRefundsRepository as never,
-      createRepositoryMock() as never,
+      paymentTransactionsRepository as never,
       createRepositoryMock() as never,
       notificationsService as never,
       { emitNewOrder: jest.fn() } as never,
@@ -288,6 +290,62 @@ describe('OrdersService', () => {
     expect(ordersRepository.manager?.transaction).not.toHaveBeenCalled();
   });
 
+  it('limits returns on partial delivered orders to the delivered quantity', async () => {
+    const partialDeliveredOrder = {
+      orderId: 'order-partial-return-1',
+      userId: userEntity.userId,
+      orderStatus: OrderStatus.PARTIAL_DELIVERED,
+    } as OrderEntity;
+    const orderItem = {
+      orderItemId: 'item-partial-return-1',
+      orderId: partialDeliveredOrder.orderId,
+      quantity: 10,
+      quantityDelivered: 6,
+      lineTotal: '1000000.00',
+      grossLineTotal: '1000000.00',
+      discountAllocated: '0.00',
+      netLineTotal: '1000000.00',
+    } as never;
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(partialDeliveredOrder);
+    orderItemsRepository.findOneBy?.mockResolvedValue(orderItem);
+    returnsRepository.find?.mockResolvedValue([]);
+
+    await expect(
+      service.createReturn(userEntity.userId, {
+        orderId: partialDeliveredOrder.orderId,
+        orderItemId: 'item-partial-return-1',
+        returnQuantity: 7,
+        reason: 'partial_return',
+        description: 'Return more than delivered quantity',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(returnsRepository.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks manual payment confirmation for closed orders', async () => {
+    const closedOrder = {
+      orderId: 'order-closed-payment-1',
+      userId: 'user-2',
+      orderStatus: OrderStatus.CANCELLED,
+      paymentMethod: PaymentMethod.BANK_TRANSFER,
+      paymentStatus: PaymentStatus.FAILED,
+    } as OrderEntity;
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(closedOrder);
+
+    await expect(
+      service.confirmPayment(adminUser, closedOrder.orderId),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        error: 'PAYMENT_FOR_CLOSED_ORDER_REQUIRES_RECONCILIATION',
+      }),
+    });
+  });
+
   it('creates a pending manual refund before cancelling a paid order', async () => {
     const paidOrder = {
       orderId: 'order-refund-paid-1',
@@ -332,6 +390,75 @@ describe('OrdersService', () => {
       refundStatus: OrderRefundStatus.PENDING,
       amount: paidOrder.totalPayment,
     });
+  });
+
+  it('rejects unsigned generic payment callbacks in production', async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousFlag = process.env.ENABLE_UNVERIFIED_PAYMENT_CALLBACKS;
+    process.env.NODE_ENV = 'production';
+    delete process.env.ENABLE_UNVERIFIED_PAYMENT_CALLBACKS;
+
+    try {
+      await expect(
+        service.handlePaymentCallback('momo', {
+          orderId: 'order-any',
+          transactionRef: 'fake-ref',
+          amount: '100000',
+          success: true,
+        }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+      if (previousFlag === undefined) {
+        delete process.env.ENABLE_UNVERIFIED_PAYMENT_CALLBACKS;
+      } else {
+        process.env.ENABLE_UNVERIFIED_PAYMENT_CALLBACKS = previousFlag;
+      }
+    }
+  });
+
+  it('queues a manual refund instead of marking a closed order as paid on late callback', async () => {
+    const closedOrder = {
+      orderId: 'order-late-paid-1',
+      userId: 'user-2',
+      orderStatus: OrderStatus.CANCELLED,
+      paymentMethod: PaymentMethod.MOMO,
+      paymentStatus: PaymentStatus.FAILED,
+      totalPayment: '120000.00',
+    } as OrderEntity;
+    const refund = {
+      refundId: 'refund-late-1',
+      orderId: closedOrder.orderId,
+      reason: OrderRefundReason.MANUAL_ADJUSTMENT,
+      amount: closedOrder.totalPayment,
+      refundStatus: OrderRefundStatus.PENDING,
+    } as OrderRefundEntity;
+
+    ordersRepository.findOneBy?.mockResolvedValue(closedOrder);
+    paymentTransactionsRepository.findOne?.mockResolvedValue(null);
+    paymentTransactionsRepository.create?.mockImplementation((value) => value);
+    paymentTransactionsRepository.save?.mockImplementation((value) =>
+      Promise.resolve(value),
+    );
+    orderRefundsRepository.findOne?.mockResolvedValue(null);
+    orderRefundsRepository.create?.mockReturnValue(refund);
+    orderRefundsRepository.save?.mockResolvedValue(refund);
+
+    await expect(
+      service.handlePaymentCallback('momo', {
+        orderId: closedOrder.orderId,
+        transactionRef: 'late-ref-1',
+        amount: '120000',
+        success: true,
+      }),
+    ).resolves.toMatchObject({
+      paymentStatus: PaymentStatus.FAILED,
+      refundStatus: OrderRefundStatus.PENDING,
+    });
+
+    expect(orderRefundsRepository.save).toHaveBeenCalledWith(refund);
+    expect(ordersRepository.save).not.toHaveBeenCalled();
+    expect(closedOrder.paymentStatus).toBe(PaymentStatus.FAILED);
   });
 
   it('completes a paid cancellation refund and closes the order once', async () => {
@@ -397,7 +524,7 @@ describe('OrdersService', () => {
 
     expect(paidOrder.orderStatus).toBe(OrderStatus.CANCELLED);
     expect(paidOrder.paymentStatus).toBe(PaymentStatus.REFUNDED);
-    expect(emptyRepository.find).toHaveBeenCalledTimes(2);
+    expect(emptyRepository.find).toHaveBeenCalledTimes(1);
   });
 
   it('marks COD orders as paid when admin moves them to delivered', async () => {
