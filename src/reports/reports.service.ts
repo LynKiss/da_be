@@ -7,6 +7,10 @@ import { SimpleCacheService } from '../common/simple-cache.service';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
+import {
+  OrderRefundEntity,
+  OrderRefundStatus,
+} from '../orders/entities/order-refund.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import {
   OrderEntity,
@@ -53,24 +57,64 @@ export class ReportsService {
     @InjectRepository(ReturnEntity)
     private readonly returnsRepository: Repository<ReturnEntity>,
 
+    @InjectRepository(OrderRefundEntity)
+    private readonly refundsRepository: Repository<OrderRefundEntity>,
+
     @InjectRepository(ProductBatchEntity)
     private readonly batchRepository: Repository<ProductBatchEntity>,
 
     private readonly cache: SimpleCacheService,
   ) {}
 
+  private readonly financialRevenueStatuses = [
+    OrderStatus.DELIVERED,
+    OrderStatus.PARTIAL_DELIVERED,
+    OrderStatus.PARTIAL_RETURNED,
+  ];
+
+  private joinCompletedRefunds(
+    qb: any,
+    orderAlias: string,
+  ) {
+    return qb.leftJoin(
+      (refundQb) =>
+        refundQb
+          .select('refund.order_id', 'orderId')
+          .addSelect('SUM(refund.amount)', 'completedRefund')
+          .from(OrderRefundEntity, 'refund')
+          .where('refund.refund_status = :completedRefundStatus', {
+            completedRefundStatus: OrderRefundStatus.COMPLETED,
+          })
+          .groupBy('refund.order_id'),
+      'completed_refunds',
+      `completed_refunds.orderId = ${orderAlias}.order_id`,
+    );
+  }
+
+  private async getCompletedRefundsByOrderIds(orderIds: string[]) {
+    if (orderIds.length === 0) {
+      return new Map<string, number>();
+    }
+
+    const rows = await this.refundsRepository
+      .createQueryBuilder('refund')
+      .select('refund.order_id', 'orderId')
+      .addSelect('SUM(refund.amount)', 'amount')
+      .where('refund.order_id IN (:...orderIds)', { orderIds })
+      .andWhere('refund.refund_status = :status', {
+        status: OrderRefundStatus.COMPLETED,
+      })
+      .groupBy('refund.order_id')
+      .getRawMany<{ orderId: string; amount: string }>();
+
+    return new Map(rows.map((row) => [row.orderId, Number(row.amount ?? 0)]));
+  }
+
   async getDashboard() {
     // Revenue statuses: include partial-returned (vẫn còn phần đã giao = doanh thu thật)
     // KHÔNG include fully RETURNED hay CANCELLED.
     // PARTIAL_RETURNED có doanh thu = totalPayment - SUM(refunded returns).
-    const revenueStatuses = [
-      OrderStatus.CONFIRMED,
-      OrderStatus.PROCESSING,
-      OrderStatus.SHIPPING,
-      OrderStatus.DELIVERED,
-      OrderStatus.PARTIAL_DELIVERED,
-      OrderStatus.PARTIAL_RETURNED,
-    ];
+    const revenueStatuses = this.financialRevenueStatuses;
 
     const now = new Date();
     const todayStart = new Date(now);
@@ -89,12 +133,18 @@ export class ReportsService {
     next30Days.setDate(next30Days.getDate() + 30);
 
     const revenueQuery = (from?: Date, to?: Date) => {
-      const qb = this.ordersRepository
+      const qb = this.joinCompletedRefunds(
+        this.ordersRepository
         .createQueryBuilder('order')
-        .select('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .select(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        )
         .where('order.order_status IN (:...statuses)', {
           statuses: revenueStatuses,
-        });
+        }),
+        'order',
+      );
 
       if (from) {
         qb.andWhere('order.created_at >= :from', { from });
@@ -104,7 +154,7 @@ export class ReportsService {
         qb.andWhere('order.created_at < :to', { to });
       }
 
-      return qb.getRawOne<{ revenue: string }>();
+      return qb.getRawOne() as Promise<{ revenue: string }>;
     };
 
     const [
@@ -467,6 +517,19 @@ export class ReportsService {
       .createQueryBuilder('discount')
       .leftJoin(CouponUsageEntity, 'usage', 'usage.discount_id = discount.discount_id')
       .leftJoin(OrderEntity, 'order', 'order.order_id = usage.order_id')
+      .leftJoin(
+        (refundQb) =>
+          refundQb
+            .select('refund.order_id', 'orderId')
+            .addSelect('SUM(refund.amount)', 'completedRefund')
+            .from(OrderRefundEntity, 'refund')
+            .where('refund.refund_status = :completedRefundStatus', {
+              completedRefundStatus: OrderRefundStatus.COMPLETED,
+            })
+            .groupBy('refund.order_id'),
+        'completed_refunds',
+        'completed_refunds.orderId = order.order_id',
+      )
       .select('discount.discount_id', 'discountId')
       .addSelect('discount.discount_code', 'discountCode')
       .addSelect('discount.discount_name', 'discountName')
@@ -474,7 +537,14 @@ export class ReportsService {
       .addSelect('discount.discount_value', 'discountValue')
       .addSelect('COUNT(usage.usage_id)', 'timesUsed')
       .addSelect('COALESCE(SUM(order.discount_amount), 0)', 'discountGiven')
-      .addSelect('COALESCE(SUM(order.total_payment), 0)', 'orderRevenue')
+      .addSelect(
+        'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+        'orderRevenue',
+      )
+      .where(
+        '(order.order_id IS NULL OR order.order_status IN (:...revenueStatuses))',
+        { revenueStatuses },
+      )
       .groupBy('discount.discount_id')
       .addGroupBy('discount.discount_code')
       .addGroupBy('discount.discount_name')
@@ -641,23 +711,41 @@ export class ReportsService {
         .where(this.buildDateRangeSql('order.created_at', query))
         .groupBy('order.payment_status')
         .getRawMany(),
-      this.ordersRepository
-        .createQueryBuilder('order')
+      this.joinCompletedRefunds(
+        this.ordersRepository
+        .createQueryBuilder('order'),
+        'order',
+      )
         .select('DATE(order.created_at)', 'date')
         .addSelect('COUNT(*)', 'orders')
-        .addSelect('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .addSelect(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        )
         .where(this.buildDateRangeSql('order.created_at', query))
+        .andWhere('order.order_status IN (:...financialRevenueStatuses)', {
+          financialRevenueStatuses: this.financialRevenueStatuses,
+        })
         .groupBy('DATE(order.created_at)')
         .orderBy('DATE(order.created_at)', 'ASC')
         .getRawMany(),
-      this.ordersRepository
-        .createQueryBuilder('order')
+      this.joinCompletedRefunds(
+        this.ordersRepository
+        .createQueryBuilder('order'),
+        'order',
+      )
         .select('order.user_id', 'userId')
         .addSelect('order.full_name', 'fullName')
         .addSelect('order.phone', 'phone')
         .addSelect('COUNT(*)', 'orders')
-        .addSelect('COALESCE(SUM(order.total_payment), 0)', 'revenue')
+        .addSelect(
+          'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
+          'revenue',
+        )
         .where(this.buildDateRangeSql('order.created_at', query))
+        .andWhere('order.order_status IN (:...financialRevenueStatuses)', {
+          financialRevenueStatuses: this.financialRevenueStatuses,
+        })
         .groupBy('order.user_id')
         .addGroupBy('order.full_name')
         .addGroupBy('order.phone')
@@ -666,23 +754,29 @@ export class ReportsService {
         .getRawMany(),
     ]);
 
-    const totalRevenue = orders
-      .filter((order) =>
-        [
-          OrderStatus.CONFIRMED,
-          OrderStatus.PROCESSING,
-          OrderStatus.SHIPPING,
-          OrderStatus.DELIVERED,
-        ].includes(order.orderStatus),
-      )
-      .reduce((sum, order) => sum + Number(order.totalPayment), 0);
+    const completedOrders = orders.filter((order) =>
+      this.financialRevenueStatuses.includes(order.orderStatus),
+    );
+    const completedRefunds = await this.getCompletedRefundsByOrderIds(
+      completedOrders.map((order) => order.orderId),
+    );
+    const totalRevenue = completedOrders.reduce(
+      (sum, order) =>
+        sum +
+        Math.max(
+          0,
+          Number(order.totalPayment) -
+            (completedRefunds.get(order.orderId) ?? 0),
+        ),
+      0,
+    );
 
-    const totalDiscount = orders.reduce(
+    const totalDiscount = completedOrders.reduce(
       (sum, order) => sum + Number(order.discountAmount),
       0,
     );
 
-    const totalDeliveryRevenue = orders.reduce(
+    const totalDeliveryRevenue = completedOrders.reduce(
       (sum, order) => sum + Number(order.deliveryCost),
       0,
     );
@@ -697,6 +791,8 @@ export class ReportsService {
         revenue: totalRevenue.toFixed(2),
         discountAmount: totalDiscount.toFixed(2),
         deliveryRevenue: totalDeliveryRevenue.toFixed(2),
+        revenuePolicy:
+          'financial_v1_completed_fulfillment_less_completed_refunds',
       },
       orderStatusSummary,
       paymentSummary,
@@ -717,11 +813,11 @@ export class ReportsService {
       )
       .leftJoin(UserEntity, 'user', 'user.user_id = usage.user_id')
       .select([
-        'usage.couponUsageId AS id',
-        'usage.discountId AS discountId',
-        'usage.userId AS userId',
-        'usage.orderId AS orderId',
-        'usage.createdAt AS createdAt',
+        'usage.usage_id AS id',
+        'usage.discount_id AS discountId',
+        'usage.user_id AS userId',
+        'usage.order_id AS orderId',
+        'usage.used_at AS usedAt',
         'discount.discount_code AS discountCode',
         'discount.discount_name AS discountName',
         'user.username AS username',
@@ -830,6 +926,16 @@ export class ReportsService {
     for (const r of batchValuations) {
       batchMap.set(r.productId, { qty: Number(r.totalBatchQty), value: Number(r.totalBatchValue) });
     }
+    const defaultWarehouseRows = (await this.productsRepository.manager.query(
+      `SELECT ws.product_id AS productId, SUM(ws.quantity) AS quantity
+       FROM warehouse_stock ws
+       INNER JOIN warehouses w ON w.warehouse_id = ws.warehouse_id
+       WHERE w.is_default = 1
+       GROUP BY ws.product_id`,
+    )) as Array<{ productId: string; quantity: string | number }>;
+    const defaultWarehouseMap = new Map(
+      defaultWarehouseRows.map((row) => [row.productId, Number(row.quantity)]),
+    );
 
     const items = products.map((p) => {
       const qtyAvail = Number(p.qtyAvailable) || 0;
@@ -840,9 +946,18 @@ export class ReportsService {
       // FIX HIGH: nếu có batch data → dùng FIFO valuation; nếu không → fallback avgCost.
       const batchEntry = batchMap.get(p.productId);
       const fifoValue = batchEntry ? batchEntry.value : null;
-      const totalValue = fifoValue ?? totalQty * avgCost;
+      const totalValue = fifoValue ?? qtyAvail * avgCost;
       const potentialRevenue = totalQty * retail;
       const potentialProfit = potentialRevenue - totalValue;
+      const defaultWarehouseQty = defaultWarehouseMap.get(p.productId) ?? null;
+      const reconciliationWarnings = [
+        batchEntry && batchEntry.qty !== qtyAvail
+          ? `batch_qty(${batchEntry.qty}) != available(${qtyAvail})`
+          : null,
+        defaultWarehouseQty !== null && defaultWarehouseQty !== qtyAvail
+          ? `default_warehouse(${defaultWarehouseQty}) != available(${qtyAvail})`
+          : null,
+      ].filter(Boolean);
       return {
         productId: p.productId,
         productName: p.productName,
@@ -855,6 +970,9 @@ export class ReportsService {
         // valuationMethod: 'fifo' nếu có batch data, 'avg' nếu fallback (cho audit)
         valuationMethod: fifoValue !== null ? 'fifo' : 'avg',
         batchQty: batchEntry?.qty ?? null,
+        defaultWarehouseQty,
+        reconciliationOk: reconciliationWarnings.length === 0,
+        reconciliationWarnings,
         totalValue,
         potentialRevenue,
         potentialProfit,
@@ -868,6 +986,8 @@ export class ReportsService {
         totalValue: acc.totalValue + it.totalValue,
         potentialRevenue: acc.potentialRevenue + it.potentialRevenue,
         potentialProfit: acc.potentialProfit + it.potentialProfit,
+        reconciliationWarnings:
+          acc.reconciliationWarnings + (it.reconciliationOk ? 0 : 1),
       }),
       {
         totalProducts: 0,
@@ -875,11 +995,14 @@ export class ReportsService {
         totalValue: 0,
         potentialRevenue: 0,
         potentialProfit: 0,
+        reconciliationWarnings: 0,
       },
     );
 
     return {
       asOf: new Date(),
+      valuationPolicy:
+        'batch_remaining_or_available_avg_cost; reserved was allocated at checkout',
       summary,
       items,
     };
@@ -923,12 +1046,7 @@ export class ReportsService {
   async getProfitability(query: QueryProfitabilityDto) {
     const { groupBy = 'product' } = query;
 
-    const completedStatuses = [
-      OrderStatus.CONFIRMED,
-      OrderStatus.PROCESSING,
-      OrderStatus.SHIPPING,
-      OrderStatus.DELIVERED,
-    ];
+    const completedStatuses = this.financialRevenueStatuses;
 
     const qb = this.orderItemsRepository
       .createQueryBuilder('item')
@@ -943,11 +1061,28 @@ export class ReportsService {
       qb
         .select('item.product_id', 'productId')
         .addSelect('item.product_name', 'productName')
-        .addSelect('SUM(item.quantity)', 'soldQty')
-        .addSelect('SUM(item.line_total)', 'revenue')
+        .addSelect(
+          `SUM(CASE
+            WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}'
+              THEN item.quantity_delivered
+            ELSE item.quantity
+          END)`,
+          'soldQty',
+        )
+        .addSelect(
+          `SUM(
+            COALESCE(NULLIF(item.net_line_total, 0), item.line_total)
+            * CASE
+                WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND item.quantity > 0
+                  THEN item.quantity_delivered / item.quantity
+                ELSE 1
+              END
+          )`,
+          'revenue',
+        )
         .groupBy('item.product_id')
         .addGroupBy('item.product_name')
-        .orderBy('SUM(item.line_total)', 'DESC');
+        .orderBy('revenue', 'DESC');
 
       const total = await qb.getCount();
       const rows = await qb.offset((page - 1) * limit).limit(limit).getRawMany<{
@@ -964,28 +1099,48 @@ export class ReportsService {
 
       // COGS chính xác: tính từ inventory_transactions với unit_cost_at_time của từng lần xuất
       // Fallback: avgCost (moving average) hoặc costPrice (last cost) trên ProductEntity
-      const txCogsRows = productIds.length
-        ? await this.inventoryTransactionsRepository
-            .createQueryBuilder('tx')
-            .select('tx.product_id', 'productId')
-            .addSelect(
-              'SUM(ABS(tx.quantity_change) * COALESCE(tx.unit_cost_at_time, 0))',
-              'totalCogs',
-            )
-            .addSelect(
-              'SUM(CASE WHEN tx.unit_cost_at_time IS NOT NULL THEN ABS(tx.quantity_change) ELSE 0 END)',
-              'qtyWithCost',
-            )
-            .where('tx.transaction_type = :type', { type: 'export' })
-            .andWhere('tx.product_id IN (:...pids)', { pids: productIds })
-            .andWhere('tx.related_order_id IS NOT NULL')
-            .groupBy('tx.product_id')
-            .getRawMany<{
-              productId: string;
-              totalCogs: string;
-              qtyWithCost: string;
-            }>()
-        : [];
+      let txCogsRows: Array<{
+        productId: string;
+        totalCogs: string;
+        qtyWithCost: string;
+      }> = [];
+      if (productIds.length) {
+        const txCogsQb = this.inventoryTransactionsRepository
+          .createQueryBuilder('tx')
+          .select('tx.product_id', 'productId')
+          .addSelect(
+            `SUM(CASE
+              WHEN tx.transaction_type = 'export'
+                THEN ABS(tx.quantity_change) * COALESCE(tx.unit_cost_at_time, 0)
+              WHEN tx.transaction_type = 'return_in'
+                THEN -ABS(tx.quantity_change) * COALESCE(tx.unit_cost_at_time, 0)
+              ELSE 0
+            END)`,
+            'totalCogs',
+          )
+          .addSelect(
+            `SUM(CASE
+              WHEN tx.unit_cost_at_time IS NULL THEN 0
+              WHEN tx.transaction_type = 'export' THEN ABS(tx.quantity_change)
+              WHEN tx.transaction_type = 'return_in' THEN -ABS(tx.quantity_change)
+              ELSE 0
+            END)`,
+            'qtyWithCost',
+          )
+          .innerJoin(OrderEntity, 'co', 'co.order_id = tx.related_order_id')
+          .where('tx.transaction_type IN (:...types)', {
+            types: ['export', 'return_in'],
+          })
+          .andWhere('tx.product_id IN (:...pids)', { pids: productIds })
+          .andWhere('tx.related_order_id IS NOT NULL')
+          .andWhere('co.order_status IN (:...statuses)', {
+            statuses: completedStatuses,
+          })
+          .groupBy('tx.product_id');
+        if (query.from) txCogsQb.andWhere('co.created_at >= :from', { from: query.from });
+        if (query.to) txCogsQb.andWhere('co.created_at <= :to', { to: query.to });
+        txCogsRows = await txCogsQb.getRawMany();
+      }
 
       const cogsMap = Object.fromEntries(
         txCogsRows.map((r) => [
@@ -1040,8 +1195,25 @@ export class ReportsService {
     const dateFormat = groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
     qb
       .select(`DATE_FORMAT(o.created_at, '${dateFormat}')`, 'period')
-      .addSelect('SUM(item.line_total)', 'revenue')
-      .addSelect('SUM(item.quantity)', 'soldQty')
+      .addSelect(
+        `SUM(
+          COALESCE(NULLIF(item.net_line_total, 0), item.line_total)
+          * CASE
+              WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND item.quantity > 0
+                THEN item.quantity_delivered / item.quantity
+              ELSE 1
+            END
+        )`,
+        'revenue',
+      )
+      .addSelect(
+        `SUM(CASE
+          WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}'
+            THEN item.quantity_delivered
+          ELSE item.quantity
+        END)`,
+        'soldQty',
+      )
       .groupBy('period')
       .orderBy('period', 'ASC');
 

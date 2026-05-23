@@ -17,6 +17,7 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { DiscountCategoryEntity } from '../discounts/entities/discount-category.entity';
 import {
   DiscountApplyTarget,
+  DiscountApprovalStatus,
   DiscountEntity,
   DiscountType,
 } from '../discounts/entities/discount.entity';
@@ -36,6 +37,7 @@ import { UserEntity } from '../users/entities/user.entity';
 import { withDeadlockRetry } from '../common/transaction.util';
 import { verifyMomoSignature } from '../common/payment-signature.util';
 import { CreateReturnDto } from './dto/create-return.dto';
+import { CreateCancelPaidRefundDto } from './dto/create-cancel-paid-refund.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { InitiatePaymentDto } from './dto/initiate-payment.dto';
 import { PaymentCallbackDto } from './dto/payment-callback.dto';
@@ -45,6 +47,7 @@ import { UpdateOrderTrackingManualDto } from './dto/update-order-tracking-manual
 import { UpdateOrderTrackingModeDto } from './dto/update-order-tracking-mode.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { UpdateReturnStatusDto } from './dto/update-return-status.dto';
+import { UpdateOrderRefundStatusDto } from './dto/update-order-refund-status.dto';
 import { DeliveryMethodEntity } from './entities/delivery-method.entity';
 import { DeliveryMethodAreaEntity } from './entities/delivery-method-area.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
@@ -60,6 +63,11 @@ import {
 } from './entities/order.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
 import {
+  OrderRefundEntity,
+  OrderRefundReason,
+  OrderRefundStatus,
+} from './entities/order-refund.entity';
+import {
   PaymentTransactionEntity,
   PaymentTransactionStatus,
 } from './entities/payment-transaction.entity';
@@ -72,6 +80,11 @@ import { ShippingAddressEntity } from './entities/shipping-address.entity';
 import { MembershipService } from '../membership/membership.service';
 import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-credit-limit.entity';
 import { quoteDeliveryMethod } from './delivery-method.util';
+import {
+  FulfillmentErrorCode,
+  inactiveDeliveryMethod,
+  invalidFulfillmentInput,
+} from './fulfillment-error';
 
 @Injectable()
 export class OrdersService {
@@ -114,6 +127,8 @@ export class OrdersService {
     private readonly couponUsageRepository: Repository<CouponUsageEntity>,
     @InjectRepository(ReturnEntity)
     private readonly returnsRepository: Repository<ReturnEntity>,
+    @InjectRepository(OrderRefundEntity)
+    private readonly orderRefundsRepository: Repository<OrderRefundEntity>,
     @InjectRepository(PaymentTransactionEntity)
     private readonly paymentTransactionsRepository: Repository<PaymentTransactionEntity>,
     @InjectRepository(CustomerCreditLimitEntity)
@@ -373,8 +388,8 @@ export class OrdersService {
       [ReturnStatus.REQUESTED]: [ReturnStatus.APPROVED, ReturnStatus.REJECTED],
       [ReturnStatus.APPROVED]: [ReturnStatus.RECEIVED, ReturnStatus.REJECTED],
       [ReturnStatus.REJECTED]: [],
-      // RECEIVED → INSPECTED (sau khi admin gọi inspect endpoint)
-      [ReturnStatus.RECEIVED]: [ReturnStatus.INSPECTED, ReturnStatus.REFUNDED],
+      // Physical returns must be inspected before money is closed.
+      [ReturnStatus.RECEIVED]: [ReturnStatus.INSPECTED],
       [ReturnStatus.INSPECTED]: [ReturnStatus.REFUNDED],
       [ReturnStatus.REFUNDED]: [],
     };
@@ -393,7 +408,11 @@ export class OrdersService {
       .join(', ');
   }
 
-  private calculateDeliveryCost(
+  /**
+   * Legacy checkout is unreachable from the current controller.
+   * Keep this helper scoped to that dead path until the legacy method is deleted.
+   */
+  private calculateLegacyDeliveryCost(
     deliveryMethod: DeliveryMethodEntity,
     subtotalAmount: number,
   ) {
@@ -433,12 +452,14 @@ export class OrdersService {
       location,
     );
     if (!quote.minimumOrderMet) {
-      throw new BadRequestException(
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.DELIVERY_MIN_ORDER_NOT_MET,
         `Đơn hàng chưa đạt giá trị tối thiểu để chọn ${deliveryMethod.name}`,
       );
     }
     if (!quote.areaMatched) {
-      throw new BadRequestException(
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.DELIVERY_OUT_OF_AREA,
         `${deliveryMethod.name} không áp dụng cho khu vực nhận hàng này`,
       );
     }
@@ -476,6 +497,105 @@ export class OrdersService {
 
   private toMoney(value: string | number | null | undefined) {
     return Number(value ?? 0).toFixed(2);
+  }
+
+  private toCents(value: string | number | null | undefined) {
+    return Math.round(Number(value ?? 0) * 100);
+  }
+
+  private fromCents(value: number) {
+    return (value / 100).toFixed(2);
+  }
+
+  private allocateFinancialSnapshots(
+    lines: Array<{ key: string; grossAmount: number }>,
+    discountAmount: number,
+  ) {
+    const grossCents = lines.map((line) => ({
+      key: line.key,
+      gross: Math.max(0, this.toCents(line.grossAmount)),
+    }));
+    const totalGross = grossCents.reduce((sum, line) => sum + line.gross, 0);
+    const cappedDiscount = Math.min(
+      Math.max(0, this.toCents(discountAmount)),
+      totalGross,
+    );
+    let remainingDiscount = cappedDiscount;
+    const snapshots = new Map<
+      string,
+      { grossLineTotal: string; discountAllocated: string; netLineTotal: string }
+    >();
+
+    grossCents.forEach((line, index) => {
+      const allocated =
+        index === grossCents.length - 1 || totalGross === 0
+          ? remainingDiscount
+          : Math.min(
+              remainingDiscount,
+              Math.round((cappedDiscount * line.gross) / totalGross),
+            );
+      remainingDiscount -= allocated;
+      snapshots.set(line.key, {
+        grossLineTotal: this.fromCents(line.gross),
+        discountAllocated: this.fromCents(allocated),
+        netLineTotal: this.fromCents(Math.max(0, line.gross - allocated)),
+      });
+    });
+
+    return snapshots;
+  }
+
+  private getOrderItemGrossAmount(item: OrderItemEntity) {
+    const snapshot = Number(item.grossLineTotal ?? 0);
+    return snapshot > 0 ? snapshot : Number(item.lineTotal ?? 0);
+  }
+
+  private getOrderItemNetAmount(item: OrderItemEntity) {
+    const snapshot = Number(item.netLineTotal ?? 0);
+    if (snapshot > 0 || this.getOrderItemGrossAmount(item) === 0) {
+      return snapshot;
+    }
+
+    return Math.max(
+      0,
+      this.getOrderItemGrossAmount(item) - Number(item.discountAllocated ?? 0),
+    );
+  }
+
+  private getRefundableAmountForQuantity(
+    item: OrderItemEntity,
+    quantity: number,
+  ) {
+    if (quantity <= 0 || item.quantity <= 0) {
+      return 0;
+    }
+
+    return Math.round(
+      (this.getOrderItemNetAmount(item) * quantity * 100) / item.quantity,
+    ) / 100;
+  }
+
+  private async getReservedReturnQuantity(
+    orderItemId: string,
+    exceptReturnId?: string,
+  ) {
+    const reservedStatuses: ReturnStatus[] = [
+      ReturnStatus.REQUESTED,
+      ReturnStatus.APPROVED,
+      ReturnStatus.RECEIVED,
+      ReturnStatus.INSPECTED,
+      ReturnStatus.REFUNDED,
+    ];
+    const returns = await this.returnsRepository.find({
+      where: reservedStatuses.map((returnStatus) => ({
+        orderItemId,
+        returnStatus,
+      })),
+    });
+
+    return returns
+      .filter((item) => !exceptReturnId || item.returnId !== exceptReturnId)
+      .reduce((sum, item) => sum + Number(item.returnQuantity ?? 0), 0);
   }
 
   private getCartStockIssue(
@@ -527,23 +647,53 @@ export class OrdersService {
     });
   }
 
+  private normalizeDiscountCode(value: string) {
+    return value.trim().toUpperCase();
+  }
+
+  private isDiscountApprovedForUse(discount: DiscountEntity) {
+    return [
+      DiscountApprovalStatus.NOT_REQUIRED,
+      DiscountApprovalStatus.APPROVED,
+    ].includes(discount.approvalStatus);
+  }
+
   private async validateDiscountForCheckout(
     userId: string,
     discountCode: string | undefined,
     subtotalAmount: number,
     cartItems: CartItemEntity[],
     productsById: Map<string, ProductEntity>,
+    entityManager?: EntityManager,
   ) {
     if (!discountCode) {
       return null;
     }
 
-    const discount = await this.discountsRepository.findOneBy({
-      discountCode: discountCode.trim(),
+    const discountRepository = entityManager
+      ? entityManager.getRepository(DiscountEntity)
+      : this.discountsRepository;
+    const couponUsageRepository = entityManager
+      ? entityManager.getRepository(CouponUsageEntity)
+      : this.couponUsageRepository;
+    const discountCategoriesRepository = entityManager
+      ? entityManager.getRepository(DiscountCategoryEntity)
+      : this.discountCategoriesRepository;
+    const discountProductsRepository = entityManager
+      ? entityManager.getRepository(DiscountProductEntity)
+      : this.discountProductsRepository;
+
+    const discount = await discountRepository.findOne({
+      where: { discountCode: this.normalizeDiscountCode(discountCode) },
+      ...(entityManager ? { lock: { mode: 'pessimistic_write' as const } } : {}),
     });
 
     if (!discount || !discount.isActive) {
       throw new NotFoundException('Discount code not found');
+    }
+
+    if (!this.isDiscountApprovedForUse(discount)) {
+      throw new BadRequestException('Discount code is not approved for use');
     }
 
     const now = new Date();
@@ -560,7 +710,7 @@ export class OrdersService {
     let eligibleSubtotal = subtotalAmount;
 
     if (discount.appliesTo === DiscountApplyTarget.CATEGORY) {
-      const categoryMappings = await this.discountCategoriesRepository.find({
+      const categoryMappings = await discountCategoriesRepository.find({
         where: { discountId: discount.discountId },
       });
       const categoryIds = new Set(
@@ -577,7 +727,7 @@ export class OrdersService {
     }
 
     if (discount.appliesTo === DiscountApplyTarget.PRODUCT) {
-      const productMappings = await this.discountProductsRepository.find({
+      const productMappings = await discountProductsRepository.find({
         where: { discountId: discount.discountId },
       });
       const productIds = new Set(productMappings.map((item) => item.productId));
@@ -610,9 +760,11 @@ export class OrdersService {
       throw new BadRequestException('Discount code usage limit reached');
     }
 
-    const existingUsage = await this.couponUsageRepository.findOneBy({
-      discountId: discount.discountId,
-      userId,
+    const existingUsage = await couponUsageRepository.findOne({
+      where: {
+        discountId: discount.discountId,
+        userId,
+      },
     });
 
     if (existingUsage) {
@@ -625,8 +777,29 @@ export class OrdersService {
     };
   }
 
+  private async recordDiscountUsageInTx(
+    entityManager: EntityManager,
+    discount: DiscountEntity | null,
+    userId: string,
+    orderId: string,
+  ) {
+    if (!discount) return;
+    const discountRepository = entityManager.getRepository(DiscountEntity);
+    const couponUsageRepository = entityManager.getRepository(CouponUsageEntity);
+
+    discount.usedCount += 1;
+    await discountRepository.save(discount);
+    await couponUsageRepository.save(
+      couponUsageRepository.create({
+        discountId: discount.discountId,
+        userId,
+        orderId,
+      }),
+    );
+  }
+
   private async buildOrderDetail(order: OrderEntity) {
-    const [items, history] = await Promise.all([
+    const [items, history, refunds] = await Promise.all([
       this.orderItemsRepository.find({
         where: { orderId: order.orderId },
         order: { createdAt: 'ASC', orderItemId: 'ASC' },
@@ -634,6 +807,10 @@ export class OrdersService {
       this.orderStatusHistoryRepository.find({
         where: { orderId: order.orderId },
         order: { createdAt: 'ASC', historyId: 'ASC' },
+      }),
+      this.orderRefundsRepository.find({
+        where: { orderId: order.orderId },
+        order: { createdAt: 'DESC', refundId: 'DESC' },
       }),
     ]);
 
@@ -677,8 +854,12 @@ export class OrdersService {
         productId: item.productId,
         productName: item.productName,
         quantity: item.quantity,
+        quantityDelivered: item.quantityDelivered,
         unitPrice: item.unitPrice,
         lineTotal: item.lineTotal,
+        grossLineTotal: item.grossLineTotal,
+        discountAllocated: item.discountAllocated,
+        netLineTotal: item.netLineTotal,
       })),
       history: history.map((entry) => ({
         id: entry.historyId,
@@ -689,6 +870,17 @@ export class OrdersService {
           : null,
         note: entry.note,
         createdAt: entry.createdAt,
+      })),
+      refunds: (refunds ?? []).map((refund) => ({
+        refundId: refund.refundId,
+        returnId: refund.returnId,
+        reason: refund.reason,
+        amount: refund.amount,
+        refundStatus: refund.refundStatus,
+        paymentProvider: refund.paymentProvider,
+        manualReference: refund.manualReference,
+        note: refund.note,
+        createdAt: refund.createdAt,
       })),
     };
   }
@@ -917,6 +1109,12 @@ export class OrdersService {
   async createGuestOrder(dto: import('./dto/create-guest-order.dto').CreateGuestOrderDto, idempotencyKey?: string) {
     await this.ensurePaymentMethodEnabled(dto.paymentMethod);
 
+    if (dto.discountCode) {
+      throw new BadRequestException(
+        'Guest checkout does not support voucher. Please log in to use vouchers.',
+      );
+    }
+
     if (idempotencyKey) {
       const existing = await this.ordersRepository.findOne({
         where: { idempotencyKey },
@@ -930,15 +1128,19 @@ export class OrdersService {
       deliveryId: dto.deliveryId,
     });
     if (!deliveryMethod || !deliveryMethod.isActive) {
-      throw new NotFoundException('Phương thức giao hàng không khả dụng');
+      throw inactiveDeliveryMethod();
     }
     if (deliveryMethod.isPickup && !dto.pickupContact) {
-      throw new BadRequestException(
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.PICKUP_CONTACT_REQUIRED,
         'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
       );
     }
     if (!deliveryMethod.isPickup && !dto.shipping) {
-      throw new BadRequestException('Giao hàng cần địa chỉ nhận hàng');
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.SHIPPING_ADDRESS_REQUIRED,
+        'Giao hàng cần địa chỉ nhận hàng',
+      );
     }
 
     const productIds = [...new Set(dto.items.map((it) => it.productId))];
@@ -1079,32 +1281,71 @@ export class OrdersService {
             quantity: item.quantity,
             unitPrice,
             lineTotal: lineTotal.toFixed(2),
+            grossLineTotal: lineTotal.toFixed(2),
+            discountAllocated: '0.00',
+            netLineTotal: lineTotal.toFixed(2),
           });
           await trxItems.save(orderItem);
 
           if (isLineBackorder) continue;
 
           const qtyBefore = product.quantityAvailable;
+          const batchPick = await this.batchService
+            .consumeInTx(entityManager, product.productId, item.quantity)
+            .catch(async (err) => {
+              const hasAnyBatch = await entityManager
+                .createQueryBuilder()
+                .select('1')
+                .from('product_batches', 'b')
+                .where('b.product_id = :pid', { pid: product.productId })
+                .limit(1)
+                .getRawOne();
+              if (hasAnyBatch) throw err;
+              return null;
+            });
           product.quantityAvailable -= item.quantity;
           product.quantityReserved =
             (product.quantityReserved ?? 0) + item.quantity;
           await trxProducts.save(product);
 
-          await trxInvTx.save(
-            trxInvTx.create({
-              productId: item.productId,
-              performedBy: null,
-              transactionType: InventoryTransactionType.EXPORT,
-              quantityChange: -item.quantity,
-              quantityBefore: qtyBefore,
-              quantityAfter: product.quantityAvailable,
-              referenceType: 'ORDER',
-              referenceId: orderId,
-              unitCostAtTime: product.avgCost ?? null,
-              note: 'Guest order checkout',
-              relatedOrderId: orderId,
-            }),
-          );
+          if (batchPick?.success) {
+            let runningBefore = qtyBefore;
+            for (const line of batchPick.lines) {
+              await trxInvTx.save(
+                trxInvTx.create({
+                  productId: item.productId,
+                  performedBy: null,
+                  transactionType: InventoryTransactionType.EXPORT,
+                  quantityChange: -line.qty,
+                  quantityBefore: runningBefore,
+                  quantityAfter: runningBefore - line.qty,
+                  referenceType: 'ORDER',
+                  referenceId: orderId,
+                  batchId: line.batchId,
+                  unitCostAtTime: line.unitCost.toFixed(4),
+                  note: `Guest order checkout - batch ${line.batchCode}`,
+                  relatedOrderId: orderId,
+                }),
+              );
+              runningBefore -= line.qty;
+            }
+          } else {
+            await trxInvTx.save(
+              trxInvTx.create({
+                productId: item.productId,
+                performedBy: null,
+                transactionType: InventoryTransactionType.EXPORT,
+                quantityChange: -item.quantity,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                referenceType: 'ORDER',
+                referenceId: orderId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: 'Guest order checkout (legacy - no batch)',
+                relatedOrderId: orderId,
+              }),
+            );
+          }
           await this.syncDefaultWarehouseStock(
             entityManager,
             item.productId,
@@ -1195,15 +1436,19 @@ export class OrdersService {
     }
 
     if (!deliveryMethod || !deliveryMethod.isActive) {
-      throw new NotFoundException('Delivery method not found');
+      throw inactiveDeliveryMethod();
     }
     if (deliveryMethod.isPickup && !createOrderDto.pickupContact) {
-      throw new BadRequestException(
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.PICKUP_CONTACT_REQUIRED,
         'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
       );
     }
     if (!deliveryMethod.isPickup && !createOrderDto.shippingAddressId) {
-      throw new BadRequestException('Giao hàng cần địa chỉ nhận hàng');
+      throw invalidFulfillmentInput(
+        FulfillmentErrorCode.SHIPPING_ADDRESS_REQUIRED,
+        'Giao hàng cần địa chỉ nhận hàng',
+      );
     }
 
     const shippingAddress = deliveryMethod.isPickup
@@ -1245,10 +1490,6 @@ export class OrdersService {
           entityManager.getRepository(CartItemEntity);
         const transactionalInventoryTransactionsRepository =
           entityManager.getRepository(InventoryTransactionEntity);
-        const transactionalDiscountsRepository =
-          entityManager.getRepository(DiscountEntity);
-        const transactionalCouponUsageRepository =
-          entityManager.getRepository(CouponUsageEntity);
         const transactionalCreditLimitRepository =
           entityManager.getRepository(CustomerCreditLimitEntity);
 
@@ -1346,6 +1587,7 @@ export class OrdersService {
           subtotalAmount,
           cartItems,
           lockedProductsById,
+          entityManager,
         );
         const discount = discountContext?.discount ?? null;
         const discountAmount = discountContext
@@ -1364,6 +1606,21 @@ export class OrdersService {
         );
         const deliveryCost = deliveryQuote.shippingFee;
         const totalPayment = subtotalAmount - discountAmount + deliveryCost;
+        const financialSnapshots = this.allocateFinancialSnapshots(
+          cartItems.map((cartItem) => {
+            const product = lockedProductsById.get(cartItem.productId);
+            return {
+              key: String(cartItem.cartItemId),
+              grossAmount:
+                Number(
+                  product
+                    ? this.getEffectivePrice(product)
+                    : cartItem.priceAtAdded,
+                ) * cartItem.quantity,
+            };
+          }),
+          discountAmount,
+        );
 
         let creditLimit: CustomerCreditLimitEntity | null = null;
         if (createOrderDto.paymentMethod === PaymentMethod.CREDIT) {
@@ -1442,6 +1699,13 @@ export class OrdersService {
 
           const unitPrice = this.toMoney(this.getEffectivePrice(product));
           const lineTotal = Number(unitPrice) * cartItem.quantity;
+          const financialSnapshot = financialSnapshots.get(
+            String(cartItem.cartItemId),
+          ) ?? {
+            grossLineTotal: lineTotal.toFixed(2),
+            discountAllocated: '0.00',
+            netLineTotal: lineTotal.toFixed(2),
+          };
 
           const orderItem = transactionalOrderItemsRepository.create({
             orderId,
@@ -1450,6 +1714,7 @@ export class OrdersService {
             quantity: cartItem.quantity,
             unitPrice,
             lineTotal: lineTotal.toFixed(2),
+            ...financialSnapshot,
           });
           await transactionalOrderItemsRepository.save(orderItem);
 
@@ -1527,17 +1792,12 @@ export class OrdersService {
           );
         }
 
-        if (discount) {
-          discount.usedCount += 1;
-          await transactionalDiscountsRepository.save(discount);
-
-          const couponUsage = transactionalCouponUsageRepository.create({
-            discountId: discount.discountId,
-            userId,
-            orderId,
-          });
-          await transactionalCouponUsageRepository.save(couponUsage);
-        }
+        await this.recordDiscountUsageInTx(
+          entityManager,
+          discount,
+          userId,
+          orderId,
+        );
 
         if (creditLimit) {
           creditLimit.currentDebt = (
@@ -1579,6 +1839,10 @@ export class OrdersService {
     return this.buildOrderDetail(createdOrder);
   }
 
+  /**
+   * @deprecated Isolated dead path kept only as a short-term diff guard while
+   * checkout creation uses createOrder above.
+   */
   private async createOrderLegacyUnused(
     userId: string,
     createOrderDto: CreateOrderDto,
@@ -1674,7 +1938,7 @@ export class OrdersService {
           discountContext.eligibleSubtotal,
         )
       : 0;
-    const deliveryCost = this.calculateDeliveryCost(
+    const deliveryCost = this.calculateLegacyDeliveryCost(
       deliveryMethod,
       subtotalAmount,
     );
@@ -1719,11 +1983,6 @@ export class OrdersService {
           entityManager.getRepository(CartItemEntity);
         const transactionalInventoryTransactionsRepository =
           entityManager.getRepository(InventoryTransactionEntity);
-        const transactionalDiscountsRepository =
-          entityManager.getRepository(DiscountEntity);
-        const transactionalCouponUsageRepository =
-          entityManager.getRepository(CouponUsageEntity);
-
         // Idempotency double-check inside transaction (race window protection)
         if (idempotencyKey) {
           const dup = await transactionalOrdersRepository.findOne({
@@ -1788,6 +2047,9 @@ export class OrdersService {
             quantity: cartItem.quantity,
             unitPrice: cartItem.priceAtAdded,
             lineTotal: lineTotal.toFixed(2),
+            grossLineTotal: lineTotal.toFixed(2),
+            discountAllocated: '0.00',
+            netLineTotal: lineTotal.toFixed(2),
           });
           await transactionalOrderItemsRepository.save(orderItem);
 
@@ -1879,17 +2141,12 @@ export class OrdersService {
           );
         }
 
-        if (discount) {
-          discount.usedCount += 1;
-          await transactionalDiscountsRepository.save(discount);
-
-          const couponUsage = transactionalCouponUsageRepository.create({
-            discountId: discount.discountId,
-            userId,
-            orderId,
-          });
-          await transactionalCouponUsageRepository.save(couponUsage);
-        }
+        await this.recordDiscountUsageInTx(
+          entityManager,
+          discount,
+          userId,
+          orderId,
+        );
 
         const history = transactionalHistoryRepository.create({
           orderId,
@@ -2047,6 +2304,18 @@ export class OrdersService {
       throw new BadRequestException('Order cannot be cancelled');
     }
 
+    if (
+      [PaymentStatus.PAID, PaymentStatus.PARTIAL_REFUNDED].includes(
+        order.paymentStatus,
+      )
+    ) {
+      throw new BadRequestException({
+        message:
+          'Đơn đã thu tiền phải đi qua quy trình hoàn tiền trước khi đóng hủy.',
+        error: 'PAID_ORDER_CANCEL_REQUIRES_REFUND',
+      });
+    }
+
     await this.ordersRepository.manager.transaction(async (entityManager) => {
       const transactionalOrdersRepository =
         entityManager.getRepository(OrderEntity);
@@ -2146,6 +2415,25 @@ export class OrdersService {
     const previousPaymentStatus = order.paymentStatus;
     const nextStatus = updateOrderStatusDto.status;
 
+    if (
+      nextStatus === OrderStatus.CANCELLED &&
+      [PaymentStatus.PAID, PaymentStatus.PARTIAL_REFUNDED].includes(
+        order.paymentStatus,
+      )
+    ) {
+      throw new BadRequestException({
+        message:
+          'Đơn đã thu tiền không thể hủy trực tiếp. Hãy xử lý refund trước.',
+        error: 'PAID_ORDER_CANCEL_REQUIRES_REFUND',
+      });
+    }
+
+    if (nextStatus === OrderStatus.RETURNED) {
+      throw new BadRequestException(
+        'Đơn trả hàng phải xử lý bằng return records và inspection, không đổi thẳng trạng thái order sang returned.',
+      );
+    }
+
     if (previousStatus === nextStatus) {
       return this.buildOrderDetail(order);
     }
@@ -2155,8 +2443,7 @@ export class OrdersService {
         OrderStatus.DELIVERED,
         OrderStatus.PARTIAL_DELIVERED,
         OrderStatus.RETURNED,
-      ].includes(previousStatus) &&
-      nextStatus !== OrderStatus.RETURNED
+      ].includes(previousStatus)
     ) {
       throw new BadRequestException('Finalized order cannot change status');
     }
@@ -2210,25 +2497,62 @@ export class OrdersService {
             );
           }
           const qtyBefore = product.quantityAvailable;
+          const batchPick = await this.batchService
+            .consumeInTx(entityManager, product.productId, item.quantity)
+            .catch(async (err) => {
+              const hasAnyBatch = await entityManager
+                .createQueryBuilder()
+                .select('1')
+                .from('product_batches', 'b')
+                .where('b.product_id = :pid', { pid: product.productId })
+                .limit(1)
+                .getRawOne();
+              if (hasAnyBatch) throw err;
+              return null;
+            });
           product.quantityAvailable -= item.quantity;
           product.quantityReserved =
             (product.quantityReserved ?? 0) + item.quantity;
           await transactionalProductsRepository.save(product);
 
-          const tx = transactionalInventoryTransactionsRepository.create({
-            productId: item.productId,
-            performedBy: currentUser._id,
-            transactionType: InventoryTransactionType.EXPORT,
-            quantityChange: -item.quantity,
-            quantityBefore: qtyBefore,
-            quantityAfter: product.quantityAvailable,
-            referenceType: 'ORDER',
-            referenceId: order.orderId,
-            unitCostAtTime: product.avgCost ?? null,
-            note: 'Export by backorder fulfillment',
-            relatedOrderId: order.orderId,
-          });
-          await transactionalInventoryTransactionsRepository.save(tx);
+          if (batchPick?.success) {
+            let runningBefore = qtyBefore;
+            for (const line of batchPick.lines) {
+              await transactionalInventoryTransactionsRepository.save(
+                transactionalInventoryTransactionsRepository.create({
+                  productId: item.productId,
+                  performedBy: currentUser._id,
+                  transactionType: InventoryTransactionType.EXPORT,
+                  quantityChange: -line.qty,
+                  quantityBefore: runningBefore,
+                  quantityAfter: runningBefore - line.qty,
+                  referenceType: 'ORDER',
+                  referenceId: order.orderId,
+                  batchId: line.batchId,
+                  unitCostAtTime: line.unitCost.toFixed(4),
+                  note: `Export by backorder fulfillment - batch ${line.batchCode}`,
+                  relatedOrderId: order.orderId,
+                }),
+              );
+              runningBefore -= line.qty;
+            }
+          } else {
+            await transactionalInventoryTransactionsRepository.save(
+              transactionalInventoryTransactionsRepository.create({
+                productId: item.productId,
+                performedBy: currentUser._id,
+                transactionType: InventoryTransactionType.EXPORT,
+                quantityChange: -item.quantity,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                referenceType: 'ORDER',
+                referenceId: order.orderId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: 'Export by backorder fulfillment (legacy - no batch)',
+                relatedOrderId: order.orderId,
+              }),
+            );
+          }
           await this.syncDefaultWarehouseStock(
             entityManager,
             item.productId,
@@ -2237,10 +2561,7 @@ export class OrdersService {
         }
       }
 
-      if (
-        nextStatus === OrderStatus.CANCELLED ||
-        nextStatus === OrderStatus.RETURNED
-      ) {
+      if (nextStatus === OrderStatus.CANCELLED) {
         // Backorder bị cancel: KHÔNG restock vì chưa từng trừ stock
         const isBackorderCancel =
           previousStatus === OrderStatus.BACKORDERED &&
@@ -2309,35 +2630,6 @@ export class OrdersService {
             transactionalDiscountsRepository,
             transactionalCouponUsageRepository,
           );
-        } else if (nextStatus === OrderStatus.RETURNED) {
-          // Hàng trả về — giải phóng quantityReserved nếu có (đơn chưa DELIVERED)
-          // Stock physical KHÔNG cộng lại — chờ inspect.
-          // Nếu đơn đã DELIVERED rồi: reserved = 0, không có gì để release.
-          for (const item of items) {
-            const product = await transactionalProductsRepository.findOne({
-              where: { productId: item.productId },
-              lock: { mode: 'pessimistic_write' },
-            });
-            if (!product) continue;
-
-            // Tạo Return record với inspectionStatus = PENDING
-            const returnRecord = entityManager
-              .getRepository(ReturnEntity)
-              .create({
-                orderId: order.orderId,
-                orderItemId: item.orderItemId,
-                userId: order.userId,
-                reason:
-                  updateOrderStatusDto.note ?? 'Returned by admin',
-                description: null,
-                returnStatus: ReturnStatus.RECEIVED,
-                inspectionStatus: ReturnInspectionStatus.PENDING,
-                refundAmount: null,
-              });
-            await entityManager
-              .getRepository(ReturnEntity)
-              .save(returnRecord);
-          }
         }
       }
 
@@ -2365,13 +2657,6 @@ export class OrdersService {
       }
 
       if (nextStatus === OrderStatus.CANCELLED) {
-        order.paymentStatus =
-          order.paymentStatus === PaymentStatus.PAID
-            ? PaymentStatus.REFUNDED
-            : PaymentStatus.FAILED;
-      }
-
-      if (nextStatus === OrderStatus.RETURNED) {
         order.paymentStatus =
           order.paymentStatus === PaymentStatus.PAID
             ? PaymentStatus.REFUNDED
@@ -3031,6 +3316,382 @@ export class OrdersService {
     };
   }
 
+  private async getCompletedRefundAmount(
+    orderId: string,
+    refundRepository = this.orderRefundsRepository,
+  ) {
+    const completed = await refundRepository.find({
+      where: { orderId, refundStatus: OrderRefundStatus.COMPLETED },
+    });
+
+    return completed.reduce((sum, item) => sum + Number(item.amount ?? 0), 0);
+  }
+
+  private assertCancelablePaidRefundOrder(order: OrderEntity) {
+    const cancelable = this.isValidAdminStatusTransition(
+      order.orderStatus,
+      OrderStatus.CANCELLED,
+    );
+    const hasCollectedPayment = [
+      PaymentStatus.PAID,
+      PaymentStatus.PARTIAL_REFUNDED,
+    ].includes(order.paymentStatus);
+
+    if (!cancelable || !hasCollectedPayment) {
+      throw new BadRequestException({
+        message:
+          'Đơn không đủ điều kiện tạo hoàn tiền hủy đơn đã thu tiền.',
+        error: 'CANCEL_PAID_REFUND_ORDER_NOT_ELIGIBLE',
+      });
+    }
+  }
+
+  private mapAdminRefund(
+    refund: OrderRefundEntity,
+    order?: OrderEntity,
+    user?: UserEntity,
+  ) {
+    return {
+      refundId: refund.refundId,
+      orderId: refund.orderId,
+      returnId: refund.returnId,
+      reason: refund.reason,
+      amount: refund.amount,
+      refundStatus: refund.refundStatus,
+      paymentProvider: refund.paymentProvider,
+      manualReference: refund.manualReference,
+      createdBy: refund.createdBy,
+      note: refund.note,
+      createdAt: refund.createdAt,
+      updatedAt: refund.updatedAt,
+      order: order
+        ? {
+            id: order.orderId,
+            status: order.orderStatus,
+            paymentMethod: order.paymentMethod,
+            paymentStatus: order.paymentStatus,
+            totalPayment: order.totalPayment,
+            fullName: order.fullName,
+            phone: order.phone,
+          }
+        : null,
+      user: user
+        ? {
+            username: user.username,
+            email: user.email,
+          }
+        : null,
+    };
+  }
+
+  async findAdminRefunds(params: {
+    page: number;
+    limit: number;
+    status?: string;
+    reason?: string;
+    orderId?: string;
+  }) {
+    const { page, limit, status, reason, orderId } = params;
+    const query = this.orderRefundsRepository
+      .createQueryBuilder('refund')
+      .orderBy('refund.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    if (status) {
+      query.andWhere('refund.refundStatus = :status', { status });
+    }
+    if (reason) {
+      query.andWhere('refund.reason = :reason', { reason });
+    }
+    if (orderId) {
+      query.andWhere('refund.orderId LIKE :orderId', {
+        orderId: `%${orderId.trim()}%`,
+      });
+    }
+
+    const [items, total] = await query.getManyAndCount();
+    const orderIds = [...new Set(items.map((item) => item.orderId))];
+    const orders = orderIds.length
+      ? await this.ordersRepository.find({ where: { orderId: In(orderIds) } })
+      : [];
+    const orderMap = new Map(orders.map((order) => [order.orderId, order]));
+    const userIds = [...new Set(orders.map((order) => order.userId))];
+    const users = userIds.length
+      ? await this.usersRepository.find({ where: { userId: In(userIds) } })
+      : [];
+    const userMap = new Map(users.map((user) => [user.userId, user]));
+
+    return {
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+      items: items.map((item) => {
+        const order = orderMap.get(item.orderId);
+        return this.mapAdminRefund(
+          item,
+          order,
+          order ? userMap.get(order.userId) : undefined,
+        );
+      }),
+    };
+  }
+
+  async createCancelPaidOrderRefund(
+    currentUser: IUser,
+    dto: CreateCancelPaidRefundDto,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const order = await this.findAnyOrder(dto.orderId);
+    this.assertCancelablePaidRefundOrder(order);
+
+    const duplicate = await this.orderRefundsRepository.findOne({
+      where: {
+        orderId: order.orderId,
+        reason: OrderRefundReason.CANCEL_PAID_ORDER,
+        refundStatus: In([
+          OrderRefundStatus.PENDING,
+          OrderRefundStatus.APPROVED,
+        ]),
+      },
+    });
+    if (duplicate) {
+      throw new ConflictException({
+        message: 'Đơn đã có hoàn tiền hủy đơn đang xử lý.',
+        error: 'CANCEL_PAID_REFUND_ALREADY_OPEN',
+      });
+    }
+
+    const completedRefundAmount = await this.getCompletedRefundAmount(
+      order.orderId,
+    );
+    const remainingRefundable = Math.max(
+      0,
+      Number(order.totalPayment) - completedRefundAmount,
+    );
+    const amount =
+      dto.amount !== undefined ? Number(dto.amount) : remainingRefundable;
+    if (
+      !Number.isFinite(amount) ||
+      amount <= 0 ||
+      amount > remainingRefundable
+    ) {
+      throw new BadRequestException({
+        message: `Số tiền hoàn không hợp lệ. Còn có thể hoàn ${remainingRefundable.toFixed(2)}.`,
+        error: 'REFUND_AMOUNT_EXCEEDS_REMAINING',
+      });
+    }
+
+    const created = this.orderRefundsRepository.create({
+      orderId: order.orderId,
+      returnId: null,
+      reason: OrderRefundReason.CANCEL_PAID_ORDER,
+      amount: amount.toFixed(2),
+      refundStatus: OrderRefundStatus.PENDING,
+      paymentProvider: order.paymentMethod,
+      manualReference: null,
+      createdBy: currentUser._id,
+      note: dto.note?.trim() || 'Chờ hoàn tiền trước khi hủy đơn đã thu tiền',
+    });
+    const saved = await this.orderRefundsRepository.save(created);
+
+    return this.mapAdminRefund(saved, order);
+  }
+
+  async updateAdminRefundStatus(
+    currentUser: IUser,
+    refundId: string,
+    dto: UpdateOrderRefundStatusDto,
+  ) {
+    await this.ensureUserExists(currentUser._id);
+    const updated = await this.orderRefundsRepository.manager.transaction(
+      async (entityManager) => {
+        const refund = await entityManager.findOne(OrderRefundEntity, {
+          where: { refundId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!refund) {
+          throw new NotFoundException('Refund not found');
+        }
+
+        const transitions: Record<OrderRefundStatus, OrderRefundStatus[]> = {
+          [OrderRefundStatus.PENDING]: [
+            OrderRefundStatus.APPROVED,
+            OrderRefundStatus.COMPLETED,
+            OrderRefundStatus.FAILED,
+          ],
+          [OrderRefundStatus.APPROVED]: [
+            OrderRefundStatus.COMPLETED,
+            OrderRefundStatus.FAILED,
+          ],
+          [OrderRefundStatus.COMPLETED]: [],
+          [OrderRefundStatus.FAILED]: [],
+        };
+        const statusChanged = refund.refundStatus !== dto.status;
+        if (
+          statusChanged &&
+          !transitions[refund.refundStatus].includes(dto.status)
+        ) {
+          throw new BadRequestException('Invalid refund status transition');
+        }
+
+        const nextManualReference =
+          dto.manualReference?.trim() || refund.manualReference;
+        const nextNote = dto.note?.trim() || refund.note;
+        if (
+          dto.status === OrderRefundStatus.COMPLETED &&
+          !nextManualReference &&
+          !nextNote
+        ) {
+          throw new BadRequestException({
+            message:
+              'Hoàn tiền thủ công cần mã chứng từ hoặc ghi chú đối soát.',
+            error: 'REFUND_COMPLETION_REFERENCE_REQUIRED',
+          });
+        }
+
+        refund.manualReference = nextManualReference;
+        refund.note = nextNote;
+        refund.refundStatus = dto.status;
+
+        const order = await entityManager.findOne(OrderEntity, {
+          where: { orderId: refund.orderId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!order) {
+          throw new NotFoundException('Order not found');
+        }
+
+        if (statusChanged && dto.status === OrderRefundStatus.COMPLETED) {
+          const alreadyCompleted = await entityManager.find(OrderRefundEntity, {
+            where: {
+              orderId: order.orderId,
+              refundStatus: OrderRefundStatus.COMPLETED,
+            },
+          });
+          const completedBefore = alreadyCompleted.reduce(
+            (sum, item) =>
+              item.refundId === refund.refundId
+                ? sum
+                : sum + Number(item.amount ?? 0),
+            0,
+          );
+          if (completedBefore + Number(refund.amount) > Number(order.totalPayment)) {
+            throw new BadRequestException({
+              message: 'Số tiền hoàn vượt số tiền còn có thể hoàn của đơn.',
+              error: 'REFUND_AMOUNT_EXCEEDS_REMAINING',
+            });
+          }
+        }
+
+        if (
+          statusChanged &&
+          dto.status === OrderRefundStatus.COMPLETED &&
+          refund.reason === OrderRefundReason.CANCEL_PAID_ORDER
+        ) {
+          this.assertCancelablePaidRefundOrder(order);
+
+          const productsRepository =
+            entityManager.getRepository(ProductEntity);
+          const orderItemsRepository =
+            entityManager.getRepository(OrderItemEntity);
+          const inventoryTransactionsRepository =
+            entityManager.getRepository(InventoryTransactionEntity);
+          const items = await orderItemsRepository.find({
+            where: { orderId: order.orderId },
+          });
+
+          await this.restockOrderItems(
+            order.orderId,
+            productsRepository,
+            orderItemsRepository,
+            entityManager,
+          );
+          for (const item of items) {
+            const product = await productsRepository.findOneBy({
+              productId: item.productId,
+            });
+            await inventoryTransactionsRepository.save(
+              inventoryTransactionsRepository.create({
+                productId: item.productId,
+                performedBy: currentUser._id,
+                transactionType: InventoryTransactionType.RETURN_IN,
+                quantityChange: item.quantity,
+                quantityBefore: product
+                  ? product.quantityAvailable - item.quantity
+                  : null,
+                quantityAfter: product ? product.quantityAvailable : null,
+                referenceType: 'ORDER',
+                referenceId: order.orderId,
+                unitCostAtTime: product?.avgCost ?? null,
+                note: 'Restock after paid cancellation refund',
+                relatedOrderId: order.orderId,
+              }),
+            );
+          }
+          await this.revertDiscountUsage(
+            order,
+            entityManager.getRepository(DiscountEntity),
+            entityManager.getRepository(CouponUsageEntity),
+          );
+
+          const previousStatus = order.orderStatus;
+          order.orderStatus = OrderStatus.CANCELLED;
+          await entityManager.save(OrderStatusHistoryEntity, {
+            orderId: order.orderId,
+            oldStatus: previousStatus,
+            newStatus: OrderStatus.CANCELLED,
+            changedBy: currentUser._id,
+            note:
+              dto.note?.trim() ||
+              'Đã hoàn tiền thủ công và hủy đơn đã thu tiền',
+          });
+        }
+
+        await entityManager.save(OrderRefundEntity, refund);
+
+        if (statusChanged && dto.status === OrderRefundStatus.COMPLETED) {
+          const completedRefunds = await entityManager.find(
+            OrderRefundEntity,
+            {
+              where: {
+                orderId: order.orderId,
+                refundStatus: OrderRefundStatus.COMPLETED,
+              },
+            },
+          );
+          const completedAmount = completedRefunds.reduce(
+            (sum, item) => sum + Number(item.amount ?? 0),
+            0,
+          );
+          order.paymentStatus =
+            completedAmount >= Number(order.totalPayment)
+              ? PaymentStatus.REFUNDED
+              : PaymentStatus.PARTIAL_REFUNDED;
+        }
+
+        await entityManager.save(OrderEntity, order);
+        return { refund, order };
+      },
+    );
+
+    if (
+      updated.refund.reason === OrderRefundReason.CANCEL_PAID_ORDER &&
+      updated.refund.refundStatus === OrderRefundStatus.COMPLETED
+    ) {
+      await this.notificationsService.sendOrderStatusNotification(
+        updated.order.userId,
+        updated.order.orderId,
+        OrderStatus.CANCELLED,
+      );
+    }
+
+    return this.mapAdminRefund(updated.refund, updated.order);
+  }
+
   async createReturn(userId: string, createReturnDto: CreateReturnDto) {
     await this.ensureUserExists(userId);
     const order = await this.findOwnedOrder(userId, createReturnDto.orderId);
@@ -3068,6 +3729,20 @@ export class OrdersService {
       throw new NotFoundException('Order item not found');
     }
 
+    const alreadyReturnedQuantity = await this.getReservedReturnQuantity(
+      orderItem.orderItemId,
+    );
+    const remainingReturnableQuantity =
+      orderItem.quantity - alreadyReturnedQuantity;
+    if (
+      createReturnDto.returnQuantity <= 0 ||
+      createReturnDto.returnQuantity > remainingReturnableQuantity
+    ) {
+      throw new BadRequestException(
+        `Số lượng trả không hợp lệ. Còn có thể trả ${Math.max(0, remainingReturnableQuantity)}/${orderItem.quantity}.`,
+      );
+    }
+
     // Chỉ block nếu đã có return ĐANG MỞ (OPEN) cho item này.
     // REJECTED hoặc REFUNDED → cho phép tạo mới (có thể bị từ chối oan, hoặc trả thêm).
     const openStatuses: ReturnStatus[] = [
@@ -3092,6 +3767,7 @@ export class OrdersService {
     const created = this.returnsRepository.create({
       orderId: order.orderId,
       orderItemId: createReturnDto.orderItemId,
+      returnQuantity: createReturnDto.returnQuantity,
       userId,
       reason: createReturnDto.reason,
       description: createReturnDto.description ?? null,
@@ -3107,7 +3783,16 @@ export class OrdersService {
       metadata: { returnId: saved.returnId, orderId: order.orderId },
     });
 
-    return saved;
+    return {
+      ...saved,
+      maxRefundableAmount: this.getRefundableAmountForQuantity(
+        orderItem,
+        saved.returnQuantity,
+      ).toFixed(2),
+      alreadyReturnedQuantity,
+      remainingReturnableQuantity:
+        remainingReturnableQuantity - saved.returnQuantity,
+    };
   }
 
   async findMyReturns(userId: string) {
@@ -3121,6 +3806,7 @@ export class OrdersService {
       id: item.returnId,
       orderId: item.orderId,
       orderItemId: item.orderItemId,
+      returnQuantity: item.returnQuantity,
       reason: item.reason,
       description: item.description,
       status: item.returnStatus,
@@ -3140,6 +3826,7 @@ export class OrdersService {
       orderId: item.orderId,
       userId: item.userId,
       orderItemId: item.orderItemId,
+      returnQuantity: item.returnQuantity,
       reason: item.reason,
       description: item.description,
       returnStatus: item.returnStatus,
@@ -3190,8 +3877,30 @@ export class OrdersService {
 
     returnRequest.returnStatus = updateReturnStatusDto.status;
     if (updateReturnStatusDto.status === ReturnStatus.REFUNDED) {
-      returnRequest.refundAmount =
-        updateReturnStatusDto.refundAmount ?? orderItem.lineTotal;
+      if (returnRequest.inspectionStatus === ReturnInspectionStatus.PENDING) {
+        throw new BadRequestException(
+          'Return đã nhận vật lý phải inspect trước khi hoàn tiền.',
+        );
+      }
+
+      const maxRefundableAmount = this.getRefundableAmountForQuantity(
+        orderItem,
+        returnRequest.returnQuantity,
+      );
+      const requestedRefundAmount =
+        updateReturnStatusDto.refundAmount !== undefined
+          ? Number(updateReturnStatusDto.refundAmount)
+          : maxRefundableAmount;
+      if (
+        !Number.isFinite(requestedRefundAmount) ||
+        requestedRefundAmount < 0 ||
+        requestedRefundAmount > maxRefundableAmount
+      ) {
+        throw new BadRequestException(
+          `Số tiền hoàn không hợp lệ. Tối đa ${maxRefundableAmount.toFixed(2)}.`,
+        );
+      }
+      returnRequest.refundAmount = requestedRefundAmount.toFixed(2);
 
       // PHẢI lưu return trước khi tính tổng — vì query bên dưới sẽ đọc lại từ DB
       await this.returnsRepository.save(returnRequest);
@@ -3204,13 +3913,50 @@ export class OrdersService {
         where: { orderId: order.orderId, returnStatus: ReturnStatus.REFUNDED },
       });
 
-      // Đếm số orderItem ĐÃ có return REFUNDED (unique theo orderItemId)
-      const refundedItemIds = new Set(refundedReturns.map((r) => r.orderItemId));
-      const allRefunded = orderItems.every((it) => refundedItemIds.has(it.orderItemId));
+      const refundedQuantityByLine = new Map<string, number>();
+      for (const refundedReturn of refundedReturns) {
+        refundedQuantityByLine.set(
+          refundedReturn.orderItemId,
+          (refundedQuantityByLine.get(refundedReturn.orderItemId) ?? 0) +
+            Number(refundedReturn.returnQuantity ?? 0),
+        );
+      }
+      const allRefunded = orderItems.every(
+        (it) =>
+          (refundedQuantityByLine.get(it.orderItemId) ?? 0) >= it.quantity,
+      );
+
+      const existingRefund = await this.orderRefundsRepository.findOne({
+        where: {
+          returnId: returnRequest.returnId,
+          reason: OrderRefundReason.RETURN,
+        },
+      });
+      if (!existingRefund) {
+        await this.orderRefundsRepository.save(
+          this.orderRefundsRepository.create({
+            orderId: order.orderId,
+            returnId: returnRequest.returnId,
+            reason: OrderRefundReason.RETURN,
+            amount: returnRequest.refundAmount,
+            refundStatus: OrderRefundStatus.COMPLETED,
+            paymentProvider: order.paymentMethod,
+            manualReference: null,
+            createdBy: currentUser._id,
+            note:
+              updateReturnStatusDto.note ??
+              `Refund return ${returnRequest.returnId}`,
+          }),
+        );
+      }
 
       // FIX HIGH: nếu là CREDIT order → trừ refundAmount khỏi currentDebt
       const refundAmt = Number(returnRequest.refundAmount ?? 0);
-      if (order.paymentMethod === PaymentMethod.CREDIT && refundAmt > 0) {
+      if (
+        !existingRefund &&
+        order.paymentMethod === PaymentMethod.CREDIT &&
+        refundAmt > 0
+      ) {
         await this.creditLimitRepository
           .createQueryBuilder()
           .update()
@@ -3300,7 +4046,28 @@ export class OrdersService {
     });
     const itemMap = new Map(orderItems.map((it) => [it.orderItemId, it]));
 
-    // Validate: deliveredQty không được vượt qty đặt
+    if (items.length !== orderItems.length) {
+      throw new BadRequestException(
+        'Partial delivery phải gửi đủ toàn bộ dòng sản phẩm của đơn.',
+      );
+    }
+
+    const submittedItemIds = new Set(items.map((item) => item.orderItemId));
+    if (submittedItemIds.size !== items.length) {
+      throw new BadRequestException(
+        'Partial delivery không được gửi trùng dòng sản phẩm.',
+      );
+    }
+
+    for (const orderItem of orderItems) {
+      if (!submittedItemIds.has(orderItem.orderItemId)) {
+        throw new BadRequestException(
+          `Thiếu số lượng giao cho dòng ${orderItem.productName}.`,
+        );
+      }
+    }
+
+    // Validate: deliveredQty không được vượt qty đặt.
     for (const dto of items) {
       const oi = itemMap.get(dto.orderItemId);
       if (!oi) {
@@ -3321,6 +4088,8 @@ export class OrdersService {
     let totalDeliveredQty = 0;
     let totalOrderedQty = 0;
     let newSubtotal = 0;
+    let newDiscountAmount = 0;
+    const previousTotalPayment = Number(order.totalPayment);
 
     await withDeadlockRetry(() =>
       this.ordersRepository.manager.transaction(async (em) => {
@@ -3329,7 +4098,9 @@ export class OrdersService {
           const undeliveredQty = oi.quantity - dto.deliveredQty;
           totalDeliveredQty += dto.deliveredQty;
           totalOrderedQty += oi.quantity;
-          newSubtotal += dto.deliveredQty * Number(oi.unitPrice);
+          const deliveredShare = oi.quantity > 0 ? dto.deliveredQty / oi.quantity : 0;
+          newSubtotal += this.getOrderItemGrossAmount(oi) * deliveredShare;
+          newDiscountAmount += Number(oi.discountAllocated ?? 0) * deliveredShare;
 
           oi.quantityDelivered = dto.deliveredQty;
           await em.save(OrderItemEntity, oi);
@@ -3415,26 +4186,71 @@ export class OrdersService {
           }
         }
 
+        if (totalDeliveredQty <= 0) {
+          throw new BadRequestException(
+            'Partial delivery cần có ít nhất một sản phẩm được giao.',
+          );
+        }
+
         // Cập nhật order: status + total
         const isFullyDelivered = totalDeliveredQty === totalOrderedQty;
         order.orderStatus = isFullyDelivered
           ? OrderStatus.DELIVERED
           : OrderStatus.PARTIAL_DELIVERED;
         order.totalQuantity = totalDeliveredQty;
-        // Recalc totalPayment = subtotal mới - discount + delivery
+        // Recalc totalPayment = gross delivered - allocated discount + delivery.
         const newTotalPayment =
           newSubtotal -
-          Number(order.discountAmount) +
+          newDiscountAmount +
           Number(order.deliveryCost);
-        order.subtotalAmount = newSubtotal.toFixed(2);
+        const shortDeliveryAdjustment = Math.max(
+          0,
+          previousTotalPayment - Math.max(0, newTotalPayment),
+        );
+        order.subtotalAmount = this.toMoney(newSubtotal);
+        order.discountAmount = this.toMoney(newDiscountAmount);
         order.totalPayment = Math.max(0, newTotalPayment).toFixed(2);
 
-        // COD: chỉ PAID nếu giao đủ
-        if (
-          isFullyDelivered &&
-          order.paymentMethod === PaymentMethod.COD
-        ) {
+        // COD thu theo phần giao thực tế, bao gồm trường hợp giao một phần.
+        if (order.paymentMethod === PaymentMethod.COD) {
           order.paymentStatus = PaymentStatus.PAID;
+        }
+
+        if (
+          shortDeliveryAdjustment > 0 &&
+          order.paymentMethod === PaymentMethod.CREDIT
+        ) {
+          await em
+            .getRepository(CustomerCreditLimitEntity)
+            .createQueryBuilder()
+            .update()
+            .set({
+              currentDebt: () =>
+                `GREATEST(0, current_debt - ${shortDeliveryAdjustment})`,
+            })
+            .where('user_id = :uid', { uid: order.userId })
+            .execute();
+        }
+
+        if (
+          shortDeliveryAdjustment > 0 &&
+          order.paymentStatus === PaymentStatus.PAID &&
+          this.isOnlinePaymentMethod(order.paymentMethod)
+        ) {
+          await em.save(
+            OrderRefundEntity,
+            em.create(OrderRefundEntity, {
+              orderId: order.orderId,
+              returnId: null,
+              reason: OrderRefundReason.SHORT_DELIVERY,
+              amount: this.toMoney(shortDeliveryAdjustment),
+              refundStatus: OrderRefundStatus.PENDING,
+              paymentProvider: order.paymentMethod,
+              manualReference: null,
+              createdBy: currentUser._id,
+              note: `Short delivery adjustment ${totalDeliveredQty}/${totalOrderedQty}`,
+            }),
+          );
         }
 
         await em.save(OrderEntity, order);
@@ -3447,7 +4263,7 @@ export class OrdersService {
             changedBy: currentUser._id,
             note:
               note ??
-              `Partial delivery: ${totalDeliveredQty}/${totalOrderedQty}`,
+              `Partial delivery: ${totalDeliveredQty}/${totalOrderedQty}; adjustment ${this.toMoney(shortDeliveryAdjustment)}`,
           }),
         );
       }),
@@ -3510,7 +4326,7 @@ export class OrdersService {
       if (decision === ReturnInspectionStatus.USABLE && product) {
         // Nhập lại kho chính
         const qtyBefore = product.quantityAvailable;
-        product.quantityAvailable += orderItem.quantity;
+        product.quantityAvailable += returnRequest.returnQuantity;
         await em.save(ProductEntity, product);
 
         // FIX CRITICAL: hoàn batch theo NET consumption history.
@@ -3522,7 +4338,7 @@ export class OrdersService {
           product.productId,
         );
         if (netMap.size > 0) {
-          let remaining = orderItem.quantity;
+          let remaining = returnRequest.returnQuantity;
           const sorted = Array.from(netMap.entries())
             .filter(([_, n]) => n > 0)
             .sort((a, b) => b[1] - a[1]);
@@ -3573,7 +4389,7 @@ export class OrdersService {
             batchCode: `RETURN-${returnRequest.returnId}`,
             mfgDate: null,
             expDate: product.expiredAt ?? null,
-            qtyReceived: orderItem.quantity,
+            qtyReceived: returnRequest.returnQuantity,
             unitCost: Number(product.avgCost ?? 0),
             note: `Return restock (legacy) — orderItem ${orderItem.orderItemId}`,
           });
@@ -3583,7 +4399,7 @@ export class OrdersService {
               productId: product.productId,
               performedBy: currentUser._id,
               transactionType: InventoryTransactionType.RETURN_IN,
-              quantityChange: orderItem.quantity,
+              quantityChange: returnRequest.returnQuantity,
               quantityBefore: qtyBefore,
               quantityAfter: product.quantityAvailable,
               referenceType: 'RETURN',
@@ -3597,7 +4413,7 @@ export class OrdersService {
         await this.syncDefaultWarehouseStock(
           em,
           product.productId,
-          orderItem.quantity,
+          returnRequest.returnQuantity,
         );
       } else if (decision === ReturnInspectionStatus.DAMAGED && product) {
         // Hỏng — KHÔNG nhập kho. Ghi DAMAGE inventory_transaction (loss).
@@ -3613,7 +4429,7 @@ export class OrdersService {
             referenceType: 'RETURN',
             referenceId: String(returnRequest.returnId),
             unitCostAtTime: product.avgCost ?? null,
-            note: note ?? `Return inspection: DAMAGED — written off ${orderItem.quantity} unit(s)`,
+            note: note ?? `Return inspection: DAMAGED — written off ${returnRequest.returnQuantity} unit(s)`,
             relatedOrderId: returnRequest.orderId,
           }),
         );

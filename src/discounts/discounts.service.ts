@@ -5,10 +5,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { CategoryEntity } from '../categories/entities/category.entity';
 import { ProductEntity } from '../products/entities/product.entity';
-import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { CreateDiscountDto } from './dto/create-discount.dto';
 import { QueryAvailableCouponsDto } from './dto/query-available-coupons.dto';
 import { UpdateDiscountDto } from './dto/update-discount.dto';
@@ -92,6 +91,10 @@ export class DiscountsService {
       createDiscountDto.discountValue,
       createDiscountDto.maxDiscountAmount,
     );
+    this.validateNonNegativeMoney(
+      createDiscountDto.minOrderValue ?? '0',
+      'Min order value',
+    );
     await this.validateDiscountTargets(createDiscountDto);
 
     // Approval logic: nếu giảm > 30% (PERCENT) hoặc > 1tr VND (FIXED) → cần duyệt
@@ -109,7 +112,7 @@ export class DiscountsService {
       expireDate: new Date(createDiscountDto.expireDate),
       userId: createDiscountDto.userId ?? null,
       discountDescription: createDiscountDto.discountDescription ?? null,
-      discountValue: createDiscountDto.discountValue,
+      discountValue: this.normalizeMoneyString(createDiscountDto.discountValue),
       // Nếu cần duyệt: tự động deactivate đến khi được duyệt
       isActive: needApproval ? false : (createDiscountDto.isActive ?? true),
       approvalStatus: needApproval
@@ -117,8 +120,13 @@ export class DiscountsService {
         : DiscountApprovalStatus.NOT_REQUIRED,
       usageLimit: createDiscountDto.usageLimit ?? null,
       usedCount: 0,
-      minOrderValue: createDiscountDto.minOrderValue ?? '0',
-      maxDiscountAmount: createDiscountDto.maxDiscountAmount ?? null,
+      minOrderValue: this.normalizeMoneyString(
+        createDiscountDto.minOrderValue ?? '0',
+      ),
+      maxDiscountAmount:
+        createDiscountDto.maxDiscountAmount !== undefined
+          ? this.normalizeMoneyString(createDiscountDto.maxDiscountAmount)
+          : null,
     });
 
     const saved = await this.discountsRepository.save(discount);
@@ -203,6 +211,12 @@ export class DiscountsService {
         ? updateDiscountDto.maxDiscountAmount
         : discount.maxDiscountAmount,
     );
+    if (updateDiscountDto.minOrderValue !== undefined) {
+      this.validateNonNegativeMoney(
+        updateDiscountDto.minOrderValue,
+        'Min order value',
+      );
+    }
     await this.validateDiscountTargets({
       appliesTo: updateDiscountDto.appliesTo ?? discount.appliesTo,
       categoryIds: updateDiscountDto.categoryIds,
@@ -223,19 +237,39 @@ export class DiscountsService {
         : discount.userId;
     discount.discountDescription =
       updateDiscountDto.discountDescription ?? discount.discountDescription;
+    const valueChanged =
+      updateDiscountDto.discountType !== undefined ||
+      updateDiscountDto.discountValue !== undefined;
     discount.discountValue =
-      updateDiscountDto.discountValue ?? discount.discountValue;
+      updateDiscountDto.discountValue !== undefined
+        ? this.normalizeMoneyString(updateDiscountDto.discountValue)
+        : discount.discountValue;
     discount.isActive = updateDiscountDto.isActive ?? discount.isActive;
     discount.usageLimit =
       updateDiscountDto.usageLimit !== undefined
         ? updateDiscountDto.usageLimit
         : discount.usageLimit;
     discount.minOrderValue =
-      updateDiscountDto.minOrderValue ?? discount.minOrderValue;
+      updateDiscountDto.minOrderValue !== undefined
+        ? this.normalizeMoneyString(updateDiscountDto.minOrderValue)
+        : discount.minOrderValue;
     discount.maxDiscountAmount =
       updateDiscountDto.maxDiscountAmount !== undefined
-        ? updateDiscountDto.maxDiscountAmount || null
+        ? updateDiscountDto.maxDiscountAmount
+          ? this.normalizeMoneyString(updateDiscountDto.maxDiscountAmount)
+          : null
         : discount.maxDiscountAmount;
+
+    if (
+      valueChanged &&
+      this.discountNeedsApproval(discount.discountType, discount.discountValue)
+    ) {
+      discount.approvalStatus = DiscountApprovalStatus.PENDING_APPROVAL;
+      discount.approvedBy = null;
+      discount.approvedAt = null;
+      discount.approvalNote = null;
+      discount.isActive = false;
+    }
 
     if (
       discount.usageLimit !== null &&
@@ -258,6 +292,16 @@ export class DiscountsService {
 
   async remove(discountId: string) {
     const discount = await this.findOne(discountId);
+    const usageCount = await this.couponUsageRepository.countBy({ discountId });
+    if (usageCount > 0) {
+      discount.isActive = false;
+      await this.discountsRepository.save(discount);
+      return {
+        success: true,
+        archived: true,
+        message: 'Discount has usage history and was deactivated instead',
+      };
+    }
     await this.discountsRepository.remove(discount);
     return { success: true };
   }
@@ -266,6 +310,11 @@ export class DiscountsService {
     const discount = await this.discountsRepository.findOneBy({ discountId });
     if (!discount) {
       throw new NotFoundException('Discount not found');
+    }
+    if (!discount.isActive && !this.isDiscountApprovedForUse(discount)) {
+      throw new BadRequestException(
+        'Discount must be approved before it can be activated',
+      );
     }
     discount.isActive = !discount.isActive;
     await this.discountsRepository.save(discount);
@@ -301,7 +350,7 @@ export class DiscountsService {
     const now = new Date();
     const orderValue = Number(dto.orderValue ?? 0);
     const discounts = await this.discountsRepository.find({
-      where: { appliesTo: DiscountApplyTarget.ORDER, isActive: true },
+      where: { isActive: true },
       order: { expireDate: 'ASC', createdAt: 'DESC' },
     });
 
@@ -345,14 +394,24 @@ export class DiscountsService {
       savedRows.map((saved) => saved.discountId),
     );
 
+    const eligibleSubtotals = await this.calculateEligibleSubtotals(
+      visibleDiscounts,
+      dto.items,
+      dto.productIds,
+      orderValue,
+    );
+
     return visibleDiscounts.map((discount) => {
       const minOrderValue = Number(discount.minOrderValue);
       const isUsed = usedDiscountIds.has(discount.discountId);
-      const missingAmount = Math.max(0, minOrderValue - orderValue);
-      const eligible = !isUsed && missingAmount <= 0;
+      const eligibleSubtotal =
+        eligibleSubtotals.get(discount.discountId) ?? orderValue;
+      const appliesToCart = eligibleSubtotal > 0;
+      const missingAmount = Math.max(0, minOrderValue - eligibleSubtotal);
+      const eligible = !isUsed && appliesToCart && missingAmount <= 0;
       const discountAmount =
-        eligible && orderValue > 0
-          ? this.calculateDiscountAmount(discount, orderValue)
+        eligible && eligibleSubtotal > 0
+          ? this.calculateDiscountAmount(discount, eligibleSubtotal)
           : 0;
 
       return {
@@ -386,6 +445,10 @@ export class DiscountsService {
       throw new NotFoundException('Discount code not found or inactive');
     }
 
+    if (!this.isDiscountApprovedForUse(discount)) {
+      throw new BadRequestException('Discount code is not approved for use');
+    }
+
     const now = new Date();
     if (discount.startAt.getTime() > now.getTime()) {
       throw new BadRequestException('Discount code is not yet active');
@@ -406,7 +469,23 @@ export class DiscountsService {
     }
 
     const orderValue = Number(dto.orderValue);
-    if (orderValue < Number(discount.minOrderValue)) {
+    const eligibleSubtotal =
+      (
+        await this.calculateEligibleSubtotals(
+          [discount],
+          dto.items,
+          dto.productIds,
+          orderValue,
+        )
+      ).get(discount.discountId) ?? orderValue;
+
+    if (eligibleSubtotal <= 0) {
+      throw new BadRequestException(
+        'No products in cart qualify for this discount',
+      );
+    }
+
+    if (eligibleSubtotal < Number(discount.minOrderValue)) {
       throw new BadRequestException(
         `Minimum order value is ${discount.minOrderValue}`,
       );
@@ -423,26 +502,10 @@ export class DiscountsService {
       );
     }
 
-    if (discount.appliesTo === DiscountApplyTarget.PRODUCT) {
-      if (!dto.productIds || dto.productIds.length === 0) {
-        throw new BadRequestException(
-          'No applicable products in cart for this discount',
-        );
-      }
-      const applicableProducts = await this.discountProductsRepository.findBy(
-        dto.productIds.map((productId) => ({
-          discountId: discount.discountId,
-          productId,
-        })),
-      );
-      if (applicableProducts.length === 0) {
-        throw new BadRequestException(
-          'No products in cart qualify for this discount',
-        );
-      }
-    }
-
-    const discountAmount = this.calculateDiscountAmount(discount, orderValue);
+    const discountAmount = this.calculateDiscountAmount(
+      discount,
+      eligibleSubtotal,
+    );
     const finalPrice = Math.max(0, orderValue - discountAmount);
 
     return {
@@ -456,39 +519,6 @@ export class DiscountsService {
       finalPrice: finalPrice.toFixed(2),
       appliesTo: discount.appliesTo,
     };
-  }
-
-  async applyCoupon(userId: string, dto: ApplyCouponDto) {
-    const code = this.normalizeDiscountCode(dto.discountCode);
-    const discount = await this.discountsRepository.findOneBy({
-      discountCode: code,
-      isActive: true,
-    });
-
-    if (!discount) {
-      throw new NotFoundException('Discount code not found');
-    }
-
-    const alreadyUsed = await this.couponUsageRepository.findOneBy({
-      discountId: discount.discountId,
-      userId,
-      orderId: dto.orderId,
-    });
-    if (alreadyUsed) {
-      throw new ConflictException('Coupon already applied to this order');
-    }
-
-    const usage = this.couponUsageRepository.create({
-      discountId: discount.discountId,
-      userId,
-      orderId: dto.orderId,
-    });
-    await this.couponUsageRepository.save(usage);
-
-    discount.usedCount += 1;
-    await this.discountsRepository.save(discount);
-
-    return { success: true, usedCount: discount.usedCount };
   }
 
   async getDiscountStats(discountId: string) {
@@ -606,7 +636,8 @@ export class DiscountsService {
       (d) =>
         d.isActive &&
         d.startAt.getTime() <= now.getTime() &&
-        d.expireDate.getTime() >= now.getTime(),
+        d.expireDate.getTime() >= now.getTime() &&
+        this.isDiscountApprovedForUse(d),
     );
   }
 
@@ -627,7 +658,8 @@ export class DiscountsService {
       (d) =>
         d.isActive &&
         d.startAt.getTime() <= now.getTime() &&
-        d.expireDate.getTime() >= now.getTime(),
+        d.expireDate.getTime() >= now.getTime() &&
+        this.isDiscountApprovedForUse(d),
     );
   }
 
@@ -698,6 +730,94 @@ export class DiscountsService {
     return Math.min(capped, orderValue);
   }
 
+  private async calculateEligibleSubtotals(
+    discounts: DiscountEntity[],
+    items:
+      | Array<{ productId: string; quantity: string; unitPrice: string }>
+      | undefined,
+    productIds: string[] | undefined,
+    orderValue: number,
+  ) {
+    const result = new Map<string, number>();
+    const lineItems =
+      items?.map((item) => ({
+        productId: item.productId,
+        quantity: Math.max(0, Number(item.quantity)),
+        unitPrice: Math.max(0, Number(item.unitPrice)),
+      })) ?? [];
+    const ids = [
+      ...new Set([
+        ...lineItems.map((item) => item.productId),
+        ...(productIds ?? []),
+      ]),
+    ];
+
+    const products = ids.length
+      ? await this.productsRepository.find({
+          where: { productId: In(ids) },
+          select: ['productId', 'categoryId'],
+        })
+      : [];
+    const categoryByProductId = new Map(
+      products.map((product) => [product.productId, product.categoryId]),
+    );
+
+    for (const discount of discounts) {
+      if (discount.appliesTo === DiscountApplyTarget.ORDER) {
+        result.set(discount.discountId, orderValue);
+        continue;
+      }
+
+      if (discount.appliesTo === DiscountApplyTarget.PRODUCT) {
+        const mappings = await this.discountProductsRepository.find({
+          where: { discountId: discount.discountId },
+        });
+        const applicableProductIds = new Set(
+          mappings.map((mapping) => mapping.productId),
+        );
+        const hasApplicableProduct = ids.some((id) =>
+          applicableProductIds.has(id),
+        );
+        const subtotal = lineItems.length
+          ? lineItems
+              .filter((line) => applicableProductIds.has(line.productId))
+              .reduce(
+                (sum, line) => sum + line.quantity * line.unitPrice,
+                0,
+              )
+          : hasApplicableProduct
+            ? orderValue
+            : 0;
+        result.set(discount.discountId, subtotal);
+        continue;
+      }
+
+      const mappings = await this.discountCategoriesRepository.find({
+        where: { discountId: discount.discountId },
+      });
+      const applicableCategoryIds = new Set(
+        mappings.map((mapping) => String(mapping.categoryId)),
+      );
+      const hasApplicableCategory = ids.some((id) =>
+        applicableCategoryIds.has(String(categoryByProductId.get(id))),
+      );
+      const subtotal = lineItems.length
+        ? lineItems
+            .filter((line) =>
+              applicableCategoryIds.has(
+                String(categoryByProductId.get(line.productId)),
+              ),
+            )
+            .reduce((sum, line) => sum + line.quantity * line.unitPrice, 0)
+        : hasApplicableCategory
+          ? orderValue
+          : 0;
+      result.set(discount.discountId, subtotal);
+    }
+
+    return result;
+  }
+
   private async getDiscountStatsInternal(discountId: string) {
     const totalUsage = await this.couponUsageRepository.countBy({ discountId });
     const uniqueUsers = await this.couponUsageRepository
@@ -714,6 +834,14 @@ export class DiscountsService {
 
   private normalizeDiscountCode(value: string) {
     return value.trim().toUpperCase();
+  }
+
+  private normalizeMoneyString(value: string | number) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      throw new BadRequestException('Money value must be numeric');
+    }
+    return num.toFixed(2);
   }
 
   private async ensureDiscountCodeUnique(
@@ -746,6 +874,13 @@ export class DiscountsService {
       if (isNaN(numMax) || numMax <= 0) {
         throw new BadRequestException('Max discount amount must be greater than 0');
       }
+    }
+  }
+
+  private validateNonNegativeMoney(value: string | number, label: string) {
+    const numValue = Number(value);
+    if (isNaN(numValue) || numValue < 0) {
+      throw new BadRequestException(`${label} must be greater than or equal 0`);
     }
   }
 

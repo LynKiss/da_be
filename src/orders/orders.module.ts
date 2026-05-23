@@ -27,6 +27,7 @@ import { OrderItemEntity } from './entities/order-item.entity';
 import { OrderTrackingEntity } from './entities/order-tracking.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
 import { OrderEntity } from './entities/order.entity';
+import { OrderRefundEntity } from './entities/order-refund.entity';
 import { PaymentTransactionEntity } from './entities/payment-transaction.entity';
 import { ReturnEntity } from './entities/return.entity';
 import { ShippingAddressEntity } from './entities/shipping-address.entity';
@@ -50,6 +51,7 @@ import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-cr
       DeliveryMethodAreaEntity,
       ShippingAddressEntity,
       OrderEntity,
+      OrderRefundEntity,
       OrderTrackingEntity,
       OrderItemEntity,
       OrderStatusHistoryEntity,

@@ -18,6 +18,7 @@ import { IS_PUBLIC_KEY, PERMISSIONS_KEY } from '../src/decorator/customize';
 import { DiscountsController } from '../src/discounts/discounts.controller';
 import { DiscountsService } from '../src/discounts/discounts.service';
 import { OrdersController } from '../src/orders/orders.controller';
+import { PaymentsController } from '../src/orders/payments.controller';
 import { PaymentMethod } from '../src/orders/entities/order.entity';
 import { OrdersService } from '../src/orders/orders.service';
 import { WishlistController } from '../src/products/wishlist.controller';
@@ -85,6 +86,11 @@ class TestAuthGuard implements CanActivate {
             key: 'manage_discounts',
             name: 'Manage Discounts',
           },
+          {
+            _id: 'perm-4',
+            key: 'manage_payments',
+            name: 'Manage Payments',
+          },
         ],
       };
     }
@@ -150,6 +156,9 @@ describe('HTTP flows (e2e)', () => {
     findOrderDetail: jest.fn(),
     cancelOrder: jest.fn(),
     updateOrderStatus: jest.fn(),
+    findAdminRefunds: jest.fn(),
+    createCancelPaidOrderRefund: jest.fn(),
+    updateAdminRefundStatus: jest.fn(),
   };
   const cartsService = {
     getMyCart: jest.fn(),
@@ -180,6 +189,7 @@ describe('HTTP flows (e2e)', () => {
       controllers: [
         UsersController,
         OrdersController,
+        PaymentsController,
         CartsController,
         WishlistController,
         DiscountsController,
@@ -393,11 +403,43 @@ describe('HTTP flows (e2e)', () => {
             deliveryId: '1',
             paymentMethod: PaymentMethod.COD,
           }),
+          undefined,
         );
         expect(body.statusCode).toBe(201);
         expect(body.message).toBe('Create order');
         expect(body.data.id).toBe('order-1');
         expect(body.data.status).toBe('pending');
+      });
+  });
+
+  it('forbids normal users from reading the admin refund queue', async () => {
+    await request(app.getHttpServer())
+      .get('/api/v1/payments/admin/refunds')
+      .set('Authorization', 'Bearer user-token')
+      .expect(403);
+  });
+
+  it('lets payment admins create a paid cancellation refund request', async () => {
+    ordersService.createCancelPaidOrderRefund.mockResolvedValue({
+      refundId: 'refund-1',
+      orderId: 'order-paid-1',
+      refundStatus: 'pending',
+      reason: 'cancel_paid_order',
+      amount: '199000.00',
+    });
+
+    await request(app.getHttpServer())
+      .post('/api/v1/payments/admin/refunds/cancel-paid-order')
+      .set('Authorization', 'Bearer admin-token')
+      .send({ orderId: 'order-paid-1', note: 'Khach doi huy' })
+      .expect(201)
+      .expect((response: { body: unknown }) => {
+        const body = getWrappedBody<{ refundId: string }>(response);
+        expect(ordersService.createCancelPaidOrderRefund).toHaveBeenCalledWith(
+          expect.objectContaining({ _id: 'admin-1' }),
+          expect.objectContaining({ orderId: 'order-paid-1' }),
+        );
+        expect(body.data.refundId).toBe('refund-1');
       });
   });
 

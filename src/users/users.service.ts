@@ -414,6 +414,11 @@ export class UsersService {
       fullName: order.fullName,
       phone: order.phone,
       address: order.address,
+      fulfillmentType: order.fulfillmentType,
+      deliveryMethodName: order.deliveryMethodNameSnapshot,
+      freeShippingApplied: order.freeShippingApplied,
+      pickupContactName: order.pickupContactName,
+      pickupContactPhone: order.pickupContactPhone,
     };
   }
 

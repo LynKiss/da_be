@@ -332,6 +332,12 @@ export class ProductsService {
       throw new BadRequestException('Sale price cannot exceed regular price');
     }
 
+    if ((createProductDto.quantityAvailable ?? 0) > 0) {
+      throw new BadRequestException(
+        'Tồn đầu kỳ không nhập qua form sản phẩm. Hãy tạo sản phẩm với tồn 0 rồi nhập kho để sinh batch.',
+      );
+    }
+
     const product = this.productsRepository.create({
       productId: createProductDto.productId ?? randomUUID(),
       productName: createProductDto.productName,
@@ -343,7 +349,7 @@ export class ProductsService {
       originId: createProductDto.originId ?? null,
       productPrice: createProductDto.productPrice,
       productPriceSale: createProductDto.productPriceSale ?? null,
-      quantityAvailable: createProductDto.quantityAvailable ?? 0,
+      quantityAvailable: 0,
       description: createProductDto.description ?? null,
       ratingAverage: '0',
       ratingCount: 0,
@@ -383,6 +389,15 @@ export class ProductsService {
 
     await this.ensureUniqueFields(updateProductDto, product.productId);
 
+    if (
+      updateProductDto.quantityAvailable !== undefined &&
+      updateProductDto.quantityAvailable !== product.quantityAvailable
+    ) {
+      throw new BadRequestException(
+        'Không cập nhật tồn kho trực tiếp từ form sản phẩm. Hãy dùng nghiệp vụ kho để có batch và sổ kho.',
+      );
+    }
+
     const effectivePrice = updateProductDto.productPrice ?? product.productPrice;
     const effectiveSalePrice = updateProductDto.productPriceSale !== undefined
       ? updateProductDto.productPriceSale
@@ -415,8 +430,6 @@ export class ProductsService {
       updateProductDto.productPriceSale !== undefined
         ? (updateProductDto.productPriceSale ?? null)
         : product.productPriceSale;
-    product.quantityAvailable =
-      updateProductDto.quantityAvailable ?? product.quantityAvailable;
     product.description =
       updateProductDto.description !== undefined
         ? (updateProductDto.description ?? null)
@@ -680,12 +693,22 @@ export class ProductsService {
     await this.dataSource.transaction(async (em) => {
       product.quantityAvailable += importInventoryDto.quantity;
       await em.save(ProductEntity, product);
+      const batch = await this.batchService.createInTx(em, {
+        productId: product.productId,
+        batchCode: `MANUAL-IN-${Date.now()}-${product.productId.slice(0, 6)}`,
+        qtyReceived: importInventoryDto.quantity,
+        unitCost: Number(product.avgCost ?? product.costPrice ?? 0),
+        expDate: product.expiredAt ?? null,
+        note: importInventoryDto.note ?? 'Manual inventory import',
+      });
 
       const tx = em.create(InventoryTransactionEntity, {
         productId: product.productId,
         performedBy,
         transactionType: InventoryTransactionType.IMPORT,
         quantityChange: importInventoryDto.quantity,
+        batchId: batch.batchId,
+        unitCostAtTime: batch.unitCost,
         note: importInventoryDto.note ?? 'Import inventory by admin',
         relatedOrderId: null,
       });
@@ -738,19 +761,87 @@ export class ProductsService {
     let transactionId: string;
     await this.dataSource.transaction(async (em) => {
       await em.save(ProductEntity, product);
+      let batchId: string | null = null;
+      let unitCostAtTime: string | null = null;
+      let adjustmentBatchLines:
+        | Array<{
+            batchId: string;
+            batchCode: string;
+            qty: number;
+            unitCost: number;
+          }>
+        | null = null;
+      if (quantityChange > 0) {
+        const batch = await this.batchService.createInTx(em, {
+          productId: product.productId,
+          batchCode: `MANUAL-ADJ-${Date.now()}-${product.productId.slice(0, 6)}`,
+          qtyReceived: quantityChange,
+          unitCost: Number(product.avgCost ?? product.costPrice ?? 0),
+          expDate: product.expiredAt ?? null,
+          note:
+            adjustInventoryDto.note ??
+            `Inventory adjustment ${adjustInventoryDto.mode}`,
+        });
+        batchId = batch.batchId;
+        unitCostAtTime = batch.unitCost;
+      } else if (quantityChange < 0) {
+        const pick = await this.batchService
+          .consumeInTx(em, product.productId, Math.abs(quantityChange))
+          .catch(async (err) => {
+            const hasAnyBatch = await em
+              .createQueryBuilder()
+              .select('1')
+              .from('product_batches', 'b')
+              .where('b.product_id = :pid', { pid: product.productId })
+              .limit(1)
+              .getRawOne();
+            if (hasAnyBatch) throw err;
+            return null;
+          });
+        batchId = pick?.lines.length === 1 ? pick.lines[0].batchId : null;
+        unitCostAtTime =
+          pick?.lines.length === 1 ? pick.lines[0].unitCost.toFixed(4) : null;
+        adjustmentBatchLines = pick?.lines ?? null;
+      }
 
-      const tx = em.create(InventoryTransactionEntity, {
-        productId: product.productId,
-        performedBy,
-        transactionType: InventoryTransactionType.ADJUSTMENT,
-        quantityChange,
-        note:
-          adjustInventoryDto.note ??
-          `Adjustment mode: ${adjustInventoryDto.mode}`,
-        relatedOrderId: null,
-      });
-      const saved = await em.save(InventoryTransactionEntity, tx);
-      transactionId = saved.transactionId;
+      if (adjustmentBatchLines?.length) {
+        let runningBefore = previousQuantity;
+        for (const line of adjustmentBatchLines) {
+          const tx = em.create(InventoryTransactionEntity, {
+            productId: product.productId,
+            performedBy,
+            transactionType: InventoryTransactionType.ADJUSTMENT,
+            quantityChange: -line.qty,
+            quantityBefore: runningBefore,
+            quantityAfter: runningBefore - line.qty,
+            batchId: line.batchId,
+            unitCostAtTime: line.unitCost.toFixed(4),
+            note:
+              `${adjustInventoryDto.note ?? `Adjustment mode: ${adjustInventoryDto.mode}`} - batch ${line.batchCode}`,
+            relatedOrderId: null,
+          });
+          const saved = await em.save(InventoryTransactionEntity, tx);
+          transactionId = saved.transactionId;
+          runningBefore -= line.qty;
+        }
+      } else {
+        const tx = em.create(InventoryTransactionEntity, {
+          productId: product.productId,
+          performedBy,
+          transactionType: InventoryTransactionType.ADJUSTMENT,
+          quantityChange,
+          quantityBefore: previousQuantity,
+          quantityAfter: product.quantityAvailable,
+          batchId,
+          unitCostAtTime,
+          note:
+            adjustInventoryDto.note ??
+            `Adjustment mode: ${adjustInventoryDto.mode}`,
+          relatedOrderId: null,
+        });
+        const saved = await em.save(InventoryTransactionEntity, tx);
+        transactionId = saved.transactionId;
+      }
 
       await this.syncDefaultWarehouseStock(
         em,
@@ -866,24 +957,42 @@ export class ProductsService {
       throw new NotFoundException('Product not found');
     }
 
-    product.quantityAvailable += dto.quantity;
-
     let transactionId: string;
     await this.dataSource.transaction(async (em) => {
-      await em.save(ProductEntity, product);
+      const lockedProduct = await em.findOne(ProductEntity, {
+        where: { productId: dto.productId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedProduct) throw new NotFoundException('Product not found');
+      const qtyBefore = lockedProduct.quantityAvailable;
+      lockedProduct.quantityAvailable += dto.quantity;
+      await em.save(ProductEntity, lockedProduct);
+      const batch = await this.batchService.createInTx(em, {
+        productId: lockedProduct.productId,
+        batchCode: `MANUAL-RETURN-${Date.now()}-${lockedProduct.productId.slice(0, 6)}`,
+        qtyReceived: dto.quantity,
+        unitCost: Number(lockedProduct.avgCost ?? lockedProduct.costPrice ?? 0),
+        expDate: lockedProduct.expiredAt ?? null,
+        note: dto.note ?? 'Manual return goods recorded',
+      });
 
       const tx = em.create(InventoryTransactionEntity, {
-        productId: product.productId,
+        productId: lockedProduct.productId,
         performedBy,
         transactionType: InventoryTransactionType.RETURN_IN,
         quantityChange: dto.quantity,
+        quantityBefore: qtyBefore,
+        quantityAfter: lockedProduct.quantityAvailable,
+        batchId: batch.batchId,
+        unitCostAtTime: batch.unitCost,
         note: dto.note ?? 'Return goods recorded',
         relatedOrderId: dto.relatedOrderId ?? null,
       });
       const saved = await em.save(InventoryTransactionEntity, tx);
       transactionId = saved.transactionId;
 
-      await this.syncDefaultWarehouseStock(em, product.productId, dto.quantity);
+      await this.syncDefaultWarehouseStock(em, lockedProduct.productId, dto.quantity);
+      product.quantityAvailable = lockedProduct.quantityAvailable;
     });
 
     return {

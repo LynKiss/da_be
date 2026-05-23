@@ -16,7 +16,6 @@ import {
   User,
 } from '../decorator/customize';
 import type { IUser } from '../users/users.interface';
-import { ApplyCouponDto } from './dto/apply-coupon.dto';
 import { CreateDiscountDto } from './dto/create-discount.dto';
 import { QueryAvailableCouponsDto } from './dto/query-available-coupons.dto';
 import { UpdateDiscountDto } from './dto/update-discount.dto';
@@ -57,13 +56,6 @@ export class DiscountsController {
   @ResponseMessage('Validate coupon code')
   validateCoupon(@User() user: IUser, @Body() dto: ValidateCouponDto) {
     return this.discountsService.validateCoupon(user._id, dto);
-  }
-
-  @Post('apply')
-  @SkipCheckPermission()
-  @ResponseMessage('Apply coupon to order')
-  applyCoupon(@User() user: IUser, @Body() dto: ApplyCouponDto) {
-    return this.discountsService.applyCoupon(user._id, dto);
   }
 
   @Post('available-for-cart')

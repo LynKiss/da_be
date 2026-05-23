@@ -4,6 +4,7 @@ import {
   IsDateString,
   IsEnum,
   IsInt,
+  IsNumberString,
   IsOptional,
   IsArray,
   IsString,
@@ -44,7 +45,7 @@ export class CreateDiscountDto {
   @IsString()
   discountDescription?: string;
 
-  @IsString()
+  @IsNumberString()
   discountValue: string;
 
   @IsOptional()
@@ -57,11 +58,11 @@ export class CreateDiscountDto {
   usageLimit?: number;
 
   @IsOptional()
-  @IsString()
+  @IsNumberString()
   minOrderValue?: string;
 
   @IsOptional()
-  @IsString()
+  @IsNumberString()
   maxDiscountAmount?: string;
 
   @ValidateIf(

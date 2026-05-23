@@ -5,7 +5,20 @@ import {
   IsOptional,
   IsString,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
+
+export class CouponCartLineDto {
+  @IsString()
+  productId: string;
+
+  @IsNumberString()
+  quantity: string;
+
+  @IsNumberString()
+  unitPrice: string;
+}
 
 export class ValidateCouponDto {
   @IsString()
@@ -20,4 +33,10 @@ export class ValidateCouponDto {
   @ArrayUnique()
   @IsString({ each: true })
   productIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => CouponCartLineDto)
+  items?: CouponCartLineDto[];
 }

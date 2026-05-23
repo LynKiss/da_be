@@ -6,8 +6,10 @@ import {
   IsEmail,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
   ValidateNested,
@@ -26,10 +28,14 @@ export class GuestOrderItemDto {
 
 export class GuestShippingDto {
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(150)
   recipientName: string;
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(20)
   phone: string;
 
@@ -38,6 +44,8 @@ export class GuestShippingDto {
   email?: string;
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(255)
   addressLine: string;
 
@@ -52,6 +60,8 @@ export class GuestShippingDto {
   district?: string;
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(100)
   province: string;
 }

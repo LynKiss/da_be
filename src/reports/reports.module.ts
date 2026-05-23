@@ -7,6 +7,7 @@ import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderEntity } from '../orders/entities/order.entity';
+import { OrderRefundEntity } from '../orders/entities/order-refund.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import { PermissionsModule } from '../permissions/permissions.module';
 import { PurchaseOrderEntity } from '../procurement/entities/purchase-order.entity';
@@ -29,6 +30,7 @@ import { ReportsService } from './reports.service';
     RolesModule,
     TypeOrmModule.forFeature([
       OrderEntity,
+      OrderRefundEntity,
       OrderItemEntity,
       ProductEntity,
       UserEntity,

@@ -234,27 +234,64 @@ export class ProcurementService {
         for (const item of items) {
           const product = productMap.get(item.productId)!;
           const qtyBefore = product.quantityAvailable;
+          const batchPick = await this.batchService
+            .consumeInTx(em, item.productId, item.quantity)
+            .catch(async (err) => {
+              const hasAnyBatch = await em
+                .createQueryBuilder()
+                .select('1')
+                .from('product_batches', 'b')
+                .where('b.product_id = :pid', { pid: item.productId })
+                .limit(1)
+                .getRawOne();
+              if (hasAnyBatch) throw err;
+              return null;
+            });
           product.quantityAvailable -= item.quantity;
           product.quantityReserved =
             (product.quantityReserved ?? 0) + item.quantity;
           await em.save(ProductEntity, product);
 
-          await em.save(
-            InventoryTransactionEntity,
-            em.create(InventoryTransactionEntity, {
-              productId: item.productId,
-              performedBy: null,
-              transactionType: InventoryTransactionType.EXPORT,
-              quantityChange: -item.quantity,
-              quantityBefore: qtyBefore,
-              quantityAfter: product.quantityAvailable,
-              referenceType: 'ORDER',
-              referenceId: order.orderId,
-              unitCostAtTime: product.avgCost ?? null,
-              note: 'Auto-fulfill backorder by GR confirmation',
-              relatedOrderId: order.orderId,
-            }),
-          );
+          if (batchPick?.success) {
+            let runningBefore = qtyBefore;
+            for (const line of batchPick.lines) {
+              await em.save(
+                InventoryTransactionEntity,
+                em.create(InventoryTransactionEntity, {
+                  productId: item.productId,
+                  performedBy: null,
+                  transactionType: InventoryTransactionType.EXPORT,
+                  quantityChange: -line.qty,
+                  quantityBefore: runningBefore,
+                  quantityAfter: runningBefore - line.qty,
+                  referenceType: 'ORDER',
+                  referenceId: order.orderId,
+                  batchId: line.batchId,
+                  unitCostAtTime: line.unitCost.toFixed(4),
+                  note: `Auto-fulfill backorder by GR confirmation - batch ${line.batchCode}`,
+                  relatedOrderId: order.orderId,
+                }),
+              );
+              runningBefore -= line.qty;
+            }
+          } else {
+            await em.save(
+              InventoryTransactionEntity,
+              em.create(InventoryTransactionEntity, {
+                productId: item.productId,
+                performedBy: null,
+                transactionType: InventoryTransactionType.EXPORT,
+                quantityChange: -item.quantity,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                referenceType: 'ORDER',
+                referenceId: order.orderId,
+                unitCostAtTime: product.avgCost ?? null,
+                note: 'Auto-fulfill backorder by GR confirmation (legacy - no batch)',
+                relatedOrderId: order.orderId,
+              }),
+            );
+          }
         }
 
         order.orderStatus = OrderStatus.PENDING;
@@ -805,23 +842,65 @@ export class ProcurementService {
         if (!product) continue;
 
         const qtyBefore = product.quantityAvailable;
+        if (item.qtyReturned > qtyBefore) {
+          throw new BadRequestException(
+            `Tồn kho không đủ để trả NCC cho sản phẩm ${item.productId}`,
+          );
+        }
+        const batchPick = await this.batchService
+          .consumeInTx(em, product.productId, item.qtyReturned)
+          .catch(async (err) => {
+            const hasAnyBatch = await em
+              .createQueryBuilder()
+              .select('1')
+              .from('product_batches', 'b')
+              .where('b.product_id = :pid', { pid: product.productId })
+              .limit(1)
+              .getRawOne();
+            if (hasAnyBatch) throw err;
+            return null;
+          });
         product.quantityAvailable = Math.max(0, product.quantityAvailable - item.qtyReturned);
         const qtyAfter = product.quantityAvailable;
         await em.save(ProductEntity, product);
 
-        const tx = em.create(InventoryTransactionEntity, {
-          productId: item.productId,
-          performedBy: performer?.userId ?? null,
-          transactionType: InventoryTransactionType.RETURN_OUT,
-          quantityChange: -item.qtyReturned,
-          quantityBefore: qtyBefore,
-          quantityAfter: qtyAfter,
-          referenceType: 'SR',
-          referenceId: sr.srId,
-          note: `Trả hàng NCC từ phiếu ${sr.srCode} — ${item.reason ?? ''}`,
-          relatedOrderId: sr.srId,
-        });
-        await em.save(InventoryTransactionEntity, tx);
+        if (batchPick?.success) {
+          let runningBefore = qtyBefore;
+          for (const line of batchPick.lines) {
+            await em.save(
+              InventoryTransactionEntity,
+              em.create(InventoryTransactionEntity, {
+                productId: item.productId,
+                performedBy: performer?.userId ?? null,
+                transactionType: InventoryTransactionType.RETURN_OUT,
+                quantityChange: -line.qty,
+                quantityBefore: runningBefore,
+                quantityAfter: runningBefore - line.qty,
+                referenceType: 'SR',
+                referenceId: sr.srId,
+                batchId: line.batchId,
+                unitCostAtTime: line.unitCost.toFixed(4),
+                note: `Trả hàng NCC từ phiếu ${sr.srCode} - lô ${line.batchCode} - ${item.reason ?? ''}`,
+                relatedOrderId: sr.srId,
+              }),
+            );
+            runningBefore -= line.qty;
+          }
+        } else {
+          const tx = em.create(InventoryTransactionEntity, {
+            productId: item.productId,
+            performedBy: performer?.userId ?? null,
+            transactionType: InventoryTransactionType.RETURN_OUT,
+            quantityChange: -item.qtyReturned,
+            quantityBefore: qtyBefore,
+            quantityAfter: qtyAfter,
+            referenceType: 'SR',
+            referenceId: sr.srId,
+            note: `Trả hàng NCC từ phiếu ${sr.srCode} - ${item.reason ?? ''} (legacy - no batch)`,
+            relatedOrderId: sr.srId,
+          });
+          await em.save(InventoryTransactionEntity, tx);
+        }
 
         // Trừ warehouse_stock kho mặc định
         if (defaultWarehouse) {

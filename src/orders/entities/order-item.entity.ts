@@ -51,6 +51,33 @@ export class OrderItemEntity {
   })
   lineTotal: string;
 
+  @Column({
+    name: 'gross_line_total',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    default: '0.00',
+  })
+  grossLineTotal: string;
+
+  @Column({
+    name: 'discount_allocated',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    default: '0.00',
+  })
+  discountAllocated: string;
+
+  @Column({
+    name: 'net_line_total',
+    type: 'decimal',
+    precision: 15,
+    scale: 2,
+    default: '0.00',
+  })
+  netLineTotal: string;
+
   @CreateDateColumn({ name: 'created_at', type: 'datetime' })
   createdAt: Date;
 

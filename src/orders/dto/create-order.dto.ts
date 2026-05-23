@@ -2,8 +2,10 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
+  IsNotEmpty,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   ValidateNested,
 } from 'class-validator';
@@ -11,10 +13,14 @@ import { PaymentMethod } from '../entities/order.entity';
 
 export class PickupContactDto {
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(150)
   recipientName: string;
 
   @IsString()
+  @IsNotEmpty()
+  @Matches(/\S/)
   @MaxLength(20)
   phone: string;
 }

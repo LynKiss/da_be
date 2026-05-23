@@ -2,10 +2,17 @@ import {
   Column,
   CreateDateColumn,
   Entity,
+  Index,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 
 @Entity({ name: 'coupon_usage' })
+@Index('uq_coupon_usage_discount_user', ['discountId', 'userId'], {
+  unique: true,
+})
+@Index('uq_coupon_usage_discount_order', ['discountId', 'orderId'], {
+  unique: true,
+})
 export class CouponUsageEntity {
   @PrimaryGeneratedColumn({
     name: 'usage_id',

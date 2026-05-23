@@ -6,6 +6,11 @@ import {
   PaymentMethod,
   PaymentStatus,
 } from './entities/order.entity';
+import {
+  OrderRefundEntity,
+  OrderRefundReason,
+  OrderRefundStatus,
+} from './entities/order-refund.entity';
 import { UserEntity, UserRole } from '../users/entities/user.entity';
 import type { IUser } from '../users/users.interface';
 
@@ -22,6 +27,7 @@ type MockRepository = {
   createQueryBuilder?: jest.Mock;
   manager?: {
     transaction: jest.Mock;
+    query?: jest.Mock;
   };
 };
 
@@ -40,6 +46,7 @@ const createRepositoryMock = (): MockRepository => ({
   createQueryBuilder: jest.fn(),
   manager: {
     transaction: jest.fn(),
+    query: jest.fn().mockResolvedValue([{ provider: 'local' }]),
   },
 });
 
@@ -59,6 +66,8 @@ describe('OrdersService', () => {
   let discountCategoriesRepository: MockRepository;
   let discountProductsRepository: MockRepository;
   let couponUsageRepository: MockRepository;
+  let returnsRepository: MockRepository;
+  let orderRefundsRepository: MockRepository;
   let notificationsService: {
     sendOrderCreatedNotification: jest.Mock;
     sendOrderStatusNotification: jest.Mock;
@@ -111,6 +120,8 @@ describe('OrdersService', () => {
     discountCategoriesRepository = createRepositoryMock();
     discountProductsRepository = createRepositoryMock();
     couponUsageRepository = createRepositoryMock();
+    returnsRepository = createRepositoryMock();
+    orderRefundsRepository = createRepositoryMock();
     notificationsService = {
       sendOrderCreatedNotification: jest.fn(),
       sendOrderStatusNotification: jest.fn(),
@@ -120,8 +131,10 @@ describe('OrdersService', () => {
 
     service = new OrdersService(
       deliveryMethodsRepository as never,
+      createRepositoryMock() as never,
       shippingAddressesRepository as never,
       ordersRepository as never,
+      createRepositoryMock() as never,
       orderItemsRepository as never,
       orderStatusHistoryRepository as never,
       cartsRepository as never,
@@ -133,9 +146,15 @@ describe('OrdersService', () => {
       discountCategoriesRepository as never,
       discountProductsRepository as never,
       couponUsageRepository as never,
+      returnsRepository as never,
+      orderRefundsRepository as never,
       createRepositoryMock() as never,
       createRepositoryMock() as never,
       notificationsService as never,
+      { emitNewOrder: jest.fn() } as never,
+      { isPaymentMethodActive: jest.fn().mockResolvedValue(true) } as never,
+      { recalculateAndReward: jest.fn() } as never,
+      {} as never,
     );
   });
 
@@ -171,6 +190,214 @@ describe('OrdersService', () => {
         status: OrderStatus.DELIVERED,
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('blocks customer cancellation after payment has been collected', async () => {
+    const paidPendingOrder = {
+      orderId: 'order-paid-1',
+      userId: 'user-1',
+      orderStatus: OrderStatus.PENDING,
+      paymentMethod: PaymentMethod.MOMO,
+      paymentStatus: PaymentStatus.PAID,
+    } as OrderEntity;
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(paidPendingOrder);
+
+    await expect(
+      service.cancelOrder(userEntity.userId, paidPendingOrder.orderId),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        error: 'PAID_ORDER_CANCEL_REQUIRES_REFUND',
+      }),
+    });
+  });
+
+  it('rejects a return quantity that exceeds the remaining order item quantity', async () => {
+    const deliveredOrder = {
+      orderId: 'order-return-1',
+      userId: userEntity.userId,
+      orderStatus: OrderStatus.DELIVERED,
+    } as OrderEntity;
+    const orderItem = {
+      orderItemId: 'item-return-1',
+      orderId: deliveredOrder.orderId,
+      quantity: 5,
+      lineTotal: '500000.00',
+      grossLineTotal: '500000.00',
+      discountAllocated: '0.00',
+      netLineTotal: '500000.00',
+    };
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(deliveredOrder);
+    orderItemsRepository.findOneBy?.mockResolvedValue(orderItem);
+    returnsRepository.find?.mockResolvedValue([
+      {
+        returnId: 'return-existing-1',
+        orderItemId: orderItem.orderItemId,
+        returnQuantity: 4,
+        returnStatus: 'approved',
+      },
+    ]);
+
+    await expect(
+      service.createReturn(userEntity.userId, {
+        orderId: deliveredOrder.orderId,
+        orderItemId: orderItem.orderItemId,
+        returnQuantity: 2,
+        reason: 'wrong_item',
+        description: 'Tra them vuot so luong con lai',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(returnsRepository.create).not.toHaveBeenCalled();
+    expect(returnsRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects partial delivery payloads that omit an order item line', async () => {
+    const shippingOrder = {
+      orderId: 'order-partial-1',
+      userId: 'user-2',
+      orderStatus: OrderStatus.SHIPPING,
+    } as OrderEntity;
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(shippingOrder);
+    orderItemsRepository.find?.mockResolvedValue([
+      {
+        orderItemId: 'item-partial-1',
+        orderId: shippingOrder.orderId,
+        productName: 'Phan NPK',
+        quantity: 2,
+      },
+      {
+        orderItemId: 'item-partial-2',
+        orderId: shippingOrder.orderId,
+        productName: 'Hat giong lua',
+        quantity: 1,
+      },
+    ]);
+
+    await expect(
+      service.partialDeliverOrder(adminUser, shippingOrder.orderId, [
+        { orderItemId: 'item-partial-1', deliveredQty: 1 },
+      ]),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(ordersRepository.manager?.transaction).not.toHaveBeenCalled();
+  });
+
+  it('creates a pending manual refund before cancelling a paid order', async () => {
+    const paidOrder = {
+      orderId: 'order-refund-paid-1',
+      userId: 'user-2',
+      orderStatus: OrderStatus.PENDING,
+      paymentMethod: PaymentMethod.MOMO,
+      paymentStatus: PaymentStatus.PAID,
+      totalPayment: '240000.00',
+      fullName: 'Linh',
+      phone: '0900000000',
+    } as OrderEntity;
+    const refund = {
+      refundId: 'refund-paid-1',
+      orderId: paidOrder.orderId,
+      returnId: null,
+      reason: OrderRefundReason.CANCEL_PAID_ORDER,
+      amount: paidOrder.totalPayment,
+      refundStatus: OrderRefundStatus.PENDING,
+      paymentProvider: paidOrder.paymentMethod,
+      manualReference: null,
+      createdBy: adminUser._id,
+      note: 'Khach doi huy',
+      createdAt: now,
+      updatedAt: now,
+    } as OrderRefundEntity;
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    ordersRepository.findOneBy?.mockResolvedValue(paidOrder);
+    orderRefundsRepository.findOne?.mockResolvedValue(null);
+    orderRefundsRepository.find?.mockResolvedValue([]);
+    orderRefundsRepository.create?.mockReturnValue(refund);
+    orderRefundsRepository.save?.mockResolvedValue(refund);
+
+    await expect(
+      service.createCancelPaidOrderRefund(adminUser, {
+        orderId: paidOrder.orderId,
+        note: refund.note ?? undefined,
+      }),
+    ).resolves.toMatchObject({
+      refundId: refund.refundId,
+      reason: OrderRefundReason.CANCEL_PAID_ORDER,
+      refundStatus: OrderRefundStatus.PENDING,
+      amount: paidOrder.totalPayment,
+    });
+  });
+
+  it('completes a paid cancellation refund and closes the order once', async () => {
+    const paidOrder = {
+      orderId: 'order-refund-paid-2',
+      userId: 'user-2',
+      discountId: null,
+      orderStatus: OrderStatus.CONFIRMED,
+      paymentMethod: PaymentMethod.MOMO,
+      paymentStatus: PaymentStatus.PAID,
+      totalPayment: '180000.00',
+    } as OrderEntity;
+    const refund = {
+      refundId: 'refund-paid-2',
+      orderId: paidOrder.orderId,
+      returnId: null,
+      reason: OrderRefundReason.CANCEL_PAID_ORDER,
+      amount: paidOrder.totalPayment,
+      refundStatus: OrderRefundStatus.APPROVED,
+      paymentProvider: paidOrder.paymentMethod,
+      manualReference: null,
+      createdBy: adminUser._id,
+      note: null,
+      createdAt: now,
+      updatedAt: now,
+    } as OrderRefundEntity;
+    const emptyRepository = {
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null),
+      findOneBy: jest.fn().mockResolvedValue(null),
+      save: jest.fn((entity: unknown) => Promise.resolve(entity)),
+      create: jest.fn((entity: unknown) => entity),
+    };
+    const entityManager = {
+      findOne: jest.fn((entity: TransactionEntityTarget) => {
+        if (entity.name === OrderRefundEntity.name) return Promise.resolve(refund);
+        if (entity.name === OrderEntity.name) return Promise.resolve(paidOrder);
+        return Promise.resolve(null);
+      }),
+      find: jest.fn((entity: TransactionEntityTarget) => {
+        if (entity.name === OrderRefundEntity.name) return Promise.resolve([refund]);
+        return Promise.resolve([]);
+      }),
+      save: jest.fn((_: unknown, entity: unknown) => Promise.resolve(entity)),
+      getRepository: jest.fn(() => emptyRepository),
+    };
+
+    usersRepository.findOneBy?.mockResolvedValue(userEntity);
+    orderRefundsRepository.manager?.transaction.mockImplementation(
+      (callback: (manager: typeof entityManager) => Promise<unknown>) =>
+        callback(entityManager),
+    );
+
+    await expect(
+      service.updateAdminRefundStatus(adminUser, refund.refundId, {
+        status: OrderRefundStatus.COMPLETED,
+        manualReference: 'BANK-REF-001',
+      }),
+    ).resolves.toMatchObject({
+      refundId: refund.refundId,
+      refundStatus: OrderRefundStatus.COMPLETED,
+    });
+
+    expect(paidOrder.orderStatus).toBe(OrderStatus.CANCELLED);
+    expect(paidOrder.paymentStatus).toBe(PaymentStatus.REFUNDED);
+    expect(emptyRepository.find).toHaveBeenCalledTimes(2);
   });
 
   it('marks COD orders as paid when admin moves them to delivered', async () => {

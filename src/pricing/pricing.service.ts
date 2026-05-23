@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { v4 as uuidv4 } from 'uuid';
@@ -111,19 +111,35 @@ export class PricingService {
     suggestion.appliedBulk = dto.bulkPrice != null ? String(dto.bulkPrice) : null;
     suggestion.appliedBy = userId ?? null;
     suggestion.appliedAt = new Date();
-    await this.repo.save(suggestion);
 
     // Cập nhật giá trên sản phẩm
     const product = await this.productRepo.findOne({ where: { productId: suggestion.productId } });
-    let priceBefore: { product?: string | null; bulk?: string | null } | null = null;
+    let priceBefore: {
+      product?: string | null;
+      sale?: string | null;
+      bulk?: string | null;
+    } | null = null;
     if (product) {
-      priceBefore = { product: product.productPrice, bulk: product.bulkPrice };
+      if (
+        product.productPriceSale != null &&
+        Number(product.productPriceSale) > Number(dto.retailPrice)
+      ) {
+        throw new BadRequestException(
+          'Giá bán mới không được thấp hơn giá khuyến mãi đang áp dụng. Hãy cập nhật giá khuyến mãi trước.',
+        );
+      }
+      priceBefore = {
+        product: product.productPrice,
+        sale: product.productPriceSale,
+        bulk: product.bulkPrice,
+      };
       product.productPrice = String(dto.retailPrice);
       if (dto.bulkPrice != null) {
         product.bulkPrice = String(dto.bulkPrice);
       }
       await this.productRepo.save(product);
     }
+    await this.repo.save(suggestion);
 
     void this.auditLogs.log({
       entityType: 'PRODUCT_PRICE',
@@ -132,7 +148,11 @@ export class PricingService {
       changedBy: performer?.username,
       ipAddress: performer?.ip,
       beforeData: priceBefore ?? undefined,
-      afterData: { retailPrice: dto.retailPrice, bulkPrice: dto.bulkPrice },
+      afterData: {
+        retailPrice: dto.retailPrice,
+        salePrice: product?.productPriceSale ?? null,
+        bulkPrice: dto.bulkPrice,
+      },
     });
 
     return suggestion;
