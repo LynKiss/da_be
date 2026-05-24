@@ -22,6 +22,13 @@ export class QueryAgingDebtDto {
   @IsOptional() @IsString() supplierId?: string;
 }
 
+export class QueryInventoryReconciliationDto {
+  @IsOptional() @IsString() productId?: string;
+  @IsOptional() @IsString() onlyMismatch?: string;
+  @IsOptional() page?: number;
+  @IsOptional() limit?: number;
+}
+
 export class RecordPoPaymentDto {
   @IsString() poId: string;
   @IsString() amount: string;

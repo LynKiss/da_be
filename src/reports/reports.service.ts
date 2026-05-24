@@ -24,7 +24,13 @@ import { ProductEntity } from '../products/entities/product.entity';
 import { RiceDiagnosisHistoryEntity } from '../rice-diagnosis/entities/rice-diagnosis-history.entity';
 import { UserEntity, UserRole } from '../users/entities/user.entity';
 import { QueryCouponUsageDto } from './dto/query-coupon-usage.dto';
-import { QueryInventoryLedgerDto, QueryProfitabilityDto, QueryAgingDebtDto, RecordPoPaymentDto } from './dto/query-inventory-ledger.dto';
+import {
+  QueryInventoryLedgerDto,
+  QueryProfitabilityDto,
+  QueryAgingDebtDto,
+  QueryInventoryReconciliationDto,
+  RecordPoPaymentDto,
+} from './dto/query-inventory-ledger.dto';
 import { QuerySalesSummaryDto } from './dto/query-sales-summary.dto';
 
 @Injectable()
@@ -139,6 +145,38 @@ export class ReportsService {
       .getRawMany<{ orderId: string; amount: string }>();
 
     return new Map(rows.map((row) => [row.orderId, Number(row.amount ?? 0)]));
+  }
+
+  private async getUnallocatedCompletedRefundAmount(query: QueryProfitabilityDto) {
+    const qb = this.refundsRepository
+      .createQueryBuilder('refund')
+      .select('COALESCE(SUM(refund.amount), 0)', 'amount')
+      .where('refund.refund_status = :status', {
+        status: OrderRefundStatus.COMPLETED,
+      })
+      .andWhere('refund.return_id IS NULL');
+
+    if (query.from) qb.andWhere('refund.updated_at >= :from', { from: query.from });
+    if (query.to) qb.andWhere('refund.updated_at <= :to', { to: query.to });
+
+    const row = await qb.getRawOne<{ amount: string }>();
+    return Number(row?.amount ?? 0);
+  }
+
+  private profitabilityMeta(
+    query: QueryProfitabilityDto,
+    unallocatedRefund: number,
+    paging?: { page: number; limit: number; total: number; totalPages: number },
+  ) {
+    return {
+      ...(paging ?? {}),
+      revenuePolicy: this.revenuePolicy,
+      refundPolicy:
+        'only completed refunds reduce revenue; return-linked refunds are allocated by return line, unlinked refunds are exposed as unallocatedRefund',
+      cogsPolicy:
+        'COGS uses order-linked inventory export/return_in transactions in the same period; missing legacy costs fall back to product avgCost/costPrice',
+      unallocatedRefund,
+    };
   }
 
   async getDashboard() {
@@ -1069,6 +1107,144 @@ export class ReportsService {
 
   // ─── Sổ Kho Chi Tiết ──────────────────────────────────────────────────────
 
+  async getInventoryReconciliation(query: QueryInventoryReconciliationDto) {
+    const page = Math.max(1, Number(query.page ?? 1));
+    const limit = Math.min(200, Math.max(1, Number(query.limit ?? 30)));
+    const onlyMismatch = String(query.onlyMismatch ?? '').toLowerCase() === 'true';
+
+    const productsQb = this.productsRepository
+      .createQueryBuilder('p')
+      .select([
+        'p.product_id AS productId',
+        'p.product_name AS productName',
+        'p.quantity_available AS quantityAvailable',
+        'p.quantity_reserved AS quantityReserved',
+      ])
+      .orderBy('p.product_name', 'ASC');
+
+    if (query.productId) {
+      productsQb.where('p.product_id = :productId', { productId: query.productId });
+    }
+
+    const products = await productsQb.getRawMany<{
+      productId: string;
+      productName: string;
+      quantityAvailable: string | number;
+      quantityReserved: string | number;
+    }>();
+
+    const productIds = products.map((product) => product.productId);
+    const [batchRows, defaultWarehouseRows] = await Promise.all([
+      productIds.length
+        ? this.batchRepository
+            .createQueryBuilder('b')
+            .select('b.product_id', 'productId')
+            .addSelect('SUM(b.qty_remaining)', 'quantity')
+            .where('b.product_id IN (:...productIds)', { productIds })
+            .groupBy('b.product_id')
+            .getRawMany<{ productId: string; quantity: string | number }>()
+        : [],
+      productIds.length
+        ? (this.productsRepository.manager.query(
+            `SELECT ws.product_id AS productId, SUM(ws.quantity) AS quantity
+             FROM warehouse_stock ws
+             INNER JOIN warehouses w ON w.warehouse_id = ws.warehouse_id
+             WHERE w.is_default = 1 AND ws.product_id IN (?)
+             GROUP BY ws.product_id`,
+            [productIds],
+          ) as Promise<Array<{ productId: string; quantity: string | number }>>)
+        : [],
+    ]);
+
+    const batchMap = new Map<string, number>(
+      batchRows.map((row) => [row.productId, Number(row.quantity ?? 0)] as [string, number]),
+    );
+    const defaultWarehouseMap = new Map<string, number>(
+      defaultWarehouseRows.map((row) => [
+        row.productId,
+        Number(row.quantity ?? 0),
+      ] as [string, number]),
+    );
+
+    const allItems = products.map((product) => {
+      const quantityAvailable = Number(product.quantityAvailable ?? 0);
+      const quantityReserved = Number(product.quantityReserved ?? 0);
+      const batchRemainingQty = batchMap.get(product.productId) ?? 0;
+      const defaultWarehouseQty = defaultWarehouseMap.get(product.productId) ?? 0;
+      const hasBatch = batchMap.has(product.productId);
+      const hasDefaultWarehouse = defaultWarehouseMap.has(product.productId);
+      const deltaBatch = batchRemainingQty - quantityAvailable;
+      const deltaWarehouse = defaultWarehouseQty - quantityAvailable;
+      const warnings = [
+        !hasBatch && quantityAvailable > 0
+          ? 'MISSING_BATCH_FOR_AVAILABLE_STOCK'
+          : null,
+        deltaBatch !== 0
+          ? `BATCH_REMAINING_DIFF:${deltaBatch}`
+          : null,
+        !hasDefaultWarehouse && quantityAvailable > 0
+          ? 'MISSING_DEFAULT_WAREHOUSE_STOCK'
+          : null,
+        deltaWarehouse !== 0
+          ? `DEFAULT_WAREHOUSE_DIFF:${deltaWarehouse}`
+          : null,
+      ].filter(Boolean) as string[];
+      const severity =
+        Math.abs(deltaBatch) > 0 || Math.abs(deltaWarehouse) > 0
+          ? Math.abs(deltaBatch) > 5 || Math.abs(deltaWarehouse) > 5
+            ? 'CRITICAL'
+            : 'WARNING'
+          : 'OK';
+
+      return {
+        productId: product.productId,
+        productName: product.productName,
+        quantityAvailable,
+        quantityReserved,
+        batchRemainingQty,
+        defaultWarehouseQty,
+        deltaBatch,
+        deltaWarehouse,
+        severity,
+        warnings,
+        warningsText: warnings.join('; '),
+      };
+    });
+
+    const filtered = onlyMismatch
+      ? allItems.filter((item) => item.severity !== 'OK')
+      : allItems;
+    const total = filtered.length;
+    const items = filtered.slice((page - 1) * limit, page * limit);
+    const mismatchItems = allItems.filter((item) => item.severity !== 'OK');
+
+    return {
+      summary: {
+        totalProducts: allItems.length,
+        totalMismatches: mismatchItems.length,
+        missingBatch: allItems.filter((item) =>
+          item.warnings.includes('MISSING_BATCH_FOR_AVAILABLE_STOCK'),
+        ).length,
+        warehouseMismatches: allItems.filter((item) =>
+          item.warnings.some((warning) => warning.startsWith('DEFAULT_WAREHOUSE')),
+        ).length,
+        critical: allItems.filter((item) => item.severity === 'CRITICAL').length,
+        warning: allItems.filter((item) => item.severity === 'WARNING').length,
+        ok: allItems.filter((item) => item.severity === 'OK').length,
+      },
+      items,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        asOf: new Date(),
+        policy:
+          'product.quantityAvailable must match remaining sellable batches and default warehouse stock',
+      },
+    };
+  }
+
   async getInventoryLedger(query: QueryInventoryLedgerDto) {
     const { page = 1, limit = 30 } = query;
 
@@ -1106,6 +1282,7 @@ export class ReportsService {
     const { groupBy = 'product' } = query;
 
     const completedStatuses = this.financialRevenueStatuses;
+    const unallocatedRefund = await this.getUnallocatedCompletedRefundAmount(query);
 
     const qb = this.joinCompletedLineRefunds(
       this.orderItemsRepository
@@ -1223,11 +1400,14 @@ export class ReportsService {
         // Nếu có dữ liệu unit_cost_at_time từ inventory_transactions → ưu tiên
         // Nếu thiếu (đơn cũ trước khi feature có) → dùng avgCost làm fallback cho phần còn thiếu
         let cogs: number;
+        let cogsSource: 'transaction' | 'fallback_avg_cost' | 'mixed';
         if (txData && txData.qtyWithCost > 0) {
           const qtyMissingCost = Math.max(0, soldQty - txData.qtyWithCost);
           cogs = txData.totalCogs + qtyMissingCost * fallbackCost;
+          cogsSource = qtyMissingCost > 0 ? 'mixed' : 'transaction';
         } else {
           cogs = soldQty * fallbackCost;
+          cogsSource = 'fallback_avg_cost';
         }
 
         const grossProfit = revenue - cogs;
@@ -1238,6 +1418,7 @@ export class ReportsService {
           soldQty,
           revenue,
           cogs,
+          cogsSource,
           grossProfit,
           marginPct: Math.round(marginPct * 100) / 100,
         };
@@ -1245,13 +1426,12 @@ export class ReportsService {
 
       return {
         items,
-        meta: {
+        meta: this.profitabilityMeta(query, unallocatedRefund, {
           page,
           limit,
           total,
           totalPages: Math.ceil(total / limit),
-          revenuePolicy: this.revenuePolicy,
-        },
+        }),
       };
     }
 
@@ -1285,7 +1465,7 @@ export class ReportsService {
         revenue: Number(r.revenue),
         soldQty: Number(r.soldQty),
       })),
-      meta: { revenuePolicy: this.revenuePolicy },
+      meta: this.profitabilityMeta(query, unallocatedRefund),
     };
   }
 

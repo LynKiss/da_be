@@ -35,11 +35,31 @@ const allowedTags = [
 
 const allowedAttributes: sanitizeHtml.IOptions['allowedAttributes'] = {
   a: ['href', 'title', 'target', 'rel'],
-  img: ['src', 'alt', 'title', 'width', 'height'],
-  table: ['border', 'cellpadding', 'cellspacing'],
-  th: ['colspan', 'rowspan'],
-  td: ['colspan', 'rowspan'],
+  img: ['src', 'alt', 'title', 'width', 'height', 'style'],
+  table: ['border', 'cellpadding', 'cellspacing', 'style'],
+  th: ['colspan', 'rowspan', 'style'],
+  td: ['colspan', 'rowspan', 'style'],
+  p: ['style'],
+  h1: ['style'],
+  h2: ['style'],
+  h3: ['style'],
+  div: ['style'],
+  span: ['style'],
 };
+
+function decodeHtmlEntitiesOnce(input: string) {
+  if (!/[&](lt|gt|amp|quot|#39|nbsp);/i.test(input)) {
+    return input;
+  }
+
+  return input
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&');
+}
 
 export function sanitizeRichText(input: string | null | undefined) {
   if (input === undefined) {
@@ -50,9 +70,19 @@ export function sanitizeRichText(input: string | null | undefined) {
     return null;
   }
 
-  const sanitized = sanitizeHtml(input, {
+  const decoded = decodeHtmlEntitiesOnce(input);
+
+  const sanitized = sanitizeHtml(decoded, {
     allowedTags,
     allowedAttributes,
+    allowedStyles: {
+      '*': {
+        'text-align': [/^left$/, /^right$/, /^center$/, /^justify$/],
+        width: [/^\d+(px|%)$/],
+        height: [/^\d+(px|%)$/],
+        'max-width': [/^\d+(px|%)$/],
+      },
+    },
     allowedSchemes: ['http', 'https', 'mailto'],
     allowedSchemesByTag: {
       img: ['http', 'https'],

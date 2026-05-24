@@ -379,6 +379,11 @@ export class WarehousesService {
         }
 
         const qtyDiff = item.qtyAfter - qtyBefore;
+        if (item.qtyDiff !== qtyDiff) {
+          throw new BadRequestException(
+            `Phiếu điều chỉnh ${adj.adjustmentCode} có dòng sản phẩm ${item.productId} lệch qtyDiff. Hủy phiếu và tạo lại để tránh sai sổ kho.`,
+          );
+        }
 
         if (qtyDiff !== 0) {
           if (warehouseId) {

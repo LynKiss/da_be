@@ -3,7 +3,13 @@ import type { Response } from 'express';
 import { RequirePermissions, ResponseMessage, User } from '../decorator/customize';
 import { csvResponseHeaders, toCsv } from '../common/csv-export.util';
 import { QueryCouponUsageDto } from './dto/query-coupon-usage.dto';
-import { QueryAgingDebtDto, QueryInventoryLedgerDto, QueryProfitabilityDto, RecordPoPaymentDto } from './dto/query-inventory-ledger.dto';
+import {
+  QueryAgingDebtDto,
+  QueryInventoryLedgerDto,
+  QueryInventoryReconciliationDto,
+  QueryProfitabilityDto,
+  RecordPoPaymentDto,
+} from './dto/query-inventory-ledger.dto';
 import { QuerySalesSummaryDto } from './dto/query-sales-summary.dto';
 import { ReportsService } from './reports.service';
 
@@ -33,30 +39,42 @@ export class ReportsController {
   }
 
   @Get('inventory-ledger')
+  @RequirePermissions('manage_reports')
   @ResponseMessage('Get inventory ledger')
   getInventoryLedger(@Query() query: QueryInventoryLedgerDto) {
     return this.reportsService.getInventoryLedger(query);
   }
 
   @Get('inventory-valuation')
+  @RequirePermissions('manage_reports')
   @ResponseMessage('Get inventory valuation')
   getInventoryValuation() {
     return this.reportsService.getInventoryValuation();
   }
 
+  @Get('inventory-reconciliation')
+  @RequirePermissions('manage_reports')
+  @ResponseMessage('Get inventory reconciliation')
+  getInventoryReconciliation(@Query() query: QueryInventoryReconciliationDto) {
+    return this.reportsService.getInventoryReconciliation(query);
+  }
+
   @Get('profitability')
+  @RequirePermissions('manage_reports')
   @ResponseMessage('Get profitability report')
   getProfitability(@Query() query: QueryProfitabilityDto) {
     return this.reportsService.getProfitability(query);
   }
 
   @Get('aging-debt')
+  @RequirePermissions('manage_reports')
   @ResponseMessage('Get aging debt report')
   getAgingDebt(@Query() query: QueryAgingDebtDto) {
     return this.reportsService.getAgingDebt(query);
   }
 
   @Post('record-po-payment')
+  @RequirePermissions('manage_payments')
   @ResponseMessage('Record PO payment')
   recordPoPayment(@Body() dto: RecordPoPaymentDto, @User() user: { userId?: string }) {
     return this.reportsService.recordPoPayment(dto, user?.userId);
@@ -64,6 +82,7 @@ export class ReportsController {
 
   /** Export CSV - inventory valuation */
   @Get('inventory-valuation/export')
+  @RequirePermissions('manage_reports')
   async exportInventoryValuation(@Res() res: Response) {
     const data = await this.reportsService.getInventoryValuation();
     const csv = toCsv(data.items, [
@@ -87,6 +106,7 @@ export class ReportsController {
 
   /** Export CSV - inventory ledger */
   @Get('inventory-ledger/export')
+  @RequirePermissions('manage_reports')
   async exportInventoryLedger(
     @Query() query: QueryInventoryLedgerDto,
     @Res() res: Response,
@@ -118,6 +138,7 @@ export class ReportsController {
 
   /** Export CSV - profitability */
   @Get('profitability/export')
+  @RequirePermissions('manage_reports')
   async exportProfitability(
     @Query() query: QueryProfitabilityDto,
     @Res() res: Response,
@@ -137,6 +158,37 @@ export class ReportsController {
     ]);
     const headers = csvResponseHeaders(
       `profitability-${new Date().toISOString().slice(0, 10)}.csv`,
+    );
+    Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
+    res.send(csv);
+  }
+
+  /** Export CSV - inventory reconciliation */
+  @Get('inventory-reconciliation/export')
+  @RequirePermissions('manage_reports')
+  async exportInventoryReconciliation(
+    @Query() query: QueryInventoryReconciliationDto,
+    @Res() res: Response,
+  ) {
+    const data = await this.reportsService.getInventoryReconciliation({
+      ...query,
+      page: 1,
+      limit: 10000,
+    });
+    const csv = toCsv(data.items, [
+      { key: 'productId', header: 'Ma san pham' },
+      { key: 'productName', header: 'Ten san pham' },
+      { key: 'quantityAvailable', header: 'Ton kha dung' },
+      { key: 'quantityReserved', header: 'Dang giu' },
+      { key: 'batchRemainingQty', header: 'Ton theo batch' },
+      { key: 'defaultWarehouseQty', header: 'Ton kho mac dinh' },
+      { key: 'deltaBatch', header: 'Lech batch' },
+      { key: 'deltaWarehouse', header: 'Lech kho mac dinh' },
+      { key: 'severity', header: 'Muc do' },
+      { key: 'warningsText', header: 'Canh bao' },
+    ]);
+    const headers = csvResponseHeaders(
+      `inventory-reconciliation-${new Date().toISOString().slice(0, 10)}.csv`,
     );
     Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
     res.send(csv);

@@ -786,19 +786,11 @@ export class ProductsService {
         batchId = batch.batchId;
         unitCostAtTime = batch.unitCost;
       } else if (quantityChange < 0) {
-        const pick = await this.batchService
-          .consumeInTx(em, product.productId, Math.abs(quantityChange))
-          .catch(async (err) => {
-            const hasAnyBatch = await em
-              .createQueryBuilder()
-              .select('1')
-              .from('product_batches', 'b')
-              .where('b.product_id = :pid', { pid: product.productId })
-              .limit(1)
-              .getRawOne();
-            if (hasAnyBatch) throw err;
-            return null;
-          });
+        const pick = await this.batchService.consumeInTx(
+          em,
+          product.productId,
+          Math.abs(quantityChange),
+        );
         batchId = pick?.lines.length === 1 ? pick.lines[0].batchId : null;
         unitCostAtTime =
           pick?.lines.length === 1 ? pick.lines[0].unitCost.toFixed(4) : null;
