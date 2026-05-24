@@ -41,7 +41,7 @@ export class NewsService {
       subTitle: article.subTitle,
       slug: article.slug,
       titleImageUrl: article.titleImageUrl,
-      content: article.content,
+      content: sanitizeRichText(article.content),
       isPublished: article.isPublished,
       views: article.views,
       likeCount: article.likeCount,

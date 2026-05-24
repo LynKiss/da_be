@@ -324,7 +324,7 @@ export class CategoriesService {
       nodeMap.set(category.categoryId, {
         categoryId: category.categoryId,
         categoryName: category.categoryName,
-        categoryDescription: category.categoryDescription,
+        categoryDescription: sanitizeRichText(category.categoryDescription) ?? null,
         categorySlug: category.categorySlug,
         parentId: category.parentId,
         isActive: category.isActive,

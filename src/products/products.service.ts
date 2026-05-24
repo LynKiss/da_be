@@ -1368,6 +1368,7 @@ export class ProductsService {
 
     return {
       ...product,
+      description: sanitizeRichText(product.description),
       primaryImageUrl: primaryImage?.imageUrl ?? null,
       basePrice: regularPrice.toFixed(2),
       effectivePrice,

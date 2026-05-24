@@ -59,7 +59,8 @@ export class ProductBatchService {
   async findAll(filters: { productId?: string; includeDepleted?: boolean } = {}) {
     const qb = this.batchRepo
       .createQueryBuilder('b')
-      .orderBy('b.expDate', 'ASC', 'NULLS LAST')
+      .orderBy('b.expDate IS NULL', 'ASC')
+      .addOrderBy('b.expDate', 'ASC')
       .addOrderBy('b.createdAt', 'ASC');
     if (filters.productId) qb.andWhere('b.productId = :pid', { pid: filters.productId });
     if (!filters.includeDepleted) qb.andWhere('b.qtyRemaining > 0');

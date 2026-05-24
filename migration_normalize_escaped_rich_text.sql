@@ -1,5 +1,5 @@
 -- Normalize legacy rich text that was saved with escaped HTML entities.
--- Safe to run multiple times: after the first pass, matching patterns disappear.
+-- Safe to run multiple times. The inner '&amp;' replacement also handles double-escaped values like '&amp;lt;h1&amp;gt;'.
 
 UPDATE products
 SET description = REPLACE(
@@ -7,20 +7,22 @@ SET description = REPLACE(
     REPLACE(
       REPLACE(
         REPLACE(
-          REPLACE(description, '&lt;', '<'),
-          '&gt;', '>'
+          REPLACE(description, '&amp;', '&'),
+          '&lt;', '<'
         ),
-        '&quot;', '"'
+        '&gt;', '>'
       ),
-      '&#39;', ''''
+      '&quot;', '"'
     ),
-    '&nbsp;', ' '
+    '&#39;', ''''
   ),
-  '&amp;', '&'
+  '&nbsp;', ' '
 )
 WHERE description IS NOT NULL
   AND (
-    description LIKE '%&lt;%'
+    description LIKE '%&amp;lt;%'
+    OR description LIKE '%&amp;gt;%'
+    OR description LIKE '%&lt;%'
     OR description LIKE '%&gt;%'
     OR description LIKE '%&quot;%'
     OR description LIKE '%&#39;%'
@@ -33,20 +35,22 @@ SET category_description = REPLACE(
     REPLACE(
       REPLACE(
         REPLACE(
-          REPLACE(category_description, '&lt;', '<'),
-          '&gt;', '>'
+          REPLACE(category_description, '&amp;', '&'),
+          '&lt;', '<'
         ),
-        '&quot;', '"'
+        '&gt;', '>'
       ),
-      '&#39;', ''''
+      '&quot;', '"'
     ),
-    '&nbsp;', ' '
+    '&#39;', ''''
   ),
-  '&amp;', '&'
+  '&nbsp;', ' '
 )
 WHERE category_description IS NOT NULL
   AND (
-    category_description LIKE '%&lt;%'
+    category_description LIKE '%&amp;lt;%'
+    OR category_description LIKE '%&amp;gt;%'
+    OR category_description LIKE '%&lt;%'
     OR category_description LIKE '%&gt;%'
     OR category_description LIKE '%&quot;%'
     OR category_description LIKE '%&#39;%'
@@ -59,20 +63,22 @@ SET content = REPLACE(
     REPLACE(
       REPLACE(
         REPLACE(
-          REPLACE(content, '&lt;', '<'),
-          '&gt;', '>'
+          REPLACE(content, '&amp;', '&'),
+          '&lt;', '<'
         ),
-        '&quot;', '"'
+        '&gt;', '>'
       ),
-      '&#39;', ''''
+      '&quot;', '"'
     ),
-    '&nbsp;', ' '
+    '&#39;', ''''
   ),
-  '&amp;', '&'
+  '&nbsp;', ' '
 )
 WHERE content IS NOT NULL
   AND (
-    content LIKE '%&lt;%'
+    content LIKE '%&amp;lt;%'
+    OR content LIKE '%&amp;gt;%'
+    OR content LIKE '%&lt;%'
     OR content LIKE '%&gt;%'
     OR content LIKE '%&quot;%'
     OR content LIKE '%&#39;%'

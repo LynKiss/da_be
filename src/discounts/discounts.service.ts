@@ -703,7 +703,6 @@ export class DiscountsService {
   private isDiscountClaimableByUser(discount: DiscountEntity, userId: string) {
     const now = Date.now();
     return (
-      discount.appliesTo === DiscountApplyTarget.ORDER &&
       discount.isActive &&
       discount.startAt.getTime() <= now &&
       discount.expireDate.getTime() >= now &&

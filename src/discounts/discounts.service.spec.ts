@@ -130,6 +130,36 @@ describe('DiscountsService voucher business rules', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
+  it('allows saving product and category vouchers to the customer wallet', async () => {
+    const discount = activeDiscount({
+      appliesTo: DiscountApplyTarget.PRODUCT,
+    });
+    discountsRepository.findOneBy?.mockResolvedValue(discount);
+    savedVoucherRepository.findOneBy?.mockResolvedValue(null);
+    savedVoucherRepository.create?.mockImplementation((value) => value);
+    savedVoucherRepository.save?.mockResolvedValue({
+      userId: 'user-1',
+      discountId: '1',
+      savedAt: new Date('2026-05-24T00:00:00.000Z'),
+    });
+
+    const result = await service.saveVoucher('user-1', '1');
+
+    expect(result).toMatchObject({
+      saved: true,
+      voucher: {
+        id: '1',
+        code: 'NPK10',
+        appliesTo: DiscountApplyTarget.PRODUCT,
+        isSaved: true,
+      },
+    });
+    expect(savedVoucherRepository.save).toHaveBeenCalledWith({
+      userId: 'user-1',
+      discountId: '1',
+    });
+  });
+
   it('deactivates instead of deleting a voucher that already has usage history', async () => {
     const discount = activeDiscount();
     discountsRepository.findOneBy?.mockResolvedValue(discount);
