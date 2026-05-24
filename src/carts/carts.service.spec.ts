@@ -28,6 +28,7 @@ describe('CartsService', () => {
   let cartsRepository: MockRepository;
   let cartItemsRepository: MockRepository;
   let productsRepository: MockRepository;
+  let productImagesRepository: MockRepository;
   let usersRepository: MockRepository;
 
   const now = new Date('2026-04-19T08:00:00.000Z');
@@ -41,8 +42,16 @@ describe('CartsService', () => {
     provider: 'local',
     providerId: null,
     isActive: true,
+    isWholesale: false,
     resetPasswordCode: null,
     resetPasswordExpiresAt: null,
+    resetPasswordRequestCount: 0,
+    resetPasswordLastRequestedAt: null,
+    resetPasswordAttemptCount: 0,
+    fullName: null,
+    phoneNumber: null,
+    membershipTier: 'none' as never,
+    totalSpent: '0.00',
     createdAt: now,
     updatedAt: now,
   };
@@ -78,12 +87,14 @@ describe('CartsService', () => {
     cartsRepository = createRepositoryMock();
     cartItemsRepository = createRepositoryMock();
     productsRepository = createRepositoryMock();
+    productImagesRepository = createRepositoryMock();
     usersRepository = createRepositoryMock();
 
     service = new CartsService(
       cartsRepository as never,
       cartItemsRepository as never,
       productsRepository as never,
+      productImagesRepository as never,
       usersRepository as never,
     );
   });
@@ -198,6 +209,7 @@ describe('CartsService', () => {
         quantityAvailable: 10,
       },
     ]);
+    productImagesRepository.findBy?.mockResolvedValue([]);
 
     const result = await service.getMyCart(user.userId);
 

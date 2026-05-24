@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { sanitizeRichText } from '../common/rich-text-sanitizer';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { NotificationChannel } from '../notifications/entities/notification.entity';
@@ -350,7 +351,7 @@ export class ProductsService {
       productPrice: createProductDto.productPrice,
       productPriceSale: createProductDto.productPriceSale ?? null,
       quantityAvailable: 0,
-      description: createProductDto.description ?? null,
+      description: sanitizeRichText(createProductDto.description) ?? null,
       ratingAverage: '0',
       ratingCount: 0,
       isShow: createProductDto.isShow ?? true,
@@ -432,7 +433,7 @@ export class ProductsService {
         : product.productPriceSale;
     product.description =
       updateProductDto.description !== undefined
-        ? (updateProductDto.description ?? null)
+        ? (sanitizeRichText(updateProductDto.description) ?? null)
         : product.description;
     product.isShow = updateProductDto.isShow ?? product.isShow;
     if (updateProductDto.isFeatured !== undefined) {

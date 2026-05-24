@@ -881,7 +881,7 @@ export class ProcurementService {
                 batchId: line.batchId,
                 unitCostAtTime: line.unitCost.toFixed(4),
                 note: `Trả hàng NCC từ phiếu ${sr.srCode} - lô ${line.batchCode} - ${item.reason ?? ''}`,
-                relatedOrderId: sr.srId,
+                relatedOrderId: null,
               }),
             );
             runningBefore -= line.qty;
@@ -897,7 +897,7 @@ export class ProcurementService {
             referenceType: 'SR',
             referenceId: sr.srId,
             note: `Trả hàng NCC từ phiếu ${sr.srCode} - ${item.reason ?? ''} (legacy - no batch)`,
-            relatedOrderId: sr.srId,
+            relatedOrderId: null,
           });
           await em.save(InventoryTransactionEntity, tx);
         }

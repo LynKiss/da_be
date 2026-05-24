@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductBatchService } from '../products/product-batch.service';
 import { AdjustmentReason, AdjustmentStatus, StockAdjustmentEntity } from './entities/stock-adjustment.entity';
 import { StockAdjustmentItemEntity } from './entities/stock-adjustment-item.entity';
 import { StockTransferEntity, StockTransferStatus } from './entities/stock-transfer.entity';
@@ -55,6 +56,7 @@ export class WarehousesService {
 
     private readonly dataSource: DataSource,
     private readonly auditLogs: AuditLogsService,
+    private readonly productBatchService: ProductBatchService,
   ) {}
 
   // ─── Warehouses ───────────────────────────────────────────────────────────
@@ -208,12 +210,12 @@ export class WarehousesService {
         await em.save(InventoryTransactionEntity, em.create(InventoryTransactionEntity, {
           productId: item.productId,
           performedBy: userId ?? null,
-          transactionType: InventoryTransactionType.EXPORT,
+          transactionType: InventoryTransactionType.TRANSFER_OUT,
           quantityChange: -item.qtyRequested,
           referenceType: 'TR',
           referenceId: t.transferId,
           note: `Xuất kho chuyển theo phiếu ${t.transferCode}`,
-          relatedOrderId: t.transferId,
+          relatedOrderId: null,
         }));
       }
 
@@ -270,12 +272,12 @@ export class WarehousesService {
         await em.save(InventoryTransactionEntity, em.create(InventoryTransactionEntity, {
           productId: recv.productId,
           performedBy: userId ?? null,
-          transactionType: InventoryTransactionType.IMPORT,
+          transactionType: InventoryTransactionType.TRANSFER_IN,
           quantityChange: recv.qtyReceived,
           referenceType: 'TR',
           referenceId: t.transferId,
           note: `Nhập kho nhận từ phiếu chuyển ${t.transferCode}`,
-          relatedOrderId: t.transferId,
+          relatedOrderId: null,
         }));
       }
 
@@ -370,8 +372,105 @@ export class WarehousesService {
         if (!product) continue;
 
         const qtyBefore = product.quantityAvailable;
-        product.quantityAvailable = item.qtyAfter;
-        await em.save(ProductEntity, product);
+        if (qtyBefore !== item.qtyBefore) {
+          throw new BadRequestException(
+            `Tồn sản phẩm ${item.productId} đã thay đổi từ khi lập phiếu. Hủy phiếu và kiểm kê lại.`,
+          );
+        }
+
+        const qtyDiff = item.qtyAfter - qtyBefore;
+
+        if (qtyDiff !== 0) {
+          if (warehouseId) {
+            let stock = await em.findOne(WarehouseStockEntity, {
+              where: { warehouseId, productId: item.productId },
+            });
+            if (!stock) {
+              stock = em.create(WarehouseStockEntity, {
+                warehouseId,
+                productId: item.productId,
+                quantity: 0,
+              });
+            }
+            if (qtyDiff < 0 && stock.quantity < Math.abs(qtyDiff)) {
+              throw new BadRequestException(
+                `Kho áp dụng không đủ hàng cho sản phẩm ${item.productId}`,
+              );
+            }
+            stock.quantity += qtyDiff;
+            await em.save(WarehouseStockEntity, stock);
+          }
+
+          if (qtyDiff > 0) {
+            const unitCost = Number(product.avgCost || product.costPrice || 0);
+            const batch = await this.productBatchService.createInTx(em, {
+              productId: item.productId,
+              batchCode: `${adj.adjustmentCode}-${item.productId.slice(0, 8)}`,
+              qtyReceived: qtyDiff,
+              unitCost,
+              note: `Điều chỉnh tăng tồn theo phiếu ${adj.adjustmentCode}`,
+            });
+
+            product.quantityAvailable += qtyDiff;
+            await em.save(ProductEntity, product);
+
+            await em.save(
+              InventoryTransactionEntity,
+              em.create(InventoryTransactionEntity, {
+                productId: item.productId,
+                performedBy: userId ?? null,
+                transactionType: InventoryTransactionType.ADJUSTMENT,
+                quantityChange: qtyDiff,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                unitCostAtTime: unitCost.toFixed(4),
+                referenceType: 'ADJ',
+                referenceId: adj.adjustmentId,
+                batchId: batch.batchId,
+                note: `Điều chỉnh tăng tồn theo phiếu ${adj.adjustmentCode} - lý do: ${adj.reason}`,
+                relatedOrderId: null,
+              }),
+            );
+            continue;
+          }
+
+          const decreaseQty = Math.abs(qtyDiff);
+          const pick = await this.productBatchService.consumeInTx(
+            em,
+            item.productId,
+            decreaseQty,
+          );
+
+          product.quantityAvailable = Math.max(0, qtyBefore - decreaseQty);
+          await em.save(ProductEntity, product);
+
+          const txType =
+            adj.reason === AdjustmentReason.DAMAGE ||
+            adj.reason === AdjustmentReason.LOSS
+              ? InventoryTransactionType.DAMAGE
+              : InventoryTransactionType.ADJUSTMENT;
+
+          for (const line of pick.lines) {
+            await em.save(
+              InventoryTransactionEntity,
+              em.create(InventoryTransactionEntity, {
+                productId: item.productId,
+                performedBy: userId ?? null,
+                transactionType: txType,
+                quantityChange: -line.qty,
+                quantityBefore: qtyBefore,
+                quantityAfter: product.quantityAvailable,
+                unitCostAtTime: line.unitCost.toFixed(4),
+                referenceType: 'ADJ',
+                referenceId: adj.adjustmentId,
+                batchId: line.batchId,
+                note: `Điều chỉnh giảm tồn theo phiếu ${adj.adjustmentCode} - lý do: ${adj.reason}`,
+                relatedOrderId: null,
+              }),
+            );
+          }
+          continue;
+        }
 
         if (item.qtyDiff !== 0) {
           const txType =

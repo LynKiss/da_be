@@ -14,6 +14,7 @@ import { UpdateNewsDto } from './dto/update-news.dto';
 import { NewsCommentEntity, NewsCommentStatus } from './entities/news-comment.entity';
 import { NewsEntity } from './entities/news.entity';
 import { UserEntity } from '../users/entities/user.entity';
+import { sanitizeRichText } from '../common/rich-text-sanitizer';
 
 type UploadedImageFile = {
   buffer: Buffer;
@@ -64,7 +65,7 @@ export class NewsService {
       subTitle: createNewsDto.subTitle?.trim() || null,
       slug,
       titleImageUrl: createNewsDto.titleImageUrl?.trim() || null,
-      content: createNewsDto.content ?? null,
+      content: sanitizeRichText(createNewsDto.content) ?? null,
       isDraft: true,
       isPublished: false,
       publishedAt: null,
@@ -322,7 +323,9 @@ export class NewsService {
         ? updateNewsDto.titleImageUrl?.trim() || null
         : article.titleImageUrl;
     article.content =
-      updateNewsDto.content !== undefined ? updateNewsDto.content : article.content;
+      updateNewsDto.content !== undefined
+        ? (sanitizeRichText(updateNewsDto.content) ?? null)
+        : article.content;
 
     return this.newsRepository.save(article);
   }

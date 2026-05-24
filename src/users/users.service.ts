@@ -42,6 +42,12 @@ type UploadedImageFile = {
   originalname: string;
 };
 
+const PASSWORD_RESET_OTP_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_REQUEST_WINDOW_MS = 15 * 60 * 1000;
+const PASSWORD_RESET_MAX_REQUESTS_PER_WINDOW = 3;
+const PASSWORD_RESET_MAX_ATTEMPTS = 5;
+const PASSWORD_RESET_INVALID_MESSAGE = 'Email hoac ma OTP khong hop le';
+
 @Injectable()
 export class UsersService {
   constructor(
@@ -165,6 +171,9 @@ export class UsersService {
       isActive: true,
       resetPasswordCode: null,
       resetPasswordExpiresAt: null,
+      resetPasswordRequestCount: 0,
+      resetPasswordLastRequestedAt: null,
+      resetPasswordAttemptCount: 0,
     });
 
     const savedUser = await this.usersRepository.save(user);
@@ -183,6 +192,7 @@ export class UsersService {
   }
 
   async createPasswordResetOtp(email: string) {
+    const now = Date.now();
     const user = await this.usersRepository.findOne({
       where: { email: email.trim() },
     });
@@ -191,9 +201,27 @@ export class UsersService {
       return null;
     }
 
+    const lastRequestedAt =
+      user.resetPasswordLastRequestedAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+    const currentWindowActive =
+      lastRequestedAt + PASSWORD_RESET_REQUEST_WINDOW_MS > now;
+    const currentRequestCount = Number(user.resetPasswordRequestCount ?? 0);
+
+    if (
+      currentWindowActive &&
+      currentRequestCount >= PASSWORD_RESET_MAX_REQUESTS_PER_WINDOW
+    ) {
+      return null;
+    }
+
     const otp = randomInt(0, 1_000_000).toString().padStart(6, '0');
     user.resetPasswordCode = await this.hashPassword(otp);
-    user.resetPasswordExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    user.resetPasswordExpiresAt = new Date(now + PASSWORD_RESET_OTP_TTL_MS);
+    user.resetPasswordRequestCount = currentWindowActive
+      ? currentRequestCount + 1
+      : 1;
+    user.resetPasswordLastRequestedAt = new Date(now);
+    user.resetPasswordAttemptCount = 0;
     await this.usersRepository.save(user);
 
     return {
@@ -201,7 +229,7 @@ export class UsersService {
       fullName: user.fullName,
       username: user.username,
       otp,
-      expiresInMinutes: 10,
+      expiresInMinutes: PASSWORD_RESET_OTP_TTL_MS / 60_000,
     };
   }
 
@@ -211,18 +239,30 @@ export class UsersService {
     });
 
     if (!user || !user.isActive) {
-      throw new BadRequestException('Email hoac ma OTP khong hop le');
+      throw new BadRequestException(PASSWORD_RESET_INVALID_MESSAGE);
     }
 
     if (!user.resetPasswordCode || !user.resetPasswordExpiresAt) {
-      throw new BadRequestException('Ma OTP khong hop le hoac da het han');
+      throw new BadRequestException(PASSWORD_RESET_INVALID_MESSAGE);
     }
 
     if (user.resetPasswordExpiresAt.getTime() <= Date.now()) {
       user.resetPasswordCode = null;
       user.resetPasswordExpiresAt = null;
+      user.resetPasswordAttemptCount = 0;
       await this.usersRepository.save(user);
-      throw new BadRequestException('Ma OTP da het han');
+      throw new BadRequestException(PASSWORD_RESET_INVALID_MESSAGE);
+    }
+
+    if (
+      Number(user.resetPasswordAttemptCount ?? 0) >=
+      PASSWORD_RESET_MAX_ATTEMPTS
+    ) {
+      user.resetPasswordCode = null;
+      user.resetPasswordExpiresAt = null;
+      user.resetPasswordAttemptCount = 0;
+      await this.usersRepository.save(user);
+      throw new BadRequestException(PASSWORD_RESET_INVALID_MESSAGE);
     }
 
     const isValidOtp = await this.checkUserPassword(
@@ -230,7 +270,15 @@ export class UsersService {
       user.resetPasswordCode,
     );
     if (!isValidOtp) {
-      throw new BadRequestException('Ma OTP khong hop le');
+      user.resetPasswordAttemptCount =
+        Number(user.resetPasswordAttemptCount ?? 0) + 1;
+      if (user.resetPasswordAttemptCount >= PASSWORD_RESET_MAX_ATTEMPTS) {
+        user.resetPasswordCode = null;
+        user.resetPasswordExpiresAt = null;
+        user.resetPasswordAttemptCount = 0;
+      }
+      await this.usersRepository.save(user);
+      throw new BadRequestException(PASSWORD_RESET_INVALID_MESSAGE);
     }
 
     if (
@@ -243,6 +291,9 @@ export class UsersService {
     user.passwordHash = await this.hashPassword(newPassword);
     user.resetPasswordCode = null;
     user.resetPasswordExpiresAt = null;
+    user.resetPasswordRequestCount = 0;
+    user.resetPasswordLastRequestedAt = null;
+    user.resetPasswordAttemptCount = 0;
     const savedUser = await this.usersRepository.save(user);
 
     await this.refreshTokensRepository.update(

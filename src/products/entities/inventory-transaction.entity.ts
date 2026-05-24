@@ -9,6 +9,8 @@ import {
 export enum InventoryTransactionType {
   IMPORT = 'import',
   EXPORT = 'export',
+  TRANSFER_OUT = 'transfer_out',
+  TRANSFER_IN = 'transfer_in',
   ADJUSTMENT = 'adjustment',
   RETURN_IN = 'return_in',
   RETURN_OUT = 'return_out',

@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditLogsModule } from '../audit-logs/audit-logs.module';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
+import { ProductBatchEntity } from '../products/entities/product-batch.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductBatchService } from '../products/product-batch.service';
 import { StockAdjustmentItemEntity } from './entities/stock-adjustment-item.entity';
 import { StockAdjustmentEntity } from './entities/stock-adjustment.entity';
 import { StockTransferItemEntity } from './entities/stock-transfer-item.entity';
@@ -22,12 +24,13 @@ import { WarehousesService } from './warehouses.service';
       StockAdjustmentEntity,
       StockAdjustmentItemEntity,
       ProductEntity,
+      ProductBatchEntity,
       InventoryTransactionEntity,
     ]),
     AuditLogsModule,
   ],
   controllers: [WarehousesController],
-  providers: [WarehousesService],
+  providers: [WarehousesService, ProductBatchService],
   exports: [WarehousesService, TypeOrmModule],
 })
 export class WarehousesModule {}

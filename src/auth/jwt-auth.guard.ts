@@ -6,7 +6,11 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
-import { IS_PUBLIC_KEY, PERMISSIONS_KEY } from '../decorator/customize';
+import {
+  ANY_PERMISSIONS_KEY,
+  IS_PUBLIC_KEY,
+  PERMISSIONS_KEY,
+} from '../decorator/customize';
 import { IUser } from '../users/users.interface';
 
 @Injectable()
@@ -45,8 +49,16 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
         context.getHandler(),
         context.getClass(),
       ]) ?? [];
+    const requiredAnyPermissions =
+      this.reflector.getAllAndOverride<string[]>(ANY_PERMISSIONS_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]) ?? [];
 
-    if (requiredPermissions.length === 0) {
+    if (
+      requiredPermissions.length === 0 &&
+      requiredAnyPermissions.length === 0
+    ) {
       return user as TUser;
     }
 
@@ -57,8 +69,13 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     const hasAllPermissions = requiredPermissions.every((permission) =>
       currentPermissions.has(permission),
     );
+    const hasAnyPermission =
+      requiredAnyPermissions.length === 0 ||
+      requiredAnyPermissions.some((permission) =>
+        currentPermissions.has(permission),
+      );
 
-    if (!hasAllPermissions) {
+    if (!hasAllPermissions || !hasAnyPermission) {
       throw new ForbiddenException('Bạn không có quyền truy cập tính năng này');
     }
 

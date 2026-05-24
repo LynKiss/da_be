@@ -85,6 +85,27 @@ export class UserEntity {
   resetPasswordExpiresAt: Date | null;
 
   @Column({
+    name: 'reset_password_request_count',
+    type: 'int',
+    default: () => '0',
+  })
+  resetPasswordRequestCount: number;
+
+  @Column({
+    name: 'reset_password_last_requested_at',
+    type: 'datetime',
+    nullable: true,
+  })
+  resetPasswordLastRequestedAt: Date | null;
+
+  @Column({
+    name: 'reset_password_attempt_count',
+    type: 'int',
+    default: () => '0',
+  })
+  resetPasswordAttemptCount: number;
+
+  @Column({
     name: 'membership_tier',
     type: 'enum',
     enum: MembershipTier,

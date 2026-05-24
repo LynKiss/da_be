@@ -1,6 +1,10 @@
 import { Controller, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ResponseMessage, User } from '../decorator/customize';
+import {
+  RequireAnyPermissions,
+  ResponseMessage,
+  User,
+} from '../decorator/customize';
 import {
   uploadImageToCloudinary,
   type UploadedImageFile,
@@ -10,6 +14,7 @@ import type { IUser } from '../users/users.interface';
 @Controller('uploads')
 export class UploadsController {
   @Post('rich-text-images')
+  @RequireAnyPermissions('manage_products', 'manage_news', 'manage_interface')
   @UseInterceptors(FileInterceptor('file'))
   @ResponseMessage('Rich text image uploaded')
   async uploadRichTextImage(

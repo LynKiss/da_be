@@ -11,6 +11,7 @@ import { ReorderCategoryDto } from './dto/reorder-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { CategoryEntity } from './entities/category.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { sanitizeRichText } from '../common/rich-text-sanitizer';
 
 export type CategoryTreeNode = {
   categoryId: string;
@@ -107,7 +108,8 @@ export class CategoriesService {
 
     const category = this.categoriesRepository.create({
       categoryName: createCategoryDto.categoryName,
-      categoryDescription: createCategoryDto.categoryDescription ?? null,
+      categoryDescription:
+        sanitizeRichText(createCategoryDto.categoryDescription) ?? null,
       categorySlug,
       parentId: categoryParentId,
       isActive: createCategoryDto.isActive ?? true,
@@ -161,7 +163,7 @@ export class CategoriesService {
       updateCategoryDto.categoryName ?? category.categoryName;
     category.categoryDescription =
       updateCategoryDto.categoryDescription !== undefined
-        ? (updateCategoryDto.categoryDescription || null)
+        ? (sanitizeRichText(updateCategoryDto.categoryDescription) ?? null)
         : category.categoryDescription;
     category.isActive = updateCategoryDto.isActive ?? category.isActive;
 

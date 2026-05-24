@@ -1,8 +1,7 @@
 import { Response } from 'express';
 import {
-  BadRequestException,
   Injectable,
-  InternalServerErrorException,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -27,6 +26,8 @@ type JwtPayload = {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private readonly usersService: UsersService,
     private readonly jwtService: JwtService,
@@ -97,7 +98,12 @@ export class AuthService {
     const resetOtp = await this.usersService.createPasswordResetOtp(dto.email);
 
     if (resetOtp) {
-      await this.sendPasswordResetOtpEmail(resetOtp);
+      try {
+        await this.sendPasswordResetOtpEmail(resetOtp);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Password reset OTP email was not sent: ${message}`);
+      }
     }
 
     return {
@@ -254,7 +260,8 @@ export class AuthService {
   }) {
     const smtp = await this.settingsService.getResolvedSmtpConfig();
     if (!smtp.host || !smtp.user || !smtp.pass) {
-      throw new InternalServerErrorException('SMTP chua duoc cau hinh');
+      this.logger.warn('SMTP is not configured for password reset OTP email');
+      return;
     }
 
     try {
@@ -284,7 +291,7 @@ export class AuthService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
-      throw new BadRequestException(`Khong gui duoc email OTP: ${message}`);
+      this.logger.warn(`Cannot send password reset OTP email: ${message}`);
     }
   }
 

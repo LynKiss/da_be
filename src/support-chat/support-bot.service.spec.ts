@@ -103,7 +103,7 @@ describe('SupportBotService', () => {
     expect(productsService.findAll.mock.calls[0][0].search).toBeUndefined();
     expect(result.source).toBe('fallback');
     expect(result.products).toHaveLength(1);
-    expect(result.reply).toContain('Hien co 1 san pham dang hien thi');
+    expect(result.reply).toContain('Hiện có 1 sản phẩm đang hiển thị');
     expect(result.reply).toContain('Hat giong lua OM5451');
   });
 
@@ -136,11 +136,11 @@ describe('SupportBotService', () => {
         includeHidden: false,
       }),
     );
-    expect(result.intent).toBe('product_recommendation');
+    expect(result.intent).toBe('product_search');
     expect(result.products).toHaveLength(1);
-    expect(result.reply).toContain('Toi goi y cac san pham');
+    expect(result.reply).toContain('Tôi gợi ý các sản phẩm');
     expect(result.reply).toContain('Phan NPK chuyen dung cho lua');
-    expect(result.reply).toContain('Phu hop vi');
+    expect(result.reply).toContain('Phù hợp');
   });
 
   it('uses the current user context for identity questions', async () => {
@@ -215,7 +215,7 @@ describe('SupportBotService', () => {
       quantity: 2,
     });
     expect(result.cartChanged).toBe(true);
-    expect(result.reply).toContain('Da them 2 x Phan huu co vao gio hang');
+    expect(result.reply).toContain('Đã thêm 2 x Phan huu co vào giỏ hàng');
   });
 
   it('removes quantity from cart search and selects the best catalog match', async () => {
@@ -282,7 +282,7 @@ describe('SupportBotService', () => {
       quantity: 2,
     });
     expect(result.reply).toContain(
-      'Da them 2 x Binh xit tay 8 lit Taiwan vao gio hang',
+      'Đã thêm 2 x Binh xit tay 8 lit Taiwan vào giỏ hàng',
     );
   });
 
@@ -331,9 +331,9 @@ describe('SupportBotService', () => {
       limit: 5,
     });
     expect(result.source).toBe('fallback');
-    expect(result.reply).toContain('Ban co 2 don hang');
-    expect(result.reply).toContain('Dang giao');
-    expect(result.reply).toContain('Da giao');
+    expect(result.reply).toContain('Bạn có 2 đơn hàng');
+    expect(result.reply).toContain('Đang giao');
+    expect(result.reply).toContain('Đã giao');
   });
 
   it('summarizes guest order when message contains order id and phone', async () => {
@@ -358,7 +358,7 @@ describe('SupportBotService', () => {
       '11111111-2222-3333-4444-555555555555',
       '0912345678',
     );
-    expect(result.reply).toContain('Trang thai: Dang giao');
+    expect(result.reply).toContain('Trạng thái: Đang giao');
     expect(result.source).toBe('fallback');
   });
 

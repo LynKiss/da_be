@@ -9,6 +9,9 @@ export const ResponseMessage = (message: string) =>
 export const PERMISSIONS_KEY = 'permissions';
 export const RequirePermissions = (...permissions: string[]) =>
   SetMetadata(PERMISSIONS_KEY, permissions);
+export const ANY_PERMISSIONS_KEY = 'any_permissions';
+export const RequireAnyPermissions = (...permissions: string[]) =>
+  SetMetadata(ANY_PERMISSIONS_KEY, permissions);
 export const User = createParamDecorator(
   (_data: unknown, ctx: ExecutionContext) => {
     const request = ctx.switchToHttp().getRequest<{ user?: unknown }>();
