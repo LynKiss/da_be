@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { Logger } from '@nestjs/common';
 import { v4 as uuidv4 } from 'uuid';
 import { AuditLogsService } from '../audit-logs/audit-logs.service';
@@ -15,6 +15,7 @@ import { OrderItemEntity } from '../orders/entities/order-item.entity';
 import { OrderStatusHistoryEntity } from '../orders/entities/order-status-history.entity';
 import { InventoryTransactionEntity, InventoryTransactionType } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { ProductBatchService } from '../products/product-batch.service';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
@@ -113,6 +114,9 @@ export class ProcurementService {
 
     @InjectRepository(ProductEntity)
     private readonly productRepo: Repository<ProductEntity>,
+
+    @InjectRepository(ProductImageEntity)
+    private readonly productImageRepo: Repository<ProductImageEntity>,
 
     @InjectRepository(InventoryTransactionEntity)
     private readonly txRepo: Repository<InventoryTransactionEntity>,
@@ -340,7 +344,36 @@ export class ProcurementService {
       relations: ['items'],
     });
     if (!po) throw new NotFoundException('Không tìm thấy phiếu đặt hàng');
-    return po;
+    if (!po) throw new NotFoundException('Không tìm thấy phiếu đặt hàng');
+
+    const productIds = [...new Set((po.items ?? []).map((item) => item.productId))];
+    const [products, primaryImages] = await Promise.all([
+      productIds.length
+        ? this.productRepo.find({ where: { productId: In(productIds) } })
+        : Promise.resolve([]),
+      productIds.length
+        ? this.productImageRepo.find({
+          where: { productId: In(productIds), isPrimary: true as unknown as boolean },
+        })
+        : Promise.resolve([]),
+    ]);
+    const productMap = new Map(products.map((product) => [product.productId, product]));
+    const imageMap = new Map(primaryImages.map((image) => [image.productId, image.imageUrl]));
+
+    return {
+      ...po,
+      items: (po.items ?? []).map((item) => {
+        const product = productMap.get(item.productId);
+        return {
+          ...item,
+          productName: product?.productName ?? null,
+          productSlug: product?.productSlug ?? null,
+          productCode: product?.barcode ?? product?.productId ?? item.productId,
+          primaryImageUrl: imageMap.get(item.productId) ?? null,
+          categoryId: product?.categoryId ?? null,
+        };
+      }),
+    };
   }
 
   async createPo(dto: CreatePoDto, performer?: { userId: string; username: string; ip?: string }) {

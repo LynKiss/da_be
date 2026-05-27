@@ -1,4 +1,4 @@
-import {
+﻿import {
   Body,
   Controller,
   Delete,
@@ -79,8 +79,8 @@ export class CommentsController {
   }
 
   /**
-   * Upload 1 ảnh review lên Cloudinary, trả về URL.
-   * Client gọi nhiều lần (max 5) trước khi submit review.
+   * Upload 1 áº£nh review lÃªn Cloudinary, tráº£ vá» URL.
+   * Client gá»i nhiá»u láº§n (max 5) trÆ°á»›c khi submit review.
    */
   @Post('upload-image')
   @UseInterceptors(FileInterceptor('file'))
@@ -97,7 +97,23 @@ export class CommentsController {
     return { url };
   }
 
-  // ─── Admin endpoints ───────────────────────────────────────────────────────
+  @Get('me')
+  @ResponseMessage('Get my product reviews')
+  getMyReviews(
+    @User() currentUser: IUser,
+    @Query('page') page = '1',
+    @Query('limit') limit = '12',
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.commentsService.findMyReviews(currentUser._id, {
+      page: Math.max(1, parseInt(page, 10) || 1),
+      limit: Math.min(100, Math.max(1, parseInt(limit, 10) || 12)),
+      status,
+      search,
+    });
+  }
+  // â”€â”€â”€ Admin endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   @RequirePermissions('manage_reviews')
   @Get('admin/stats')
@@ -156,3 +172,4 @@ export class CommentsController {
     return this.commentsService.deleteOwnReview(currentUser._id, id);
   }
 }
+

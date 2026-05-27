@@ -22,6 +22,7 @@ import { PurchaseOrderEntity, PurchaseOrderStatus } from '../procurement/entitie
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { RiceDiagnosisHistoryEntity } from '../rice-diagnosis/entities/rice-diagnosis-history.entity';
+import { SupplierEntity } from '../suppliers/entities/supplier.entity';
 import { UserEntity, UserRole } from '../users/entities/user.entity';
 import { QueryCouponUsageDto } from './dto/query-coupon-usage.dto';
 import {
@@ -59,6 +60,9 @@ export class ReportsService {
 
     @InjectRepository(PurchaseOrderEntity)
     private readonly poRepository: Repository<PurchaseOrderEntity>,
+
+    @InjectRepository(SupplierEntity)
+    private readonly suppliersRepository: Repository<SupplierEntity>,
 
     @InjectRepository(ReturnEntity)
     private readonly returnsRepository: Repository<ReturnEntity>,
@@ -117,6 +121,7 @@ export class ReportsService {
         refundQb
           .select('ret.order_item_id', 'orderItemId')
           .addSelect('SUM(refund.amount)', 'completedRefund')
+          .addSelect('SUM(ret.return_quantity)', 'completedReturnQty')
           .from(OrderRefundEntity, 'refund')
           .innerJoin(ReturnEntity, 'ret', 'ret.return_id = refund.return_id')
           .where('refund.refund_status = :completedRefundStatus', {
@@ -167,14 +172,16 @@ export class ReportsService {
     query: QueryProfitabilityDto,
     unallocatedRefund: number,
     paging?: { page: number; limit: number; total: number; totalPages: number },
+    totals?: Record<string, unknown>,
   ) {
     return {
       ...(paging ?? {}),
+      ...(totals ?? {}),
       revenuePolicy: this.revenuePolicy,
       refundPolicy:
         'only completed refunds reduce revenue; return-linked refunds are allocated by return line, unlinked refunds are exposed as unallocatedRefund',
       cogsPolicy:
-        'COGS uses order-linked inventory export/return_in transactions in the same period; missing legacy costs fall back to product avgCost/costPrice',
+        'COGS prefers order-linked inventory export/return_in transactions with positive unit_cost_at_time; legacy rows fall back to product avgCost/costPrice and missing costs are reported as warnings',
       unallocatedRefund,
     };
   }
@@ -1278,7 +1285,358 @@ export class ReportsService {
 
   // ─── Lợi Nhuận Thật ───────────────────────────────────────────────────────
 
+  private async getProfitabilityV2(query: QueryProfitabilityDto) {
+    const { groupBy = 'product' } = query;
+    const completedStatuses = this.financialRevenueStatuses;
+    const unallocatedRefund = await this.getUnallocatedCompletedRefundAmount(query);
+
+    const fulfilledQtySql = `CASE
+      WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}'
+        THEN item.quantity_delivered
+      ELSE item.quantity
+    END`;
+    const fulfilledRatioSql = `CASE
+      WHEN o.order_status = '${OrderStatus.PARTIAL_DELIVERED}' AND item.quantity > 0
+        THEN item.quantity_delivered / item.quantity
+      ELSE 1
+    END`;
+    const fulfilledGrossSql =
+      `COALESCE(NULLIF(item.gross_line_total, 0), item.line_total) * ${fulfilledRatioSql}`;
+    const fulfilledDiscountSql = `COALESCE(item.discount_allocated, 0) * ${fulfilledRatioSql}`;
+    const fulfilledNetSql = this.fulfilledLineRevenueSql('o', 'item');
+    const dateFormat = groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d';
+    const periodSql = `DATE_FORMAT(o.created_at, '${dateFormat}')`;
+
+    const revenueQb = this.joinCompletedLineRefunds(
+      this.orderItemsRepository
+        .createQueryBuilder('item')
+        .innerJoin(OrderEntity, 'o', 'o.order_id = item.order_id'),
+      'item',
+    )
+      .select('item.product_id', 'productId')
+      .addSelect('item.product_name', 'productName')
+      .addSelect(`SUM(${fulfilledQtySql})`, 'soldQty')
+      .addSelect('SUM(COALESCE(completed_line_refunds.completedReturnQty, 0))', 'returnedQty')
+      .addSelect(`SUM(${fulfilledGrossSql})`, 'grossRevenue')
+      .addSelect(`SUM(${fulfilledDiscountSql})`, 'discountAllocated')
+      .addSelect(`SUM(${fulfilledNetSql})`, 'revenueBeforeRefund')
+      .addSelect('SUM(COALESCE(completed_line_refunds.completedRefund, 0))', 'refundAllocated')
+      .addSelect(
+        `SUM(GREATEST(0, ${fulfilledNetSql} - COALESCE(completed_line_refunds.completedRefund, 0)))`,
+        'revenue',
+      )
+      .where('o.order_status IN (:...statuses)', { statuses: completedStatuses });
+
+    revenueQb.groupBy('item.product_id').addGroupBy('item.product_name');
+    if (groupBy !== 'product') {
+      revenueQb.addSelect(periodSql, 'period').addGroupBy('period');
+    }
+    if (query.from) revenueQb.andWhere('o.created_at >= :from', { from: query.from });
+    if (query.to) revenueQb.andWhere('o.created_at <= :to', { to: query.to });
+    revenueQb.orderBy(groupBy === 'product' ? 'revenue' : 'period', groupBy === 'product' ? 'DESC' : 'ASC');
+
+    const revenueRows = (await revenueQb.getRawMany()) as Array<{
+      productId: string;
+      productName: string;
+      period?: string;
+      soldQty: string;
+      returnedQty: string;
+      grossRevenue: string;
+      discountAllocated: string;
+      revenueBeforeRefund: string;
+      refundAllocated: string;
+      revenue: string;
+    }>;
+
+    const productIds = [...new Set(revenueRows.map((row) => row.productId).filter(Boolean))];
+    const products = productIds.length
+      ? await this.productsRepository.findBy({ productId: In(productIds) })
+      : [];
+    const fallbackCostMap = new Map(
+      products.map((product) => [
+        product.productId,
+        Number(product.avgCost ?? 0) || Number(product.costPrice ?? 0),
+      ]),
+    );
+
+    const cogsRows = productIds.length
+      ? await (() => {
+          const txQb = this.inventoryTransactionsRepository
+            .createQueryBuilder('tx')
+            .select('tx.product_id', 'productId')
+            .addSelect(
+              `SUM(CASE
+                WHEN tx.transaction_type = 'export' AND tx.unit_cost_at_time > 0
+                  THEN ABS(tx.quantity_change) * tx.unit_cost_at_time
+                WHEN tx.transaction_type = 'return_in' AND tx.unit_cost_at_time > 0
+                  THEN -ABS(tx.quantity_change) * tx.unit_cost_at_time
+                ELSE 0
+              END)`,
+              'transactionCogs',
+            )
+            .addSelect(
+              `SUM(CASE
+                WHEN tx.transaction_type = 'export' AND tx.unit_cost_at_time > 0
+                  THEN ABS(tx.quantity_change)
+                WHEN tx.transaction_type = 'return_in' AND tx.unit_cost_at_time > 0
+                  THEN -ABS(tx.quantity_change)
+                ELSE 0
+              END)`,
+              'qtyWithTransactionCost',
+            )
+            .addSelect(
+              `SUM(CASE
+                WHEN tx.transaction_type = 'export'
+                  THEN ABS(tx.quantity_change)
+                WHEN tx.transaction_type = 'return_in'
+                  THEN -ABS(tx.quantity_change)
+                ELSE 0
+              END)`,
+              'transactionQty',
+            )
+            .addSelect(
+              `SUM(CASE
+                WHEN tx.unit_cost_at_time IS NULL OR tx.unit_cost_at_time <= 0
+                  THEN ABS(tx.quantity_change)
+                ELSE 0
+              END)`,
+              'zeroCostTransactionQty',
+            )
+            .innerJoin(OrderEntity, 'co', 'co.order_id = tx.related_order_id')
+            .where('tx.transaction_type IN (:...types)', {
+              types: ['export', 'return_in'],
+            })
+            .andWhere('tx.product_id IN (:...pids)', { pids: productIds })
+            .andWhere('tx.related_order_id IS NOT NULL')
+            .andWhere('co.order_status IN (:...statuses)', {
+              statuses: completedStatuses,
+            });
+
+          txQb.groupBy('tx.product_id');
+          if (groupBy !== 'product') {
+            txQb.addSelect(`DATE_FORMAT(co.created_at, '${dateFormat}')`, 'period').addGroupBy('period');
+          }
+          if (query.from) txQb.andWhere('co.created_at >= :from', { from: query.from });
+          if (query.to) txQb.andWhere('co.created_at <= :to', { to: query.to });
+          return txQb.getRawMany();
+        })()
+      : [];
+
+    const makeKey = (productId: string, period?: string) =>
+      groupBy === 'product' ? productId : `${productId}::${period ?? ''}`;
+    const cogsMap = new Map(
+      cogsRows.map((row: any) => [
+        makeKey(row.productId, row.period),
+        {
+          transactionCogs: Number(row.transactionCogs ?? 0),
+          qtyWithTransactionCost: Math.max(0, Number(row.qtyWithTransactionCost ?? 0)),
+          transactionQty: Number(row.transactionQty ?? 0),
+          zeroCostTransactionQty: Math.max(0, Number(row.zeroCostTransactionQty ?? 0)),
+        },
+      ]),
+    );
+
+    const items = revenueRows.map((row) => {
+      const soldQty = Number(row.soldQty ?? 0);
+      const returnedQty = Math.min(Number(row.returnedQty ?? 0), soldQty);
+      const netSoldQty = Math.max(0, soldQty - returnedQty);
+      const revenue = Number(row.revenue ?? 0);
+      const fallbackUnitCost = fallbackCostMap.get(row.productId) ?? 0;
+      const txData = cogsMap.get(makeKey(row.productId, row.period));
+      const transactionCoveredQty = Math.min(
+        netSoldQty,
+        Math.max(0, Number(txData?.qtyWithTransactionCost ?? 0)),
+      );
+      const fallbackCostQty = Math.max(0, netSoldQty - transactionCoveredQty);
+      const missingCostQty = fallbackUnitCost > 0 ? 0 : fallbackCostQty;
+      const fallbackCostUsed = fallbackUnitCost > 0 ? fallbackCostQty * fallbackUnitCost : 0;
+      const transactionCogs = Math.max(0, Number(txData?.transactionCogs ?? 0));
+      const cogs = transactionCogs + fallbackCostUsed;
+      const cogsCoveragePct =
+        netSoldQty > 0
+          ? ((transactionCoveredQty + (fallbackUnitCost > 0 ? fallbackCostQty : 0)) / netSoldQty) * 100
+          : 100;
+      const warnings = [
+        missingCostQty > 0 ? 'MISSING_COST_SOURCE' : null,
+        fallbackCostQty > 0 && fallbackUnitCost > 0 ? 'USED_FALLBACK_AVG_COST' : null,
+        Number(txData?.zeroCostTransactionQty ?? 0) > 0 ? 'ZERO_COST_INVENTORY_TRANSACTION' : null,
+        Number(txData?.transactionQty ?? 0) > netSoldQty ? 'COGS_QTY_EXCEEDS_NET_SOLD' : null,
+      ].filter(Boolean) as string[];
+      const cogsSource =
+        netSoldQty <= 0 || transactionCoveredQty >= netSoldQty
+          ? 'transaction'
+          : transactionCoveredQty > 0 && fallbackUnitCost > 0
+            ? 'mixed'
+            : fallbackUnitCost > 0
+              ? 'fallback_avg_cost'
+              : 'missing';
+      const grossProfit = revenue - cogs;
+      const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+
+      return {
+        productId: row.productId,
+        productName: row.productName,
+        period: row.period,
+        soldQty,
+        returnedQty,
+        netSoldQty,
+        grossRevenue: Number(row.grossRevenue ?? 0),
+        discountAllocated: Number(row.discountAllocated ?? 0),
+        revenueBeforeRefund: Number(row.revenueBeforeRefund ?? 0),
+        refundAllocated: Number(row.refundAllocated ?? 0),
+        revenue,
+        cogs,
+        transactionCogs,
+        fallbackCostUsed,
+        fallbackUnitCost,
+        missingCostQty,
+        fallbackCostQty,
+        transactionCoveredQty,
+        cogsCoveragePct: Math.round(cogsCoveragePct * 100) / 100,
+        cogsSource,
+        warnings,
+        grossProfit,
+        marginPct: Math.round(marginPct * 100) / 100,
+      };
+    });
+
+    const totalsBase = items.reduce(
+      (acc, item) => {
+        acc.totalGrossRevenue += item.grossRevenue;
+        acc.totalDiscountAllocated += item.discountAllocated;
+        acc.totalLineRevenueBeforeRefund += item.revenueBeforeRefund;
+        acc.totalLineRevenue += item.revenue;
+        acc.totalLineRefund += item.refundAllocated;
+        acc.totalCOGS += item.cogs;
+        acc.totalSoldQty += item.soldQty;
+        acc.totalReturnedQty += item.returnedQty;
+        acc.totalNetSoldQty += item.netSoldQty;
+        acc.transactionCoveredQty += item.transactionCoveredQty;
+        acc.fallbackCostQty += item.fallbackCostQty;
+        acc.missingCostQty += item.missingCostQty;
+        acc.zeroCostRows += item.warnings.includes('ZERO_COST_INVENTORY_TRANSACTION') ? 1 : 0;
+        acc.fallbackRows += item.cogsSource === 'fallback_avg_cost' || item.cogsSource === 'mixed' ? 1 : 0;
+        acc.missingCostRows += item.cogsSource === 'missing' || item.missingCostQty > 0 ? 1 : 0;
+        return acc;
+      },
+      {
+        totalGrossRevenue: 0,
+        totalDiscountAllocated: 0,
+        totalLineRevenueBeforeRefund: 0,
+        totalLineRevenue: 0,
+        totalLineRefund: 0,
+        totalCOGS: 0,
+        totalSoldQty: 0,
+        totalReturnedQty: 0,
+        totalNetSoldQty: 0,
+        transactionCoveredQty: 0,
+        fallbackCostQty: 0,
+        missingCostQty: 0,
+        zeroCostRows: 0,
+        fallbackRows: 0,
+        missingCostRows: 0,
+      },
+    );
+    const totalRevenue = Math.max(0, totalsBase.totalLineRevenue - unallocatedRefund);
+    const grossProfit = totalRevenue - totalsBase.totalCOGS;
+    const cogsCoveragePct =
+      totalsBase.totalNetSoldQty > 0
+        ? ((totalsBase.transactionCoveredQty + totalsBase.fallbackCostQty - totalsBase.missingCostQty) /
+            totalsBase.totalNetSoldQty) *
+          100
+        : 100;
+    const dataQualityWarnings = [
+      totalsBase.missingCostQty > 0 ? 'Có sản phẩm đã bán nhưng thiếu nguồn giá vốn.' : null,
+      totalsBase.fallbackRows > 0 ? 'Một phần giá vốn đang dùng avgCost/costPrice fallback.' : null,
+      unallocatedRefund > 0 ? 'Có refund chưa gắn được vào dòng sản phẩm.' : null,
+    ].filter(Boolean);
+    const totals = {
+      totalGrossRevenue: totalsBase.totalGrossRevenue,
+      totalDiscountAllocated: totalsBase.totalDiscountAllocated,
+      totalRevenueBeforeRefund: totalsBase.totalLineRevenueBeforeRefund,
+      totalRefund: totalsBase.totalLineRefund + unallocatedRefund,
+      totalLineRefund: totalsBase.totalLineRefund,
+      totalRevenue,
+      totalCOGS: totalsBase.totalCOGS,
+      grossProfit,
+      grossMargin: totalRevenue > 0 ? Math.round((grossProfit / totalRevenue) * 10000) / 100 : 0,
+      totalSoldQty: totalsBase.totalSoldQty,
+      totalReturnedQty: totalsBase.totalReturnedQty,
+      totalNetSoldQty: totalsBase.totalNetSoldQty,
+      cogsCoveragePct: Math.max(0, Math.min(100, Math.round(cogsCoveragePct * 100) / 100)),
+      transactionCoveredQty: totalsBase.transactionCoveredQty,
+      fallbackCostQty: totalsBase.fallbackCostQty,
+      missingCostQty: totalsBase.missingCostQty,
+      zeroCostRows: totalsBase.zeroCostRows,
+      fallbackRows: totalsBase.fallbackRows,
+      missingCostRows: totalsBase.missingCostRows,
+      unreliableCogs:
+        totalsBase.missingCostQty > 0 || totalsBase.fallbackRows > 0 || unallocatedRefund > 0,
+      dataQualityWarnings,
+    };
+
+    if (groupBy === 'product') {
+      const page = Math.max(1, Number(query.page) || 1);
+      const limit = Math.min(500, Math.max(1, Number(query.limit) || 30));
+      const total = items.length;
+      return {
+        items: items.slice((page - 1) * limit, page * limit),
+        meta: this.profitabilityMeta(
+          query,
+          unallocatedRefund,
+          { page, limit, total, totalPages: Math.ceil(total / limit) },
+          totals,
+        ),
+      };
+    }
+
+    const periodMap = new Map<string, any>();
+    for (const item of items) {
+      const period = item.period ?? 'unknown';
+      const current = periodMap.get(period) ?? {
+        period,
+        soldQty: 0,
+        returnedQty: 0,
+        netSoldQty: 0,
+        grossRevenue: 0,
+        discountAllocated: 0,
+        refundAllocated: 0,
+        revenue: 0,
+        cogs: 0,
+        grossProfit: 0,
+        missingCostQty: 0,
+        warnings: [] as string[],
+      };
+      current.soldQty += item.soldQty;
+      current.returnedQty += item.returnedQty;
+      current.netSoldQty += item.netSoldQty;
+      current.grossRevenue += item.grossRevenue;
+      current.discountAllocated += item.discountAllocated;
+      current.refundAllocated += item.refundAllocated;
+      current.revenue += item.revenue;
+      current.cogs += item.cogs;
+      current.grossProfit += item.grossProfit;
+      current.missingCostQty += item.missingCostQty;
+      current.warnings = [...new Set([...current.warnings, ...item.warnings])];
+      periodMap.set(period, current);
+    }
+
+    const periodItems = [...periodMap.values()]
+      .sort((a, b) => String(a.period).localeCompare(String(b.period)))
+      .map((item) => ({
+        ...item,
+        marginPct: item.revenue > 0 ? Math.round((item.grossProfit / item.revenue) * 10000) / 100 : 0,
+      }));
+
+    return {
+      items: periodItems,
+      meta: this.profitabilityMeta(query, unallocatedRefund, undefined, totals),
+    };
+  }
+
   async getProfitability(query: QueryProfitabilityDto) {
+    return this.getProfitabilityV2(query);
+
     const { groupBy = 'product' } = query;
 
     const completedStatuses = this.financialRevenueStatuses;
@@ -1474,11 +1832,14 @@ export class ReportsService {
   async getAgingDebt(query: QueryAgingDebtDto) {
     const asOf = query.asOf ? new Date(query.asOf) : new Date();
     const asOfDate = asOf.toISOString().split('T')[0];
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+    const normalizedSearch = query.search?.trim().toLowerCase();
+    const onlyOutstanding = String(query.onlyOutstanding ?? '').toLowerCase() === 'true';
 
     const qb = this.poRepository
       .createQueryBuilder('po')
-      .where('po.payment_status != :paid', { paid: 'paid' })
-      .andWhere('po.status NOT IN (:...excl)', {
+      .where('po.status NOT IN (:...excl)', {
         excl: [PurchaseOrderStatus.DRAFT, PurchaseOrderStatus.CANCELLED],
       })
       .andWhere('(po.orderDate IS NULL OR po.orderDate <= :asOfDate)', {
@@ -1487,41 +1848,94 @@ export class ReportsService {
       .orderBy('po.orderDate', 'ASC');
 
     if (query.supplierId) qb.andWhere('po.supplierId = :sid', { sid: query.supplierId });
+    if (query.paymentStatus && query.paymentStatus !== 'all') {
+      qb.andWhere('po.paymentStatus = :paymentStatus', { paymentStatus: query.paymentStatus });
+    }
+    if (query.poStatus && query.poStatus !== 'all') {
+      qb.andWhere('po.status = :poStatus', { poStatus: query.poStatus });
+    }
+    if (query.from) qb.andWhere('po.orderDate >= :from', { from: query.from });
+    if (query.to) qb.andWhere('po.orderDate <= :to', { to: query.to });
 
     const pos = await qb.getMany();
+    const supplierIds = [...new Set(pos.map((po) => po.supplierId))];
+    const suppliers = supplierIds.length
+      ? await this.suppliersRepository.find({ where: { supplierId: In(supplierIds) } })
+      : [];
+    const supplierById = new Map(suppliers.map((supplier) => [supplier.supplierId, supplier]));
 
     const buckets = {
-      current: [] as typeof pos,
-      days1_7: [] as typeof pos,
-      days8_30: [] as typeof pos,
-      days31_60: [] as typeof pos,
-      days61_90: [] as typeof pos,
-      over90: [] as typeof pos,
+      current: [] as Array<{ outstanding: number }>,
+      days1_7: [] as Array<{ outstanding: number }>,
+      days8_30: [] as Array<{ outstanding: number }>,
+      days31_60: [] as Array<{ outstanding: number }>,
+      days61_90: [] as Array<{ outstanding: number }>,
+      over90: [] as Array<{ outstanding: number }>,
     };
 
     const enrichedItems = pos.map((po) => {
+      const supplier = supplierById.get(po.supplierId);
       const refDate = po.orderDate ? new Date(po.orderDate) : new Date(po.createdAt);
       const diffDays = Math.floor((asOf.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
-      const outstanding = Number(po.totalAmount) - Number(po.paidAmount);
+      const totalAmount = Number(po.totalAmount);
+      const paidAmount = Number(po.paidAmount);
+      const outstanding = Math.max(0, totalAmount - paidAmount);
+      const ageBucket =
+        diffDays <= 0 ? 'current'
+        : diffDays <= 7 ? 'days1_7'
+        : diffDays <= 30 ? 'days8_30'
+        : diffDays <= 60 ? 'days31_60'
+        : diffDays <= 90 ? 'days61_90'
+        : 'over90';
 
-      const enriched = { ...po, diffDays, outstanding };
-      if (diffDays <= 0) buckets.current.push(enriched as typeof po);
-      else if (diffDays <= 7) buckets.days1_7.push(enriched as typeof po);
-      else if (diffDays <= 30) buckets.days8_30.push(enriched as typeof po);
-      else if (diffDays <= 60) buckets.days31_60.push(enriched as typeof po);
-      else if (diffDays <= 90) buckets.days61_90.push(enriched as typeof po);
-      else buckets.over90.push(enriched as typeof po);
+      const enriched = {
+        ...po,
+        supplierName: supplier?.name ?? null,
+        supplierCode: supplier?.code ?? null,
+        diffDays,
+        outstanding,
+        ageBucket,
+        statusLabel: this.getPoStatusLabel(po.status),
+        paymentStatusLabel: this.getPoPaymentStatusLabel(po.paymentStatus),
+        canRecordPayment: outstanding > 0 && po.paymentStatus !== 'paid',
+      };
 
       return enriched;
     });
 
-    const sumOutstanding = (arr: typeof pos) =>
-      arr.reduce((s, po) => s + Number((po as any).outstanding ?? Number(po.totalAmount) - Number(po.paidAmount)), 0);
+    const filteredItems = enrichedItems.filter((po) => {
+      if (onlyOutstanding && po.outstanding <= 0) return false;
+      if (normalizedSearch) {
+        const haystack = [
+          po.poCode,
+          po.supplierName,
+          po.supplierCode,
+          po.paymentNotes,
+          po.notes,
+        ].filter(Boolean).join(' ').toLowerCase();
+        if (!haystack.includes(normalizedSearch)) return false;
+      }
+      return true;
+    });
+
+    const sumOutstanding = (arr: Array<{ outstanding: number }>) =>
+      arr.reduce((s, po) => s + Number(po.outstanding ?? 0), 0);
+    const summaryBase = filteredItems;
+    summaryBase
+      .filter((po) => po.outstanding > 0)
+      .forEach((po) =>
+        buckets[po.ageBucket as keyof typeof buckets].push({ outstanding: po.outstanding }),
+      );
+    const paidTotal = summaryBase.reduce((sum, po) => sum + Number(po.paidAmount), 0);
 
     const summary = {
       asOf: asOfDate,
-      totalPos: pos.length,
-      totalOutstanding: sumOutstanding(pos),
+      totalPos: summaryBase.length,
+      totalOutstanding: summaryBase.reduce((sum, po) => sum + po.outstanding, 0),
+      totalPaid: paidTotal,
+      unpaidCount: summaryBase.filter((po) => po.paymentStatus === 'unpaid').length,
+      partialCount: summaryBase.filter((po) => po.paymentStatus === 'partial').length,
+      paidCount: summaryBase.filter((po) => po.paymentStatus === 'paid').length,
       buckets: {
         current:    { count: buckets.current.length,    total: sumOutstanding(buckets.current) },
         days1_7:    { count: buckets.days1_7.length,    total: sumOutstanding(buckets.days1_7) },
@@ -1532,7 +1946,32 @@ export class ReportsService {
       },
     };
 
-    return { summary, items: enrichedItems };
+    const total = filteredItems.length;
+    return {
+      summary,
+      items: filteredItems.slice((page - 1) * limit, page * limit),
+      meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  private getPoStatusLabel(status: PurchaseOrderStatus | string) {
+    const labels: Record<string, string> = {
+      draft: 'Nháp',
+      ordered: 'Đã đặt hàng',
+      partial: 'Nhập một phần',
+      received: 'Đã nhập đủ',
+      cancelled: 'Đã hủy',
+    };
+    return labels[String(status).toLowerCase()] ?? String(status);
+  }
+
+  private getPoPaymentStatusLabel(status: string) {
+    const labels: Record<string, string> = {
+      unpaid: 'Chưa thanh toán',
+      partial: 'Thanh toán một phần',
+      paid: 'Đã thanh toán',
+    };
+    return labels[String(status).toLowerCase()] ?? status;
   }
 
   async recordPoPayment(dto: RecordPoPaymentDto, userId?: string) {
@@ -1544,12 +1983,16 @@ export class ReportsService {
     const total = Number(po.totalAmount);
     const outstanding = total - paid;
 
+    if (po.paymentStatus === 'paid' || outstanding <= 0) {
+      throw new BadRequestException('Đơn đặt hàng đã thanh toán đủ');
+    }
+
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new BadRequestException('So tien thanh toan phai lon hon 0');
+      throw new BadRequestException('Số tiền thanh toán phải lớn hơn 0');
     }
 
     if (amount > outstanding) {
-      throw new BadRequestException('So tien thanh toan khong duoc vuot qua so con no');
+      throw new BadRequestException('Số tiền thanh toán không được vượt quá số còn nợ');
     }
 
     const newPaid = paid + amount;

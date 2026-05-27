@@ -19,8 +19,13 @@ export class CreditLimitsController {
   @Get()
   @RequirePermissions('manage_users')
   @ResponseMessage('Get credit limits list')
-  findAll(@Query('page') page = 1, @Query('limit') limit = 20) {
-    return this.svc.findAll(+page, +limit);
+  findAll(
+    @Query('page') page = 1,
+    @Query('limit') limit = 20,
+    @Query('search') search?: string,
+    @Query('debtStatus') debtStatus?: 'all' | 'outstanding' | 'near_limit' | 'over_limit',
+  ) {
+    return this.svc.findAll(+page, +limit, search, debtStatus ?? 'all');
   }
 
   @Get('my-limit')
@@ -36,6 +41,24 @@ export class CreditLimitsController {
     return this.svc.findByUser(userId);
   }
 
+  @Get('user/:userId/detail')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Get credit customer detail')
+  getUserDetail(@Param('userId') userId: string) {
+    return this.svc.getUserDetail(userId);
+  }
+
+  @Get('user/:userId/transactions')
+  @RequirePermissions('manage_users')
+  @ResponseMessage('Get credit transaction ledger')
+  getTransactions(
+    @Param('userId') userId: string,
+    @Query('page') page = 1,
+    @Query('limit') limit = 20,
+  ) {
+    return this.svc.getTransactions(userId, +page, +limit);
+  }
+
   @Post()
   @RequirePermissions('manage_users')
   @ResponseMessage('Upsert credit limit')
@@ -46,15 +69,15 @@ export class CreditLimitsController {
   @Post('sync-debt/:userId')
   @RequirePermissions('manage_users')
   @ResponseMessage('Sync current debt from orders')
-  syncDebt(@Param('userId') userId: string) {
-    return this.svc.syncDebt(userId);
+  syncDebt(@Param('userId') userId: string, @User() currentUser: IUser) {
+    return this.svc.syncDebt(userId, currentUser._id);
   }
 
   @Post('record-payment')
   @RequirePermissions('manage_payments')
   @ResponseMessage('Record payment to reduce debt')
-  recordPayment(@Body() dto: RecordPaymentDto) {
-    return this.svc.recordPayment(dto);
+  recordPayment(@Body() dto: RecordPaymentDto, @User() currentUser: IUser) {
+    return this.svc.recordPayment(dto, currentUser._id);
   }
 
   @Delete('user/:userId')

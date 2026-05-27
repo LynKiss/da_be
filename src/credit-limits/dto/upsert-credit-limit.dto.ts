@@ -1,4 +1,4 @@
-import { IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator';
+import { IsIn, IsNumber, IsOptional, IsString, IsUUID, Min } from 'class-validator';
 
 export class UpsertCreditLimitDto {
   @IsUUID('all')
@@ -18,10 +18,18 @@ export class RecordPaymentDto {
   userId: string;
 
   @IsNumber()
-  @Min(0)
+  @Min(1)
   amount: number;
 
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsString()
+  referenceNo?: string;
+
+  @IsOptional()
+  @IsIn(['oldest_first'])
+  allocationMode?: 'oldest_first';
 }

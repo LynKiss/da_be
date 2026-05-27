@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { CreateNewsDto } from './dto/create-news.dto';
 import { NewsStatusFilter, QueryNewsDto } from './dto/query-news.dto';
 import { UpdateNewsDto } from './dto/update-news.dto';
@@ -227,6 +227,67 @@ export class NewsService {
       createdAt: saved.createdAt,
       author: { username: user?.username ?? 'Độc giả' },
       replies: [],
+    };
+  }
+
+  async findMyComments(
+    userId: string,
+    params: { page: number; limit: number; status?: string; search?: string },
+  ) {
+    const where: Record<string, unknown> = { userId };
+    if (params.status && params.status !== 'all') where.status = params.status;
+    const comments = await this.newsCommentRepository.find({
+      where,
+      order: { createdAt: 'DESC' },
+    });
+    const newsIds = [...new Set(comments.map((comment) => comment.newsId))];
+    const articles = newsIds.length
+      ? await this.newsRepository.find({ where: { newsId: In(newsIds) } })
+      : [];
+    const articleById = new Map(articles.map((article) => [article.newsId, article]));
+
+    const normalizedSearch = params.search?.trim().toLowerCase();
+    const mapped = comments.map((comment) => {
+        const article = articleById.get(comment.newsId);
+        return {
+          id: comment.commentId,
+          commentId: comment.commentId,
+          newsId: comment.newsId,
+          articleTitle: article?.title ?? null,
+          articleSlug: article?.slug ?? null,
+          content: comment.content,
+          imageUrls: comment.imageUrls ?? [],
+          status: comment.status,
+          likeCount: comment.likeCount,
+          dislikeCount: comment.dislikeCount,
+          createdAt: comment.createdAt,
+          updatedAt: comment.updatedAt,
+        };
+      });
+    const filtered = normalizedSearch
+      ? mapped.filter((item) =>
+          [
+            item.articleTitle,
+            item.content,
+            item.status,
+            item.articleSlug,
+            item.commentId,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase()
+            .includes(normalizedSearch),
+        )
+      : mapped;
+    const total = filtered.length;
+    return {
+      items: filtered.slice((params.page - 1) * params.limit, params.page * params.limit),
+      meta: {
+        page: params.page,
+        limit: params.limit,
+        total,
+        totalPages: Math.ceil(total / params.limit),
+      },
     };
   }
 

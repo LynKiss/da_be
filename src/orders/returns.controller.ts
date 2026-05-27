@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import {
   RequirePermissions,
   ResponseMessage,
@@ -25,8 +25,23 @@ export class ReturnsController {
 
   @Get('me')
   @ResponseMessage('Get my returns')
-  getMyReturns(@User() currentUser: IUser) {
-    return this.ordersService.findMyReturns(currentUser._id);
+  getMyReturns(
+    @User() currentUser: IUser,
+    @Query('page') page = '1',
+    @Query('limit') limit = '10',
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.ordersService.findMyReturns(currentUser._id, {
+      page: Math.max(1, parseInt(page, 10) || 1),
+      limit: Math.min(100, Math.max(1, parseInt(limit, 10) || 10)),
+      search,
+      status,
+      from,
+      to,
+    });
   }
 
   @Get('admin')

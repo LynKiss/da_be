@@ -5,6 +5,7 @@ import { ProductsModule } from '../products/products.module';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductBatchEntity } from '../products/entities/product-batch.entity';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { GoodsReceiptItemEntity } from './entities/goods-receipt-item.entity';
@@ -30,6 +31,7 @@ import { ProcurementService } from './procurement.service';
       SupplierReturnItemEntity,
       ProductCostHistoryEntity,
       ProductEntity,
+      ProductImageEntity,
       ProductBatchEntity,
       InventoryTransactionEntity,
       WarehouseEntity,

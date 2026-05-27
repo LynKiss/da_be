@@ -1,4 +1,4 @@
-import {
+﻿import {
   Body,
   Controller,
   Delete,
@@ -120,6 +120,22 @@ export class NewsController {
     return this.newsService.unlikeArticle(id);
   }
 
+  @Get('public/comments/me')
+  @ResponseMessage('Get my news comments')
+  getMyComments(
+    @User() currentUser: IUser,
+    @Query('page') page = '1',
+    @Query('limit') limit = '12',
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.newsService.findMyComments(currentUser._id, {
+      page: Math.max(1, parseInt(page, 10) || 1),
+      limit: Math.min(100, Math.max(1, parseInt(limit, 10) || 12)),
+      status,
+      search,
+    });
+  }
   @Get('public/:id/comments')
   @Public()
   @ResponseMessage('Get news comments')
@@ -236,3 +252,4 @@ export class NewsController {
     return this.newsService.remove(id);
   }
 }
+

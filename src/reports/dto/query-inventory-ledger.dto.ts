@@ -20,6 +20,14 @@ export class QueryProfitabilityDto {
 export class QueryAgingDebtDto {
   @IsOptional() @IsString() asOf?: string;
   @IsOptional() @IsString() supplierId?: string;
+  @IsOptional() @IsString() search?: string;
+  @IsOptional() @IsString() paymentStatus?: string;
+  @IsOptional() @IsString() poStatus?: string;
+  @IsOptional() @IsString() from?: string;
+  @IsOptional() @IsString() to?: string;
+  @IsOptional() @IsString() onlyOutstanding?: string;
+  @IsOptional() page?: number;
+  @IsOptional() limit?: number;
 }
 
 export class QueryInventoryReconciliationDto {
