@@ -94,3 +94,40 @@ export function verifyVnpaySignature(
   }
   return diff === 0;
 }
+
+export function buildVnpaySecureHash(
+  params: Record<string, string | number>,
+  hashSecret: string,
+): string {
+  const sortedKeys = Object.keys(params)
+    .filter((key) => key !== 'vnp_SecureHash' && key !== 'vnp_SecureHashType')
+    .sort();
+
+  const rawData = sortedKeys
+    .map((key) => `${key}=${encodeURIComponent(String(params[key])).replace(/%20/g, '+')}`)
+    .join('&');
+
+  return createHmac('sha512', hashSecret).update(rawData, 'utf8').digest('hex');
+}
+
+export function verifyZaloPayCallback(
+  body: Record<string, any>,
+  key2: string,
+): boolean {
+  if (!key2) return false;
+  const data = String(body.data ?? '');
+  const incomingMac = String(body.mac ?? '').toLowerCase().trim();
+  if (!data || !incomingMac) return false;
+
+  const expected = createHmac('sha256', key2)
+    .update(data, 'utf8')
+    .digest('hex')
+    .toLowerCase();
+
+  if (expected.length !== incomingMac.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i += 1) {
+    diff |= expected.charCodeAt(i) ^ incomingMac.charCodeAt(i);
+  }
+  return diff === 0;
+}

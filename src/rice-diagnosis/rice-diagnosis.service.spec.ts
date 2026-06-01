@@ -259,6 +259,6 @@ describe('RiceDiagnosisService', () => {
     );
     expect(result.disease?.diseaseKey).toBe('healthy_rice_leaf');
     expect(result.inferenceFlags.lowQuality).toBe(true);
-    expect(result.advisory.headline).toContain('chat luong');
+    expect(result.advisory.headline).toContain('chất lượng');
   });
 });

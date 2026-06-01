@@ -14,7 +14,12 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { ContactEntity } from '../contacts/entities/contact.entity';
 import { NotificationEntity } from '../notifications/entities/notification.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
-import { OrderEntity, OrderStatus } from '../orders/entities/order.entity';
+import {
+  OrderEntity,
+  OrderStatus,
+  PaymentMethod,
+  PaymentStatus,
+} from '../orders/entities/order.entity';
 import { PaymentTransactionEntity } from '../orders/entities/payment-transaction.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
@@ -47,6 +52,12 @@ const PASSWORD_RESET_REQUEST_WINDOW_MS = 15 * 60 * 1000;
 const PASSWORD_RESET_MAX_REQUESTS_PER_WINDOW = 3;
 const PASSWORD_RESET_MAX_ATTEMPTS = 5;
 const PASSWORD_RESET_INVALID_MESSAGE = 'Email hoac ma OTP khong hop le';
+const ONLINE_RETRY_PAYMENT_METHODS = [
+  PaymentMethod.MOMO,
+  PaymentMethod.VNPAY,
+  PaymentMethod.ZALOPAY,
+];
+const ONLINE_PAYMENT_TTL_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class UsersService {
@@ -453,12 +464,64 @@ export class UsersService {
     };
   }
 
+  private getPaymentRetryInfo(order: OrderEntity) {
+    const isOnline = ONLINE_RETRY_PAYMENT_METHODS.includes(order.paymentMethod);
+    const paymentDeadline = isOnline
+      ? new Date(order.createdAt.getTime() + ONLINE_PAYMENT_TTL_MS)
+      : null;
+    const paymentTimeRemainingSeconds = paymentDeadline
+      ? Math.max(0, Math.floor((paymentDeadline.getTime() - Date.now()) / 1000))
+      : null;
+    const hasCollectedPayment = [
+      PaymentStatus.PAID,
+      PaymentStatus.PARTIAL_REFUNDED,
+      PaymentStatus.REFUNDED,
+    ].includes(order.paymentStatus);
+    const isClosed = [
+      OrderStatus.CANCELLED,
+      OrderStatus.RETURNED,
+      OrderStatus.DELIVERED,
+      OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
+      OrderStatus.SHIPPING,
+      OrderStatus.PROCESSING,
+    ].includes(order.orderStatus);
+    const expired = paymentDeadline ? paymentDeadline.getTime() <= Date.now() : false;
+    let paymentBlockedReason: string | null = null;
+
+    if (!isOnline) {
+      paymentBlockedReason = 'UNSUPPORTED_PAYMENT_METHOD';
+    } else if (hasCollectedPayment) {
+      paymentBlockedReason = 'ALREADY_PAID';
+    } else if (isClosed) {
+      paymentBlockedReason = 'ORDER_CANCELLED';
+    } else if (expired) {
+      paymentBlockedReason = 'PAYMENT_EXPIRED';
+    }
+
+    return {
+      paymentDeadline,
+      paymentTimeRemainingSeconds,
+      canRetryPayment:
+        !paymentBlockedReason &&
+        [OrderStatus.PENDING, OrderStatus.BACKORDERED].includes(order.orderStatus) &&
+        [PaymentStatus.UNPAID, PaymentStatus.FAILED].includes(order.paymentStatus),
+      canCancelUnpaid:
+        !hasCollectedPayment &&
+        [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.BACKORDERED].includes(
+          order.orderStatus,
+        ),
+      paymentBlockedReason,
+    };
+  }
+
   private toOrderSummaryResponse(order: OrderEntity) {
     return {
       id: order.orderId,
       status: order.orderStatus,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
+      ...this.getPaymentRetryInfo(order),
       totalPayment: order.totalPayment,
       totalQuantity: order.totalQuantity,
       createdAt: order.createdAt,
@@ -725,31 +788,110 @@ export class UsersService {
 
   async findMyOrders(
     userId: string,
-    opts: { page: number; limit: number; status?: string },
+    opts: {
+      page: number;
+      limit: number;
+      status?: string;
+      search?: string;
+      from?: string;
+      to?: string;
+      paymentStatus?: string;
+      paymentMethod?: string;
+    },
   ) {
     await this.ensureUserExists(userId);
 
-    const where: Record<string, unknown> = { userId };
+    const query = this.ordersRepository
+      .createQueryBuilder('order')
+      .where('order.user_id = :userId', { userId });
     if (opts.status && opts.status !== 'all') {
       if (!Object.values(OrderStatus).includes(opts.status as OrderStatus)) {
         throw new BadRequestException('Trạng thái đơn hàng không hợp lệ');
       }
-      where.orderStatus = opts.status;
+      query.andWhere('order.order_status = :status', { status: opts.status });
     }
 
-    const [orders, total] = await this.ordersRepository.findAndCount({
-      where,
-      order: { createdAt: 'DESC' },
-      skip: (opts.page - 1) * opts.limit,
-      take: opts.limit,
-    });
+    if (opts.paymentStatus && opts.paymentStatus !== 'all') {
+      if (!Object.values(PaymentStatus).includes(opts.paymentStatus as PaymentStatus)) {
+        throw new BadRequestException('Trạng thái thanh toán không hợp lệ');
+      }
+      query.andWhere('order.payment_status = :paymentStatus', {
+        paymentStatus: opts.paymentStatus,
+      });
+    }
+
+    if (opts.paymentMethod && opts.paymentMethod !== 'all') {
+      if (!Object.values(PaymentMethod).includes(opts.paymentMethod as PaymentMethod)) {
+        throw new BadRequestException('Phương thức thanh toán không hợp lệ');
+      }
+      query.andWhere('order.payment_method = :paymentMethod', {
+        paymentMethod: opts.paymentMethod,
+      });
+    }
+
+    if (opts.from?.trim()) {
+      const fromDate = new Date(`${opts.from.trim()}T00:00:00`);
+      if (Number.isNaN(fromDate.getTime())) {
+        throw new BadRequestException('Từ ngày không hợp lệ');
+      }
+      query.andWhere('order.created_at >= :fromDate', { fromDate });
+    }
+
+    if (opts.to?.trim()) {
+      const toDate = new Date(`${opts.to.trim()}T23:59:59.999`);
+      if (Number.isNaN(toDate.getTime())) {
+        throw new BadRequestException('Đến ngày không hợp lệ');
+      }
+      query.andWhere('order.created_at <= :toDate', { toDate });
+    }
+
+    const search = opts.search?.trim();
+    if (search) {
+      query.andWhere(
+        [
+          '(order.order_id LIKE :search',
+          'order.full_name LIKE :search',
+          'order.phone LIKE :search',
+          'order.address LIKE :search',
+          'order.payment_method LIKE :search',
+          `EXISTS (
+            SELECT 1
+            FROM order_items item
+            WHERE item.order_id = order.order_id
+              AND item.product_name LIKE :search
+          ))`,
+        ].join(' OR '),
+        { search: `%${search}%` },
+      );
+    }
+
+    const total = await query.clone().getCount();
+    const rows = await query
+      .clone()
+      .select('order.order_id', 'orderId')
+      .orderBy('order.created_at', 'DESC')
+      .addOrderBy('order.order_id', 'DESC')
+      .offset((opts.page - 1) * opts.limit)
+      .limit(opts.limit)
+      .getRawMany<{ orderId: string }>();
+
+    const orderIds = rows.map((row) => row.orderId).filter(Boolean);
+    const orders = orderIds.length
+      ? await this.ordersRepository.find({
+          where: { orderId: In(orderIds) },
+        })
+      : [];
+    const orderById = new Map(orders.map((order) => [order.orderId, order]));
+    const sortedOrders = orderIds
+      .map((orderId) => orderById.get(orderId))
+      .filter((order): order is OrderEntity => Boolean(order));
 
     return {
-      items: orders.map((order) => this.toOrderSummaryResponse(order)),
+      items: sortedOrders.map((order) => this.toOrderSummaryResponse(order)),
       total,
       page: opts.page,
       limit: opts.limit,
-      totalPages: Math.ceil(total / opts.limit),
+      totalPages: Math.max(1, Math.ceil(total / opts.limit)),
     };
   }
 

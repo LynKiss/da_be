@@ -76,6 +76,27 @@ export class PaymentsController {
     return this.ordersService.handleMomoIpn(body);
   }
 
+  @Public()
+  @Get('vnpay/return')
+  @ResponseMessage('VNPay return received')
+  handleVnpayReturn(@Query() query: Record<string, unknown>) {
+    return this.ordersService.handleVnpayCallback(query);
+  }
+
+  @Public()
+  @Get('vnpay/ipn')
+  @ResponseMessage('VNPay IPN received')
+  handleVnpayIpn(@Query() query: Record<string, unknown>) {
+    return this.ordersService.handleVnpayCallback(query);
+  }
+
+  @Public()
+  @Post('zalopay/callback')
+  @ResponseMessage('ZaloPay callback received')
+  handleZaloPayCallback(@Body() body: Record<string, unknown>) {
+    return this.ordersService.handleZaloPayCallback(body);
+  }
+
   @RequirePermissions('manage_payments')
   @Get('admin/transactions')
   @ResponseMessage('Get all payment transactions')

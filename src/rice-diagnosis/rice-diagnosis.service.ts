@@ -224,7 +224,7 @@ export class RiceDiagnosisService {
     });
 
     if (!disease) {
-      throw new NotFoundException('Rice disease not found');
+      throw new NotFoundException('Không tìm thấy bệnh lúa');
     }
 
     return this.mapDisease(disease);
@@ -256,7 +256,7 @@ export class RiceDiagnosisService {
         baseUrl,
         statusCode: null,
         payload: null,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: error instanceof Error ? error.message : 'Lỗi không xác định',
       };
     }
   }
@@ -313,7 +313,7 @@ export class RiceDiagnosisService {
   async getAdminDisease(diseaseId: string) {
     const disease = await this.riceDiseasesRepository.findOneBy({ diseaseId });
     if (!disease) {
-      throw new NotFoundException('Rice disease not found');
+      throw new NotFoundException('Không tìm thấy bệnh lúa');
     }
 
     const recommendations = await this.riceDiseaseRecommendationsRepository.find({
@@ -383,7 +383,7 @@ export class RiceDiagnosisService {
   async updateDisease(diseaseId: string, updateRiceDiseaseDto: UpdateRiceDiseaseDto) {
     const disease = await this.riceDiseasesRepository.findOneBy({ diseaseId });
     if (!disease) {
-      throw new NotFoundException('Rice disease not found');
+      throw new NotFoundException('Không tìm thấy bệnh lúa');
     }
 
     const payload = this.normalizeDiseasePayload(updateRiceDiseaseDto, disease);
@@ -419,7 +419,7 @@ export class RiceDiagnosisService {
   async toggleDiseaseActive(diseaseId: string) {
     const disease = await this.riceDiseasesRepository.findOneBy({ diseaseId });
     if (!disease) {
-      throw new NotFoundException('Rice disease not found');
+      throw new NotFoundException('Không tìm thấy bệnh lúa');
     }
 
     disease.isActive = !disease.isActive;
@@ -429,15 +429,15 @@ export class RiceDiagnosisService {
 
   private validateImage(file?: UploadedImageFile) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('Image file is required');
+      throw new BadRequestException('Cần tải lên ảnh lá lúa để chẩn đoán');
     }
 
     if (!file.mimetype?.startsWith('image/')) {
-      throw new BadRequestException('Only image files are supported');
+      throw new BadRequestException('Chỉ hỗ trợ tệp ảnh');
     }
 
     if (file.size > 8 * 1024 * 1024) {
-      throw new BadRequestException('Image size must not exceed 8MB');
+      throw new BadRequestException('Dung lượng ảnh không được vượt quá 8MB');
     }
   }
 
@@ -457,7 +457,7 @@ export class RiceDiagnosisService {
       });
     } catch (error) {
       throw new ServiceUnavailableException(
-        `AI inference service is unavailable: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        `Dịch vụ AI chẩn đoán hiện không khả dụng: ${error instanceof Error ? error.message : 'lỗi không xác định'}`,
       );
     }
 
@@ -466,7 +466,7 @@ export class RiceDiagnosisService {
       payload = await response.json();
     } catch {
       throw new InternalServerErrorException(
-        'AI inference service returned an invalid JSON response',
+        'Dịch vụ AI trả về dữ liệu không hợp lệ',
       );
     }
 
@@ -477,7 +477,7 @@ export class RiceDiagnosisService {
         'message' in payload &&
         typeof payload.message === 'string'
           ? payload.message
-          : `AI inference request failed with ${response.status}`;
+          : `Yêu cầu chẩn đoán AI thất bại với mã ${response.status}`;
       throw new ServiceUnavailableException(message);
     }
 
@@ -487,7 +487,7 @@ export class RiceDiagnosisService {
   private normalizeInferencePayload(payload: unknown): InferenceResult {
     if (!payload || typeof payload !== 'object') {
       throw new InternalServerErrorException(
-        'AI inference response payload is invalid',
+        'Dữ liệu phản hồi từ AI không hợp lệ',
       );
     }
 
@@ -516,7 +516,7 @@ export class RiceDiagnosisService {
 
     if (!predictedLabel || confidence === null) {
       throw new InternalServerErrorException(
-        'AI inference response is missing required prediction fields',
+        'Phản hồi AI thiếu thông tin dự đoán bắt buộc',
       );
     }
 
@@ -623,64 +623,64 @@ export class RiceDiagnosisService {
   ) {
     if (inference.lowQuality) {
       const issues = inference.qualityIssues.length
-        ? ` Van de phat hien: ${inference.qualityIssues.join(', ')}.`
+        ? ` Vấn đề phát hiện: ${inference.qualityIssues.join(', ')}.`
         : '';
       return {
         headline:
-          'Anh tai len chua dat chat luong de dua ra chan doan on dinh.',
+          'Ảnh tải lên chưa đạt chất lượng để đưa ra chẩn đoán ổn định.',
         disclaimer:
-          `Hay chup lai la lua ro hon, du sang, can hon vung ton thuong va tranh rung tay.${issues}`,
+          `Hãy chụp lại lá lúa rõ hơn, đủ sáng, cận hơn vùng tổn thương và tránh rung tay.${issues}`,
       };
     }
 
     if (inference.ambiguousPrediction) {
       return {
         headline:
-          'AI dang phan van giua nhieu nhan benh gan nhau, nen chua nen de xuat xu ly tu dong.',
+          'AI đang phân vân giữa nhiều nhãn bệnh gần nhau, chưa nên đề xuất xử lý tự động.',
         disclaimer:
-          'Hay doi chieu them top du doan, chup them 1-2 anh khac, hoac nhan vien ky thuat xem lai truoc khi mua thuoc.',
+          'Hãy đối chiếu thêm top dự đoán, chụp thêm 1-2 ảnh khác hoặc nhờ nhân viên kỹ thuật xem lại trước khi mua thuốc.',
       };
     }
 
     if (!disease) {
       return {
-        headline: 'AI da nhan dang du lieu, nhung chua doi chieu duoc voi danh muc benh noi bo.',
+        headline: 'AI đã nhận dạng dữ liệu, nhưng chưa đối chiếu được với danh mục bệnh nội bộ.',
         disclaimer:
-          'Ket qua nay chi nen duoc xem la tham khao. Hay lien he nhan vien de xac minh truoc khi mua thuoc.',
+          'Kết quả này chỉ nên xem là tham khảo. Hãy liên hệ nhân viên để xác minh trước khi mua thuốc.',
       };
     }
 
     if (disease.diseaseKey === 'healthy_rice_leaf') {
       return {
-        headline: 'La lua hien tai co dau hieu khoe manh hoac chua thay bieu hien benh ro rang.',
+        headline: 'Lá lúa hiện tại có dấu hiệu khỏe mạnh hoặc chưa thấy biểu hiện bệnh rõ ràng.',
         disclaimer:
-          'Tiep tuc theo doi ruong, duy tri canh tac can bang va chup lai neu trieu chung thay doi.',
+          'Tiếp tục theo dõi ruộng, duy trì canh tác cân bằng và chụp lại nếu triệu chứng thay đổi.',
       };
     }
 
     if (recommendationLevel === RiceDiagnosisRecommendationLevel.LOW) {
       return {
         headline:
-          'Do tin cay hien con thap. He thong khong de xuat mua thuoc tu dong.',
+          'Độ tin cậy hiện còn thấp. Hệ thống không đề xuất mua thuốc tự động.',
         disclaimer:
-          'Hay chup canh la ro hon, anh du sang hon, hoac mo chat widget chat voi nhan vien ky thuat.',
+          'Hãy chụp cận lá rõ hơn, ảnh đủ sáng hơn hoặc mở chat để trao đổi với nhân viên kỹ thuật.',
       };
     }
 
     if (recommendationLevel === RiceDiagnosisRecommendationLevel.REVIEW) {
       return {
         headline:
-          'He thong da nhan dang duoc benh nghiem trong muc tham khao, nen doi chieu them truoc khi xu ly dien rong.',
+          'Hệ thống đã nhận dạng được bệnh ở mức tham khảo, nên đối chiếu thêm trước khi xử lý diện rộng.',
         disclaimer:
-          'Nen kiem tra them top du doan ben duoi va doc huong dan phong tri truoc khi mua thuoc.',
+          'Nên kiểm tra thêm top dự đoán bên dưới và đọc hướng dẫn phòng trị trước khi mua thuốc.',
       };
     }
 
     return {
       headline:
-        'Ket qua AI dat nguong tin cay cao, he thong co the dua ra phac do tham khao va san pham de nghi.',
+        'Kết quả AI đạt ngưỡng tin cậy cao, hệ thống có thể đưa ra phác đồ tham khảo và sản phẩm đề nghị.',
       disclaimer:
-        'Van can su dung theo nhan mac, lieu luong va khuyen cao an toan thuc vat truoc khi phun.',
+        'Vẫn cần sử dụng theo nhãn mác, liều lượng và khuyến cáo an toàn thực vật trước khi phun.',
     };
   }
 
@@ -746,7 +746,7 @@ export class RiceDiagnosisService {
     );
 
     if (!diseaseName || !diseaseKey || !diseaseSlug) {
-      throw new BadRequestException('Disease name, key and slug are required');
+      throw new BadRequestException('Tên bệnh, key và slug là bắt buộc');
     }
 
     return {
@@ -797,14 +797,14 @@ export class RiceDiagnosisService {
       diseaseKey: payload.diseaseKey,
     });
     if (existingByKey && existingByKey.diseaseId !== excludeDiseaseId) {
-      throw new BadRequestException('Disease key already exists');
+      throw new BadRequestException('Disease key đã tồn tại');
     }
 
     const existingBySlug = await this.riceDiseasesRepository.findOneBy({
       diseaseSlug: payload.diseaseSlug,
     });
     if (existingBySlug && existingBySlug.diseaseId !== excludeDiseaseId) {
-      throw new BadRequestException('Disease slug already exists');
+      throw new BadRequestException('Disease slug đã tồn tại');
     }
   }
 
@@ -828,7 +828,7 @@ export class RiceDiagnosisService {
     });
     if (existing.length !== uniqueIds.length) {
       throw new BadRequestException(
-        'One or more recommended products were not found',
+        'Một hoặc nhiều sản phẩm đề xuất không tồn tại',
       );
     }
   }

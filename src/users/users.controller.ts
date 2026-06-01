@@ -211,11 +211,21 @@ export class UsersController {
     @Query('page') page = '1',
     @Query('limit') limit = '10',
     @Query('status') status?: string,
+    @Query('search') search?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('paymentStatus') paymentStatus?: string,
+    @Query('paymentMethod') paymentMethod?: string,
   ) {
     return this.usersService.findMyOrders(currentUser._id, {
       page: Math.max(1, parseInt(page, 10) || 1),
       limit: Math.min(50, Math.max(1, parseInt(limit, 10) || 10)),
       status,
+      search,
+      from,
+      to,
+      paymentStatus,
+      paymentMethod,
     });
   }
 

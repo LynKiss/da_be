@@ -9,6 +9,7 @@ import { ShoppingCartEntity } from '../carts/entities/shopping-cart.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { ProductEntity } from '../products/entities/product.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { InventoryTransactionEntity } from '../products/entities/inventory-transaction.entity';
 import { ProductsModule } from '../products/products.module';
 import { PermissionsModule } from '../permissions/permissions.module';
@@ -59,6 +60,7 @@ import { CustomerCreditLimitEntity } from '../credit-limits/entities/customer-cr
       ShoppingCartEntity,
       CartItemEntity,
       ProductEntity,
+      ProductImageEntity,
       InventoryTransactionEntity,
       WarehouseEntity,
       WarehouseStockEntity,

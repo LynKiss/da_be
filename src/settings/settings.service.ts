@@ -254,6 +254,44 @@ export class SettingsService {
     };
   }
 
+  async getVnpayConfig() {
+    const payments = await this.getPaymentSettings();
+    const vnpay = payments.vnpay;
+
+    return {
+      tmnCode:
+        vnpay.tmnCode || this.configService.get<string>('VNPAY_TMN_CODE') || '',
+      hashSecret:
+        vnpay.hashSecret ||
+        this.configService.get<string>('VNPAY_HASH_SECRET') ||
+        '',
+      paymentUrl:
+        this.configService.get<string>('VNPAY_PAYMENT_URL') ||
+        (this.configService.get<string>('VNPAY_SANDBOX') === 'false'
+          ? 'https://pay.vnpay.vn/vpcpay.html'
+          : 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
+    };
+  }
+
+  async getZaloPayConfig() {
+    const payments = await this.getPaymentSettings();
+    const zalopay = payments.zalopay;
+
+    return {
+      appId:
+        zalopay.appId || this.configService.get<string>('ZALOPAY_APP_ID') || '',
+      key1:
+        zalopay.key1 || this.configService.get<string>('ZALOPAY_KEY1') || '',
+      key2:
+        zalopay.key2 || this.configService.get<string>('ZALOPAY_KEY2') || '',
+      createEndpoint:
+        this.configService.get<string>('ZALOPAY_CREATE_ENDPOINT') ||
+        (this.configService.get<string>('ZALOPAY_SANDBOX') === 'false'
+          ? 'https://openapi.zalopay.vn/v2/create'
+          : 'https://sb-openapi.zalopay.vn/v2/create'),
+    };
+  }
+
   async isPaymentMethodActive(method: string) {
     if (!PAYMENT_METHOD_KEYS.includes(method as PaymentMethodKey)) {
       return false;

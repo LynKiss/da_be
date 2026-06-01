@@ -27,6 +27,7 @@ import {
   InventoryTransactionEntity,
   InventoryTransactionType,
 } from '../products/entities/inventory-transaction.entity';
+import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { ProductEntity } from '../products/entities/product.entity';
 import { ProductBatchService } from '../products/product-batch.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -35,7 +36,12 @@ import { SettingsService } from '../settings/settings.service';
 import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
 import { withDeadlockRetry } from '../common/transaction.util';
-import { verifyMomoSignature } from '../common/payment-signature.util';
+import {
+  buildVnpaySecureHash,
+  verifyMomoSignature,
+  verifyVnpaySignature,
+  verifyZaloPayCallback,
+} from '../common/payment-signature.util';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { CreateCancelPaidRefundDto } from './dto/create-cancel-paid-refund.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -116,6 +122,8 @@ export class OrdersService {
     private readonly cartItemsRepository: Repository<CartItemEntity>,
     @InjectRepository(ProductEntity)
     private readonly productsRepository: Repository<ProductEntity>,
+    @InjectRepository(ProductImageEntity)
+    private readonly productImagesRepository: Repository<ProductImageEntity>,
     @InjectRepository(InventoryTransactionEntity)
     private readonly inventoryTransactionsRepository: Repository<InventoryTransactionEntity>,
     @InjectRepository(UserEntity)
@@ -367,6 +375,70 @@ export class OrdersService {
       PaymentMethod.VNPAY,
       PaymentMethod.ZALOPAY,
     ].includes(method);
+  }
+
+  private getPaymentDeadline(order: OrderEntity) {
+    if (!this.isOnlinePaymentMethod(order.paymentMethod)) {
+      return null;
+    }
+    return new Date(order.createdAt.getTime() + this.stalePaymentTtlMs);
+  }
+
+  private getPaymentRetryInfo(order: OrderEntity) {
+    const paymentDeadline = this.getPaymentDeadline(order);
+    const now = Date.now();
+    const paymentTimeRemainingSeconds = paymentDeadline
+      ? Math.max(0, Math.floor((paymentDeadline.getTime() - now) / 1000))
+      : null;
+    const hasCollectedPayment = [
+      PaymentStatus.PAID,
+      PaymentStatus.PARTIAL_REFUNDED,
+      PaymentStatus.REFUNDED,
+    ].includes(order.paymentStatus);
+    const isClosed = [
+      OrderStatus.CANCELLED,
+      OrderStatus.RETURNED,
+      OrderStatus.DELIVERED,
+      OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
+      OrderStatus.SHIPPING,
+      OrderStatus.PROCESSING,
+    ].includes(order.orderStatus);
+    const retryableStatus = [OrderStatus.PENDING, OrderStatus.BACKORDERED].includes(
+      order.orderStatus,
+    );
+    const retryablePaymentStatus = [
+      PaymentStatus.UNPAID,
+      PaymentStatus.FAILED,
+    ].includes(order.paymentStatus);
+    const expired = paymentDeadline ? paymentDeadline.getTime() <= now : false;
+    let paymentBlockedReason: string | null = null;
+
+    if (!this.isOnlinePaymentMethod(order.paymentMethod)) {
+      paymentBlockedReason = 'UNSUPPORTED_PAYMENT_METHOD';
+    } else if (hasCollectedPayment) {
+      paymentBlockedReason = 'ALREADY_PAID';
+    } else if (isClosed) {
+      paymentBlockedReason = 'ORDER_CANCELLED';
+    } else if (expired) {
+      paymentBlockedReason = 'PAYMENT_EXPIRED';
+    }
+
+    const canRetryPayment =
+      !paymentBlockedReason && retryableStatus && retryablePaymentStatus;
+    const canCancelUnpaid =
+      !hasCollectedPayment &&
+      [OrderStatus.PENDING, OrderStatus.CONFIRMED, OrderStatus.BACKORDERED].includes(
+        order.orderStatus,
+      );
+
+    return {
+      paymentDeadline,
+      paymentTimeRemainingSeconds,
+      canRetryPayment,
+      canCancelUnpaid,
+      paymentBlockedReason,
+    };
   }
 
   private isTerminalOrderStatus(status: OrderStatus) {
@@ -995,6 +1067,7 @@ export class OrdersService {
       status: order.orderStatus,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
+      ...this.getPaymentRetryInfo(order),
       shippingAddressId: order.shippingAddressId,
       deliveryId: order.deliveryId,
       subtotalAmount: order.subtotalAmount,
@@ -1098,6 +1171,7 @@ export class OrdersService {
       status: order.orderStatus,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
+      ...this.getPaymentRetryInfo(order),
       fulfillmentType: order.fulfillmentType,
       deliveryMethodName: order.deliveryMethodNameSnapshot,
       totalPayment: order.totalPayment,
@@ -2010,8 +2084,8 @@ export class OrdersService {
             : OrderStatus.PENDING,
           changedBy: userId,
           note: isBackorder
-            ? 'ÄÆ¡n hÃ ng Ä‘Æ°á»£c táº¡o á»Ÿ tráº¡ng thÃ¡i chá» nháº­p kho'
-            : 'ÄÆ¡n hÃ ng Ä‘Ã£ Ä‘Æ°á»£c táº¡o',
+            ? 'Đơn hàng được tạo ở trạng thái chờ nhập kho'
+            : 'Đơn hàng đã được tạo',
         });
         await transactionalHistoryRepository.save(history);
 
@@ -2352,8 +2426,8 @@ export class OrdersService {
             : OrderStatus.PENDING,
           changedBy: userId,
           note: isBackorder
-            ? 'ÄÆ¡n hÃ ng Ä‘Æ°á»£c táº¡o (Ä‘ang chá» nháº­p kho)'
-            : 'ÄÆ¡n hÃ ng Ä‘Ã£ Ä‘Æ°á»£c táº¡o',
+            ? 'Đơn hàng được tạo (đang chờ nhập kho)'
+            : 'Đơn hàng đã được tạo',
         });
         await transactionalHistoryRepository.save(history);
 
@@ -2507,7 +2581,7 @@ export class OrdersService {
     ) {
       throw new BadRequestException({
         message:
-          'ÄÆ¡n Ä‘Ã£ thu tiá»n pháº£i Ä‘i qua quy trÃ¬nh hoÃ n tiá»n trÆ°á»›c khi Ä‘Ã³ng há»§y.',
+          'Đơn đã thu tiền phải đi qua quy trình hoàn tiền trước khi đóng hủy.',
         error: 'PAID_ORDER_CANCEL_REQUIRES_REFUND',
       });
     }
@@ -2548,7 +2622,7 @@ export class OrdersService {
         oldStatus: previousStatus,
         newStatus: OrderStatus.CANCELLED,
         changedBy: userId,
-        note: 'KhÃ¡ch hÃ ng Ä‘Ã£ há»§y Ä‘Æ¡n',
+        note: 'Khách hàng đã hủy đơn',
       });
       await transactionalHistoryRepository.save(history);
     });
@@ -2589,14 +2663,14 @@ export class OrdersService {
     ) {
       throw new BadRequestException({
         message:
-          'ÄÆ¡n Ä‘Ã£ thu tiá»n khÃ´ng thá»ƒ há»§y trá»±c tiáº¿p. HÃ£y xá»­ lÃ½ refund trÆ°á»›c.',
+          'Đơn đã thu tiền không thể hủy trực tiếp. Hãy xử lý hoàn tiền trước.',
         error: 'PAID_ORDER_CANCEL_REQUIRES_REFUND',
       });
     }
 
     if (nextStatus === OrderStatus.RETURNED) {
       throw new BadRequestException(
-        'ÄÆ¡n tráº£ hÃ ng pháº£i xá»­ lÃ½ báº±ng return records vÃ  inspection, khÃ´ng Ä‘á»•i tháº³ng tráº¡ng thÃ¡i order sang returned.',
+        'Đơn trả hàng phải xử lý bằng yêu cầu trả hàng và kiểm tra hàng, không đổi thẳng trạng thái đơn sang đã trả hàng.',
       );
     }
 
@@ -2746,7 +2820,7 @@ export class OrdersService {
             oldStatus: previousStatus,
             newStatus: nextStatus,
             changedBy: currentUser._id,
-            note: updateOrderStatusDto.note ?? 'ÄÃ£ há»§y Ä‘Æ¡n chá» hÃ ng',
+            note: updateOrderStatusDto.note ?? 'Đã hủy đơn chờ hàng',
           });
           await transactionalHistoryRepository.save(history);
           return;
@@ -2808,7 +2882,7 @@ export class OrdersService {
         oldStatus: previousStatus,
         newStatus: nextStatus,
         changedBy: currentUser._id,
-        note: updateOrderStatusDto.note ?? 'Cáº­p nháº­t tráº¡ng thÃ¡i bá»Ÿi admin',
+        note: updateOrderStatusDto.note ?? 'Cập nhật trạng thái bởi admin',
       });
       await transactionalHistoryRepository.save(history);
     });
@@ -2868,14 +2942,38 @@ export class OrdersService {
     }
 
     if (!this.isOnlinePaymentMethod(order.paymentMethod)) {
-      throw new BadRequestException('Order does not require online payment');
+      throw new BadRequestException({
+        message: 'Đơn hàng không dùng phương thức thanh toán online.',
+        error: 'ORDER_NOT_PAYABLE',
+      });
     }
 
     if (order.paymentStatus === PaymentStatus.PAID) {
-      throw new BadRequestException('Order has already been paid');
+      throw new BadRequestException({
+        message: 'Đơn hàng đã được thanh toán.',
+        error: 'ORDER_ALREADY_PAID',
+      });
     }
 
-    const transactionRef = `${orderId}-${Date.now()}`;
+    const retryInfo = this.getPaymentRetryInfo(order);
+    if (!retryInfo.canRetryPayment) {
+      const errorCode =
+        retryInfo.paymentBlockedReason === 'PAYMENT_EXPIRED'
+          ? 'PAYMENT_WINDOW_EXPIRED'
+          : 'ORDER_NOT_PAYABLE';
+      throw new BadRequestException({
+        message:
+          errorCode === 'PAYMENT_WINDOW_EXPIRED'
+            ? 'Đơn hàng đã quá hạn thanh toán 30 phút.'
+            : 'Đơn hàng hiện không thể thanh toán lại.',
+        error: errorCode,
+      });
+    }
+
+    const transactionRef =
+      order.paymentMethod === PaymentMethod.ZALOPAY
+        ? this.buildZaloPayTransactionRef()
+        : `${orderId}-${Date.now()}`;
     const paymentTransaction = this.paymentTransactionsRepository.create({
       orderId,
       userId: order.userId,
@@ -2910,6 +3008,41 @@ export class OrdersService {
         paymentUrl = momoUrl;
       } else {
         console.warn('[MoMo] KhÃ´ng láº¥y Ä‘Æ°á»£c paymentUrl â€” kiá»ƒm tra credentials vÃ  BACKEND_URL trong .env');
+      }
+    }
+
+    if (order.paymentMethod === PaymentMethod.VNPAY) {
+      const vnpayUrl = await this.buildVnpayPaymentUrl(
+        orderId,
+        transactionRef,
+        Math.round(Number(order.totalPayment)),
+        initiatePaymentDto.returnUrl ?? `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/client/payment`,
+      ).catch((err: unknown) => {
+        console.error('[VNPay] buildVnpayPaymentUrl error:', err);
+        return null;
+      });
+      if (vnpayUrl) {
+        paymentUrl = vnpayUrl;
+      } else {
+        console.warn('[VNPay] Không lấy được paymentUrl - kiểm tra VNPAY_TMN_CODE/VNPAY_HASH_SECRET');
+      }
+    }
+
+    if (order.paymentMethod === PaymentMethod.ZALOPAY) {
+      const zaloPayUrl = await this.buildZaloPayPaymentUrl(
+        orderId,
+        transactionRef,
+        order.userId,
+        Math.round(Number(order.totalPayment)),
+        initiatePaymentDto.returnUrl ?? `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/client/payment`,
+      ).catch((err: unknown) => {
+        console.error('[ZaloPay] buildZaloPayPaymentUrl error:', err);
+        return null;
+      });
+      if (zaloPayUrl) {
+        paymentUrl = zaloPayUrl;
+      } else {
+        console.warn('[ZaloPay] Không lấy được order_url - kiểm tra ZALOPAY_APP_ID/KEY1/KEY2');
       }
     }
 
@@ -2990,6 +3123,95 @@ export class OrdersService {
     console.log('[MoMo] Response:', JSON.stringify(data));
     if (data.resultCode === 0 && data.payUrl) return data.payUrl;
     console.error(`[MoMo] resultCode=${data.resultCode ?? 'N/A'} message=${data.message ?? 'N/A'}`);
+    return null;
+  }
+
+  private async buildVnpayPaymentUrl(
+    internalOrderId: string,
+    transactionRef: string,
+    amount: number,
+    returnUrl: string,
+  ): Promise<string | null> {
+    const { tmnCode, hashSecret, paymentUrl } =
+      await this.settingsService.getVnpayConfig();
+    if (!tmnCode || !hashSecret) return null;
+
+    const backendUrl = process.env.BACKEND_URL ?? 'http://localhost:8000';
+    const params: Record<string, string | number> = {
+      vnp_Version: '2.1.0',
+      vnp_Command: 'pay',
+      vnp_TmnCode: tmnCode,
+      vnp_Amount: amount * 100,
+      vnp_CurrCode: 'VND',
+      vnp_TxnRef: transactionRef,
+      vnp_OrderInfo: `Thanh toan don hang ${internalOrderId}`,
+      vnp_OrderType: 'other',
+      vnp_Locale: 'vn',
+      vnp_ReturnUrl: returnUrl,
+      vnp_IpnUrl: `${backendUrl}/api/v1/payments/vnpay/ipn`,
+      vnp_IpAddr: '127.0.0.1',
+      vnp_CreateDate: this.formatGatewayDate(),
+    };
+    params.vnp_SecureHash = buildVnpaySecureHash(params, hashSecret);
+
+    const query = Object.keys(params)
+      .sort()
+      .map((key) => `${key}=${encodeURIComponent(String(params[key])).replace(/%20/g, '+')}`)
+      .join('&');
+
+    return `${paymentUrl}?${query}`;
+  }
+
+  private async buildZaloPayPaymentUrl(
+    internalOrderId: string,
+    appTransId: string,
+    userId: string,
+    amount: number,
+    redirectUrl: string,
+  ): Promise<string | null> {
+    const { appId, key1, createEndpoint } =
+      await this.settingsService.getZaloPayConfig();
+    if (!appId || !key1) return null;
+
+    const callbackUrl = `${process.env.BACKEND_URL ?? 'http://localhost:8000'}/api/v1/payments/zalopay/callback`;
+    const embedData = JSON.stringify({
+      redirecturl: redirectUrl,
+      callbackurl: callbackUrl,
+      internalOrderId,
+    });
+    const item = JSON.stringify([]);
+    const appTime = Date.now();
+    const appUser = userId || 'guest';
+    const description = `Thanh toán đơn hàng ${internalOrderId}`;
+    const rawMac = `${appId}|${appTransId}|${appUser}|${amount}|${appTime}|${embedData}|${item}`;
+    const mac = createHmac('sha256', key1).update(rawMac, 'utf8').digest('hex');
+
+    const body = new URLSearchParams({
+      app_id: appId,
+      app_user: appUser,
+      app_trans_id: appTransId,
+      app_time: String(appTime),
+      amount: String(amount),
+      item,
+      embed_data: embedData,
+      description,
+      callback_url: callbackUrl,
+      mac,
+    });
+
+    const response = await fetch(createEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    const data = (await response.json()) as {
+      return_code?: number;
+      order_url?: string;
+      return_message?: string;
+    };
+    console.log('[ZaloPay] Response:', JSON.stringify(data));
+    if (data.return_code === 1 && data.order_url) return data.order_url;
+    console.error(`[ZaloPay] return_code=${data.return_code ?? 'N/A'} message=${data.return_message ?? 'N/A'}`);
     return null;
   }
 
@@ -3133,6 +3355,204 @@ export class OrdersService {
     );
 
     return { message: 'ok', transId };
+  }
+
+  async handleVnpayCallback(query: Record<string, unknown>) {
+    const { hashSecret } = await this.settingsService.getVnpayConfig();
+    if (!hashSecret) return { RspCode: '99', Message: 'VNPay is not configured' };
+
+    if (!verifyVnpaySignature(query, hashSecret)) {
+      throw new UnauthorizedException('Invalid VNPay signature');
+    }
+
+    const transactionRef = String(query.vnp_TxnRef ?? '');
+    if (!transactionRef) return { RspCode: '01', Message: 'Missing transaction reference' };
+
+    const responseCode = String(query.vnp_ResponseCode ?? '');
+    const transactionStatus = String(query.vnp_TransactionStatus ?? '');
+    const success = responseCode === '00' && transactionStatus === '00';
+    const amount = Number(query.vnp_Amount ?? 0) / 100;
+    const gatewayTransId = String(query.vnp_TransactionNo ?? '');
+    const gatewayMessage = String(query.vnp_OrderInfo ?? '');
+
+    const result = await this.applyVerifiedGatewayPaymentResult({
+      provider: PaymentMethod.VNPAY,
+      transactionRef,
+      success,
+      amount,
+      gatewayCode: responseCode || transactionStatus,
+      gatewayMessage,
+      rawPayload: query,
+      latePaymentNote: `VNPay payment arrived after order was closed; queued for manual refund.`,
+    });
+
+    return {
+      RspCode: result.message === 'transaction not found' ? '01' : '00',
+      Message: result.message,
+      orderId: result.orderId,
+      transactionRef,
+      gatewayTransId,
+    };
+  }
+
+  async handleZaloPayCallback(body: Record<string, unknown>) {
+    const { key2 } = await this.settingsService.getZaloPayConfig();
+    if (!key2) return { return_code: 2, return_message: 'ZaloPay is not configured' };
+
+    if (!verifyZaloPayCallback(body, key2)) {
+      throw new UnauthorizedException('Invalid ZaloPay signature');
+    }
+
+    const dataRaw = String(body.data ?? '');
+    const data = JSON.parse(dataRaw) as {
+      app_trans_id?: string;
+      amount?: number | string;
+      zp_trans_id?: string | number;
+      return_code?: number | string;
+      return_message?: string;
+    };
+    const transactionRef = String(data.app_trans_id ?? '');
+    if (!transactionRef) return { return_code: 2, return_message: 'Missing app_trans_id' };
+
+    const result = await this.applyVerifiedGatewayPaymentResult({
+      provider: PaymentMethod.ZALOPAY,
+      transactionRef,
+      success: true,
+      amount: Number(data.amount ?? 0),
+      gatewayCode: String(data.zp_trans_id ?? data.return_code ?? '1'),
+      gatewayMessage: data.return_message ?? 'ZaloPay callback success',
+      rawPayload: { ...body, parsedData: data },
+      latePaymentNote: `ZaloPay payment arrived after order was closed; queued for manual refund.`,
+    });
+
+    return {
+      return_code: result.message === 'transaction not found' ? 2 : 1,
+      return_message: result.message,
+      orderId: result.orderId,
+      transactionRef,
+    };
+  }
+
+  private async applyVerifiedGatewayPaymentResult(args: {
+    provider: PaymentMethod;
+    transactionRef: string;
+    success: boolean;
+    amount: number;
+    gatewayCode: string;
+    gatewayMessage: string | null;
+    rawPayload: Record<string, unknown>;
+    latePaymentNote: string;
+  }) {
+    const transaction = await this.paymentTransactionsRepository
+      .findOne({ where: { transactionRef: args.transactionRef } })
+      .catch(() => null);
+    if (!transaction) {
+      return {
+        message: 'transaction not found',
+        provider: args.provider,
+        transactionRef: args.transactionRef,
+      };
+    }
+
+    const order = await this.ordersRepository
+      .findOneBy({ orderId: transaction.orderId })
+      .catch(() => null);
+    if (!order) {
+      return {
+        message: 'order not found',
+        provider: args.provider,
+        transactionRef: args.transactionRef,
+      };
+    }
+
+    if (order.paymentMethod !== args.provider) {
+      throw new BadRequestException('Payment provider does not match order');
+    }
+
+    if (
+      transaction.transactionStatus === PaymentTransactionStatus.SUCCESS &&
+      transaction.gatewayCode === args.gatewayCode
+    ) {
+      return {
+        message: 'already processed',
+        orderId: order.orderId,
+        provider: args.provider,
+        transactionRef: args.transactionRef,
+        paymentStatus: transaction.paymentStatus,
+      };
+    }
+
+    if (args.success) {
+      const expectedAmount = Number(order.totalPayment);
+      if (
+        Number.isFinite(expectedAmount) &&
+        Number.isFinite(args.amount) &&
+        Math.abs(expectedAmount - args.amount) > 0.01
+      ) {
+        transaction.transactionStatus = PaymentTransactionStatus.FAILED;
+        transaction.paymentStatus = PaymentStatus.FAILED;
+        transaction.gatewayCode = 'AMOUNT_MISMATCH';
+        transaction.gatewayMessage = `Expected ${expectedAmount}, got ${args.amount}`;
+        transaction.rawPayload = args.rawPayload;
+        await this.paymentTransactionsRepository.save(transaction);
+        throw new BadRequestException('Payment amount mismatch');
+      }
+    }
+
+    const paymentStatus = args.success ? PaymentStatus.PAID : PaymentStatus.FAILED;
+    transaction.transactionStatus = args.success
+      ? PaymentTransactionStatus.SUCCESS
+      : PaymentTransactionStatus.FAILED;
+    transaction.paymentStatus = paymentStatus;
+    transaction.gatewayCode = args.gatewayCode;
+    transaction.gatewayMessage = args.gatewayMessage;
+    transaction.rawPayload = args.rawPayload;
+    await this.paymentTransactionsRepository.save(transaction);
+
+    if (args.success && this.isTerminalOrderStatus(order.orderStatus)) {
+      await this.createLatePaymentRefundIfNeeded({
+        order,
+        amount: args.amount,
+        provider: args.provider,
+        transactionRef: args.transactionRef,
+        note: args.latePaymentNote,
+      });
+      await this.notificationsService.sendPaymentNotification(
+        order.userId,
+        order.orderId,
+        PaymentStatus.PARTIAL_REFUNDED,
+        args.provider,
+      );
+      return {
+        message: 'late payment queued for manual refund',
+        orderId: order.orderId,
+        provider: args.provider,
+        transactionRef: args.transactionRef,
+        paymentStatus: order.paymentStatus,
+        refundStatus: OrderRefundStatus.PENDING,
+      };
+    }
+
+    order.paymentStatus = args.success
+      ? PaymentStatus.PAID
+      : order.paymentStatus === PaymentStatus.PAID
+        ? PaymentStatus.PAID
+        : PaymentStatus.UNPAID;
+    await this.ordersRepository.save(order);
+    await this.notificationsService.sendPaymentNotification(
+      order.userId,
+      order.orderId,
+      paymentStatus,
+      args.provider,
+    );
+
+    return {
+      message: 'ok',
+      orderId: order.orderId,
+      provider: args.provider,
+      transactionRef: args.transactionRef,
+      paymentStatus,
+    };
   }
 
   async handlePaymentCallback(
@@ -3384,7 +3804,7 @@ export class OrdersService {
                       referenceType: 'ORDER',
                       referenceId: order.orderId,
                       batchId,
-                      note: 'Auto-cancel by reconciliation (unpaid > 30min)',
+                      note: 'Tự động hủy do quá hạn thanh toán 30 phút',
                       relatedOrderId: order.orderId,
                     }),
                   );
@@ -3401,7 +3821,7 @@ export class OrdersService {
                     quantityChange: restockQty,
                     referenceType: 'ORDER',
                     referenceId: order.orderId,
-                    note: 'Auto-cancel by reconciliation (unpaid > 30min, legacy)',
+                    note: 'Tự động hủy do quá hạn thanh toán 30 phút',
                     relatedOrderId: order.orderId,
                   }),
                 );
@@ -3417,7 +3837,7 @@ export class OrdersService {
                 oldStatus,
                 newStatus: OrderStatus.CANCELLED,
                 changedBy: null,
-                note: 'Auto-cancelled by reconciliation cron (unpaid > 30 min)',
+                note: 'Tự động hủy do quá hạn thanh toán 30 phút',
               }),
             );
           });
@@ -3534,7 +3954,7 @@ export class OrdersService {
     if (!cancelable || !hasCollectedPayment) {
       throw new BadRequestException({
         message:
-          'ÄÆ¡n khÃ´ng Ä‘á»§ Ä‘iá»u kiá»‡n táº¡o hoÃ n tiá»n há»§y Ä‘Æ¡n Ä‘Ã£ thu tiá»n.',
+          'Đơn không đủ điều kiện tạo hoàn tiền hủy đơn đã thu tiền.',
         error: 'CANCEL_PAID_REFUND_ORDER_NOT_ELIGIBLE',
       });
     }
@@ -3688,7 +4108,7 @@ export class OrdersService {
       paymentProvider: order.paymentMethod,
       manualReference: null,
       createdBy: currentUser._id,
-      note: dto.note?.trim() || 'Chá» hoÃ n tiá»n trÆ°á»›c khi há»§y Ä‘Æ¡n Ä‘Ã£ thu tiá»n',
+      note: dto.note?.trim() || 'Chờ hoàn tiền trước khi hủy đơn đã thu tiền',
     });
     const saved = await this.orderRefundsRepository.save(created);
 
@@ -4098,28 +4518,102 @@ export class OrdersService {
     };
   }
 
+  private formatGatewayDate(value = new Date()) {
+    const pad = (input: number) => String(input).padStart(2, '0');
+    return [
+      value.getFullYear(),
+      pad(value.getMonth() + 1),
+      pad(value.getDate()),
+      pad(value.getHours()),
+      pad(value.getMinutes()),
+      pad(value.getSeconds()),
+    ].join('');
+  }
+
+  private buildZaloPayTransactionRef() {
+    const now = new Date();
+    const shortDate = this.formatGatewayDate(now).slice(2, 8);
+    return `${shortDate}_${Date.now()}_${randomUUID().slice(0, 6)}`;
+  }
+
   async findAllReturns() {
     const items = await this.returnsRepository.find({
       order: { createdAt: 'DESC' },
     });
 
-    return items.map((item) => ({
-      returnId: item.returnId,
-      orderId: item.orderId,
-      userId: item.userId,
-      orderItemId: item.orderItemId,
-      returnQuantity: item.returnQuantity,
-      reason: item.reason,
-      description: item.description,
-      returnStatus: item.returnStatus,
-      inspectionStatus: item.inspectionStatus,
-      inspectionNote: item.inspectionNote,
-      inspectedBy: item.inspectedBy,
-      inspectedAt: item.inspectedAt,
-      refundAmount: item.refundAmount,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-    }));
+    const orderItemIds = [...new Set(items.map((item) => item.orderItemId))];
+    const orderIds = [...new Set(items.map((item) => item.orderId))];
+    const userIds = [...new Set(items.map((item) => item.userId).filter(Boolean))];
+
+    const [orderItems, orders, users] = await Promise.all([
+      orderItemIds.length
+        ? this.orderItemsRepository.find({ where: { orderItemId: In(orderItemIds) } })
+        : Promise.resolve([]),
+      orderIds.length
+        ? this.ordersRepository.find({ where: { orderId: In(orderIds) } })
+        : Promise.resolve([]),
+      userIds.length
+        ? this.usersRepository.find({ where: { userId: In(userIds) } })
+        : Promise.resolve([]),
+    ]);
+
+    const itemById = new Map(
+      orderItems.map((orderItem) => [orderItem.orderItemId, orderItem]),
+    );
+    const orderById = new Map(orders.map((order) => [order.orderId, order]));
+    const userById = new Map(users.map((user) => [user.userId, user]));
+    const productIds = [
+      ...new Set(orderItems.map((orderItem) => orderItem.productId).filter(Boolean)),
+    ];
+    const productImages = productIds.length
+      ? await this.productImagesRepository.find({
+          where: { productId: In(productIds) },
+          order: { isPrimary: 'DESC', sortOrder: 'ASC', createdAt: 'ASC' },
+        })
+      : [];
+    const imageByProductId = new Map<string, string>();
+    for (const image of productImages) {
+      if (!imageByProductId.has(image.productId)) {
+        imageByProductId.set(image.productId, image.imageUrl);
+      }
+    }
+
+    return items.map((item) => {
+      const orderItem = itemById.get(item.orderItemId);
+      const order = orderById.get(item.orderId);
+      const user = userById.get(item.userId);
+      return {
+        returnId: item.returnId,
+        orderId: item.orderId,
+        orderCode: order ? order.orderId.slice(0, 8).toUpperCase() : null,
+        userId: item.userId,
+        customerName: order?.fullName ?? user?.fullName ?? user?.username ?? null,
+        customerEmail: user?.email ?? null,
+        customerPhone: order?.phone ?? user?.phoneNumber ?? null,
+        orderItemId: item.orderItemId,
+        productId: orderItem?.productId ?? null,
+        productName: orderItem?.productName ?? null,
+        productImageUrl: orderItem?.productId
+          ? imageByProductId.get(orderItem.productId) ?? null
+          : null,
+        orderedQuantity: orderItem?.quantity ?? null,
+        deliveredQuantity: orderItem?.quantityDelivered ?? null,
+        returnQuantity: item.returnQuantity,
+        reason: item.reason,
+        reasonLabel: this.getReturnReasonLabel(item.reason),
+        description: item.description,
+        returnStatus: item.returnStatus,
+        statusLabel: this.getReturnStatusLabel(item.returnStatus),
+        inspectionStatus: item.inspectionStatus,
+        inspectionStatusLabel: this.getReturnInspectionStatusLabel(item.inspectionStatus),
+        inspectionNote: item.inspectionNote,
+        inspectedBy: item.inspectedBy,
+        inspectedAt: item.inspectedAt,
+        refundAmount: item.refundAmount,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      };
+    });
   }
 
   async updateReturnStatus(
@@ -4838,7 +5332,7 @@ export class OrdersService {
           oldStatus: OrderStatus.SHIPPING,
           newStatus: OrderStatus.DELIVERED,
           changedBy: currentUser._id,
-          note: 'KhÃ¡ch hÃ ng xÃ¡c nháº­n Ä‘Ã£ nháº­n hÃ ng',
+          note: 'Khách hàng xác nhận đã nhận hàng',
         }),
       );
     });
