@@ -37,7 +37,7 @@ import type { IUser } from '../users/users.interface';
 import { UserEntity } from '../users/entities/user.entity';
 import { withDeadlockRetry } from '../common/transaction.util';
 import {
-  buildVnpaySecureHash,
+  buildVnpayPaymentQuery,
   verifyMomoSignature,
   verifyVnpaySignature,
   verifyZaloPayCallback,
@@ -3152,13 +3152,7 @@ export class OrdersService {
       vnp_IpAddr: '127.0.0.1',
       vnp_CreateDate: this.formatGatewayDate(),
     };
-    params.vnp_SecureHash = buildVnpaySecureHash(params, hashSecret);
-
-    const query = Object.keys(params)
-      .sort()
-      .map((key) => `${key}=${encodeURIComponent(String(params[key])).replace(/%20/g, '+')}`)
-      .join('&');
-
+    const query = buildVnpayPaymentQuery(params, hashSecret);
     return `${paymentUrl}?${query}`;
   }
 

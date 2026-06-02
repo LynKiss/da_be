@@ -17,6 +17,7 @@ import { InventoryTransactionEntity, InventoryTransactionType } from '../product
 import { ProductEntity } from '../products/entities/product.entity';
 import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { ProductBatchService } from '../products/product-batch.service';
+import { SupplierEntity } from '../suppliers/entities/supplier.entity';
 import { WarehouseEntity } from '../warehouses/entities/warehouse.entity';
 import { WarehouseStockEntity } from '../warehouses/entities/warehouse-stock.entity';
 import { ConfirmGrDto, GrItemBatchDto } from './dto/confirm-gr.dto';
@@ -118,6 +119,9 @@ export class ProcurementService {
     @InjectRepository(ProductImageEntity)
     private readonly productImageRepo: Repository<ProductImageEntity>,
 
+    @InjectRepository(SupplierEntity)
+    private readonly supplierRepo: Repository<SupplierEntity>,
+
     @InjectRepository(InventoryTransactionEntity)
     private readonly txRepo: Repository<InventoryTransactionEntity>,
 
@@ -128,6 +132,88 @@ export class ProcurementService {
   ) {}
 
   private readonly procurementLogger = new Logger(ProcurementService.name);
+
+  private readonly supplierDebtStatuses = [
+    PurchaseOrderStatus.ORDERED,
+    PurchaseOrderStatus.PARTIAL,
+    PurchaseOrderStatus.RECEIVED,
+  ];
+
+  private async calculateSupplierDebt(supplierId: string, excludePoId?: string) {
+    const qb = this.poRepo
+      .createQueryBuilder('po')
+      .select('SUM(GREATEST(CAST(po.totalAmount AS DECIMAL(15,2)) - CAST(po.paidAmount AS DECIMAL(15,2)), 0))', 'debt')
+      .where('po.supplierId = :supplierId', { supplierId })
+      .andWhere('po.status IN (:...statuses)', { statuses: this.supplierDebtStatuses });
+    if (excludePoId) qb.andWhere('po.poId <> :excludePoId', { excludePoId });
+    const row = await qb.getRawOne<{ debt: string | null }>();
+    return Number(row?.debt ?? 0);
+  }
+
+  private async syncSupplierDebt(supplierId: string) {
+    const debt = await this.calculateSupplierDebt(supplierId);
+    await this.supplierRepo.update({ supplierId }, { currentDebt: String(debt) });
+    return debt;
+  }
+
+  private async enrichItemsWithProductInfo<T extends { productId: string }>(items: T[]) {
+    const productIds = [...new Set((items ?? []).map((item) => item.productId).filter(Boolean))];
+    if (!productIds.length) return items;
+
+    const [products, primaryImages] = await Promise.all([
+      this.productRepo.find({ where: { productId: In(productIds) } }),
+      this.productImageRepo.find({
+        where: { productId: In(productIds), isPrimary: true as unknown as boolean },
+      }),
+    ]);
+
+    const productMap = new Map(products.map((product) => [product.productId, product]));
+    const imageMap = new Map(primaryImages.map((image) => [image.productId, image.imageUrl]));
+
+    return items.map((item) => {
+      const product = productMap.get(item.productId);
+      return {
+        ...item,
+        productName: product?.productName ?? null,
+        productSlug: product?.productSlug ?? null,
+        productCode: product?.barcode ?? product?.productId ?? item.productId,
+        primaryImageUrl: imageMap.get(item.productId) ?? null,
+        categoryId: product?.categoryId ?? null,
+      };
+    });
+  }
+
+  private async assertSupplierCanUseCredit(supplierId: string, poTotal: number, excludePoId?: string) {
+    const supplier = await this.supplierRepo.findOne({ where: { supplierId } });
+    if (!supplier) throw new NotFoundException('Không tìm thấy nhà cung cấp');
+    if (!supplier.isActive) {
+      throw new BadRequestException({
+        error: 'SUPPLIER_INACTIVE',
+        message: 'Nhà cung cấp đang tạm ngưng, không thể tạo hoặc đặt đơn mua hàng.',
+      });
+    }
+
+    const creditLimit = Number(supplier.creditLimit ?? 0);
+    if (creditLimit <= 0) return supplier;
+
+    const currentDebt = await this.calculateSupplierDebt(supplierId, excludePoId);
+    const nextDebt = currentDebt + poTotal;
+    if (nextDebt > creditLimit) {
+      throw new BadRequestException({
+        error: 'SUPPLIER_CREDIT_LIMIT_EXCEEDED',
+        message: `Đơn mua vượt hạn mức công nợ NCC. Hạn mức ${creditLimit}, đang nợ ${currentDebt}, đơn mới ${poTotal}.`,
+        details: {
+          creditLimit,
+          currentDebt,
+          poTotal,
+          availableCredit: Math.max(0, creditLimit - currentDebt),
+          exceededBy: nextDebt - creditLimit,
+        },
+      });
+    }
+
+    return supplier;
+  }
 
   /**
    * Sau khi confirm GR thành công, tìm các đơn BACKORDERED có sản phẩm vừa nhập.
@@ -408,7 +494,10 @@ export class ProcurementService {
     po.totalAmount = String(totalAmount);
     po.items = items;
 
+    await this.assertSupplierCanUseCredit(dto.supplierId, totalAmount);
+
     const saved = await this.poRepo.save(po);
+    await this.syncSupplierDebt(saved.supplierId);
     void this.auditLogs.log({
       entityType: 'PO',
       entityId: saved.poId,
@@ -421,13 +510,21 @@ export class ProcurementService {
   }
 
   async updatePoStatus(id: string, status: PurchaseOrderStatus, performer?: { userId: string; username: string; ip?: string }) {
-    const po = await this.findOnePo(id);
+    const po = await this.poRepo.findOne({ where: { poId: id } });
+    if (!po) throw new NotFoundException('Không tìm thấy phiếu đặt hàng');
     if (po.status === PurchaseOrderStatus.CANCELLED) {
       throw new BadRequestException('Phiếu đã hủy không thể thay đổi trạng thái');
     }
     const before = { status: po.status };
+    const wasDebt = this.supplierDebtStatuses.includes(po.status);
+    const willBeDebt = this.supplierDebtStatuses.includes(status);
+    if (!wasDebt && willBeDebt) {
+      const outstanding = Math.max(0, Number(po.totalAmount ?? 0) - Number(po.paidAmount ?? 0));
+      await this.assertSupplierCanUseCredit(po.supplierId, outstanding, po.poId);
+    }
     po.status = status;
     const saved = await this.poRepo.save(po);
+    await this.syncSupplierDebt(saved.supplierId);
     void this.auditLogs.log({
       entityType: 'PO',
       entityId: id,
@@ -462,7 +559,10 @@ export class ProcurementService {
   async findOneGr(id: string) {
     const gr = await this.grRepo.findOne({ where: { grId: id }, relations: ['items'] });
     if (!gr) throw new NotFoundException('Không tìm thấy phiếu nhận hàng');
-    return gr;
+    return {
+      ...gr,
+      items: await this.enrichItemsWithProductInfo(gr.items ?? []),
+    };
   }
 
   async createGr(dto: CreateGrDto, performer?: { userId: string; username: string; ip?: string }) {
@@ -809,7 +909,10 @@ export class ProcurementService {
   async findOneSr(id: string) {
     const sr = await this.srRepo.findOne({ where: { srId: id }, relations: ['items'] });
     if (!sr) throw new NotFoundException('Không tìm thấy phiếu trả hàng NCC');
-    return sr;
+    return {
+      ...sr,
+      items: await this.enrichItemsWithProductInfo(sr.items ?? []),
+    };
   }
 
   async createSr(dto: CreateSrDto, performer?: { userId: string; username: string; ip?: string }) {

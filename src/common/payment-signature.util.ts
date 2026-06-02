@@ -62,30 +62,55 @@ export function verifyMomoSignature(
  * VNPay spec: dùng vnp_SecureHash = HMAC_SHA512(rawData, vnp_HashSecret)
  * trong đó rawData = các field vnp_* sort theo alpha, nối query string.
  */
+type VnpayValue = string | number | boolean | null | undefined | string[];
+
+function normalizeVnpayValue(value: unknown): string {
+  if (Array.isArray(value)) return String(value[0] ?? '');
+  return String(value ?? '');
+}
+
+function encodeVnpayValue(value: string): string {
+  return encodeURIComponent(value).replace(/%20/g, '+');
+}
+
+function buildVnpaySignData(params: Record<string, unknown>): string {
+  return Object.keys(params)
+    .filter((key) => key !== 'vnp_SecureHash' && key !== 'vnp_SecureHashType')
+    .filter((key) => key.startsWith('vnp_'))
+    .filter((key) => normalizeVnpayValue(params[key]) !== '')
+    .sort()
+    .map((key) => `${key}=${encodeVnpayValue(normalizeVnpayValue(params[key]))}`)
+    .join('&');
+}
+
+export function buildVnpaySecureHash(
+  params: Record<string, unknown>,
+  hashSecret: string,
+): string {
+  const signData = buildVnpaySignData(params);
+  return createHmac('sha512', hashSecret).update(signData, 'utf8').digest('hex');
+}
+
+export function buildVnpayPaymentQuery(
+  params: Record<string, unknown>,
+  hashSecret: string,
+): string {
+  const secureHash = buildVnpaySecureHash(params, hashSecret);
+  const signedParams = { ...params, vnp_SecureHash: secureHash };
+  return buildVnpaySignData(signedParams);
+}
+
 export function verifyVnpaySignature(
-  query: Record<string, any>,
+  query: Record<string, unknown>,
   hashSecret: string,
 ): boolean {
   if (!hashSecret) return false;
-  const incomingHash = String(query.vnp_SecureHash ?? '').toLowerCase().trim();
+  const incomingHash = normalizeVnpayValue(query.vnp_SecureHash)
+    .toLowerCase()
+    .trim();
   if (!incomingHash) return false;
 
-  const filtered: Record<string, string> = {};
-  for (const [k, v] of Object.entries(query)) {
-    if (k === 'vnp_SecureHash' || k === 'vnp_SecureHashType') continue;
-    if (v === null || v === undefined || v === '') continue;
-    if (k.startsWith('vnp_')) filtered[k] = String(v);
-  }
-
-  const sortedKeys = Object.keys(filtered).sort();
-  const rawData = sortedKeys
-    .map((k) => `${k}=${encodeURIComponent(filtered[k]).replace(/%20/g, '+')}`)
-    .join('&');
-
-  const expected = createHmac('sha512', hashSecret)
-    .update(rawData, 'utf8')
-    .digest('hex')
-    .toLowerCase();
+  const expected = buildVnpaySecureHash(query, hashSecret).toLowerCase();
 
   if (expected.length !== incomingHash.length) return false;
   let diff = 0;
@@ -93,21 +118,6 @@ export function verifyVnpaySignature(
     diff |= expected.charCodeAt(i) ^ incomingHash.charCodeAt(i);
   }
   return diff === 0;
-}
-
-export function buildVnpaySecureHash(
-  params: Record<string, string | number>,
-  hashSecret: string,
-): string {
-  const sortedKeys = Object.keys(params)
-    .filter((key) => key !== 'vnp_SecureHash' && key !== 'vnp_SecureHashType')
-    .sort();
-
-  const rawData = sortedKeys
-    .map((key) => `${key}=${encodeURIComponent(String(params[key])).replace(/%20/g, '+')}`)
-    .join('&');
-
-  return createHmac('sha512', hashSecret).update(rawData, 'utf8').digest('hex');
 }
 
 export function verifyZaloPayCallback(

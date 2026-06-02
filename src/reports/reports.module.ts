@@ -6,6 +6,7 @@ import { CommentEntity } from '../comments/entities/comment.entity';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
+import { OrderStatusHistoryEntity } from '../orders/entities/order-status-history.entity';
 import { OrderEntity } from '../orders/entities/order.entity';
 import { OrderRefundEntity } from '../orders/entities/order-refund.entity';
 import { ReturnEntity } from '../orders/entities/return.entity';
@@ -32,6 +33,7 @@ import { ReportsService } from './reports.service';
     TypeOrmModule.forFeature([
       OrderEntity,
       OrderRefundEntity,
+      OrderStatusHistoryEntity,
       OrderItemEntity,
       ProductEntity,
       UserEntity,

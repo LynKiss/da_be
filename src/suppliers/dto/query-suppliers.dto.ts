@@ -11,6 +11,10 @@ export class QuerySuppliersDto {
   status?: 'all' | 'active' | 'inactive';
 
   @IsOptional()
+  @IsIn(['all', 'outstanding', 'near_limit', 'over_limit'])
+  debtStatus?: 'all' | 'outstanding' | 'near_limit' | 'over_limit';
+
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)

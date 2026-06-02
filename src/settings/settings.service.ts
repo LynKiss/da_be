@@ -257,19 +257,22 @@ export class SettingsService {
   async getVnpayConfig() {
     const payments = await this.getPaymentSettings();
     const vnpay = payments.vnpay;
+    const tmnCode =
+      vnpay.tmnCode || this.configService.get<string>('VNPAY_TMN_CODE') || '';
+    const hashSecret =
+      vnpay.hashSecret ||
+      this.configService.get<string>('VNPAY_HASH_SECRET') ||
+      '';
+    const paymentUrl =
+      this.configService.get<string>('VNPAY_PAYMENT_URL') ||
+      (this.configService.get<string>('VNPAY_SANDBOX') === 'false'
+        ? 'https://pay.vnpay.vn/vpcpay.html'
+        : 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html');
 
     return {
-      tmnCode:
-        vnpay.tmnCode || this.configService.get<string>('VNPAY_TMN_CODE') || '',
-      hashSecret:
-        vnpay.hashSecret ||
-        this.configService.get<string>('VNPAY_HASH_SECRET') ||
-        '',
-      paymentUrl:
-        this.configService.get<string>('VNPAY_PAYMENT_URL') ||
-        (this.configService.get<string>('VNPAY_SANDBOX') === 'false'
-          ? 'https://pay.vnpay.vn/vpcpay.html'
-          : 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html'),
+      tmnCode: tmnCode.trim(),
+      hashSecret: hashSecret.trim(),
+      paymentUrl: paymentUrl.trim(),
     };
   }
 

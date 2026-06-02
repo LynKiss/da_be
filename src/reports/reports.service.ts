@@ -7,6 +7,7 @@ import { SimpleCacheService } from '../common/simple-cache.service';
 import { CouponUsageEntity } from '../discounts/entities/coupon-usage.entity';
 import { DiscountEntity } from '../discounts/entities/discount.entity';
 import { OrderItemEntity } from '../orders/entities/order-item.entity';
+import { OrderStatusHistoryEntity } from '../orders/entities/order-status-history.entity';
 import {
   OrderRefundEntity,
   OrderRefundStatus,
@@ -70,11 +71,48 @@ export class ReportsService {
     @InjectRepository(OrderRefundEntity)
     private readonly refundsRepository: Repository<OrderRefundEntity>,
 
+    @InjectRepository(OrderStatusHistoryEntity)
+    private readonly orderStatusHistoryRepository: Repository<OrderStatusHistoryEntity>,
+
     @InjectRepository(ProductBatchEntity)
     private readonly batchRepository: Repository<ProductBatchEntity>,
 
     private readonly cache: SimpleCacheService,
   ) {}
+
+  private buildSupplierCreditInfo(supplier?: SupplierEntity | null) {
+    const creditLimit = Number(supplier?.creditLimit ?? 0);
+    const currentDebt = Number(supplier?.currentDebt ?? 0);
+    const hasLimit = creditLimit > 0;
+    const availableCredit = hasLimit ? Math.max(0, creditLimit - currentDebt) : null;
+    const debtUsagePct = hasLimit ? Math.round((currentDebt / creditLimit) * 1000) / 10 : 0;
+    const creditStatus =
+      hasLimit && currentDebt >= creditLimit
+        ? 'over_limit'
+        : hasLimit && debtUsagePct >= 80
+          ? 'near_limit'
+          : 'normal';
+
+    return { creditLimit, currentDebt, availableCredit, debtUsagePct, creditStatus };
+  }
+
+  private async syncSupplierDebt(supplierId: string) {
+    const row = await this.poRepository
+      .createQueryBuilder('po')
+      .select('SUM(GREATEST(CAST(po.totalAmount AS DECIMAL(15,2)) - CAST(po.paidAmount AS DECIMAL(15,2)), 0))', 'debt')
+      .where('po.supplierId = :supplierId', { supplierId })
+      .andWhere('po.status IN (:...statuses)', {
+        statuses: [
+          PurchaseOrderStatus.ORDERED,
+          PurchaseOrderStatus.PARTIAL,
+          PurchaseOrderStatus.RECEIVED,
+        ],
+      })
+      .getRawOne<{ debt: string | null }>();
+    const debt = Number(row?.debt ?? 0);
+    await this.suppliersRepository.update({ supplierId }, { currentDebt: String(debt) });
+    return debt;
+  }
 
   private readonly financialRevenueStatuses = [
     OrderStatus.DELIVERED,
@@ -83,6 +121,31 @@ export class ReportsService {
   ];
   private readonly revenuePolicy =
     'financial_v1_completed_fulfillment_less_completed_refunds';
+
+  private readonly revenueRecognitionStatuses = [
+    OrderStatus.DELIVERED,
+    OrderStatus.PARTIAL_DELIVERED,
+  ];
+
+  private revenueRecognitionDateSql(orderAlias: string) {
+    return `COALESCE(revenue_recognition.recognizedAt, ${orderAlias}.created_at)`;
+  }
+
+  private joinRevenueRecognition(qb: any, orderAlias: string) {
+    return qb.leftJoin(
+      (historyQb) =>
+        historyQb
+          .select('history.order_id', 'orderId')
+          .addSelect('MIN(history.created_at)', 'recognizedAt')
+          .from(OrderStatusHistoryEntity, 'history')
+          .where('history.new_status IN (:...recognitionStatuses)', {
+            recognitionStatuses: this.revenueRecognitionStatuses,
+          })
+          .groupBy('history.order_id'),
+      'revenue_recognition',
+      `revenue_recognition.orderId = ${orderAlias}.order_id`,
+    );
+  }
 
   private fulfilledLineRevenueSql(orderAlias: string, itemAlias: string) {
     return `COALESCE(NULLIF(${itemAlias}.net_line_total, 0), ${itemAlias}.line_total)
@@ -209,7 +272,9 @@ export class ReportsService {
     next30Days.setDate(next30Days.getDate() + 30);
 
     const revenueQuery = (from?: Date, to?: Date) => {
-      const qb = this.joinCompletedRefunds(
+      const recognizedAtSql = this.revenueRecognitionDateSql('order');
+      const qb = this.joinRevenueRecognition(
+        this.joinCompletedRefunds(
         this.ordersRepository
         .createQueryBuilder('order')
         .select(
@@ -220,14 +285,16 @@ export class ReportsService {
           statuses: revenueStatuses,
         }),
         'order',
+        ),
+        'order',
       );
 
       if (from) {
-        qb.andWhere('order.created_at >= :from', { from });
+        qb.andWhere(`${recognizedAtSql} >= :from`, { from });
       }
 
       if (to) {
-        qb.andWhere('order.created_at < :to', { to });
+        qb.andWhere(`${recognizedAtSql} < :to`, { to });
       }
 
       return qb.getRawOne() as Promise<{ revenue: string }>;
@@ -370,59 +437,69 @@ export class ReportsService {
       .groupBy('transaction.transaction_type')
       .getRawMany();
 
-    const salesByDay = await this.joinCompletedRefunds(
+    const recognizedAtSql = this.revenueRecognitionDateSql('order');
+    const salesByDay = await this.joinRevenueRecognition(
+      this.joinCompletedRefunds(
       this.ordersRepository
       .createQueryBuilder('order')
-        .select('DATE(order.created_at)', 'date')
+        .select(`DATE(${recognizedAtSql})`, 'date')
         .addSelect('COUNT(*)', 'orders')
         .addSelect(
           'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
           'revenue',
         ),
       'order',
+      ),
+      'order',
     )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
-      .andWhere('order.created_at >= :from', { from: last30DaysStart })
-      .groupBy('DATE(order.created_at)')
-      .orderBy('DATE(order.created_at)', 'ASC')
+      .andWhere(`${recognizedAtSql} >= :from`, { from: last30DaysStart })
+      .groupBy(`DATE(${recognizedAtSql})`)
+      .orderBy(`DATE(${recognizedAtSql})`, 'ASC')
       .getRawMany();
 
-    const salesByMonth = await this.joinCompletedRefunds(
+    const salesByMonth = await this.joinRevenueRecognition(
+      this.joinCompletedRefunds(
       this.ordersRepository
       .createQueryBuilder('order')
-        .select("DATE_FORMAT(order.created_at, '%Y-%m')", 'period')
+        .select(`DATE_FORMAT(${recognizedAtSql}, '%Y-%m')`, 'period')
         .addSelect('COUNT(*)', 'orders')
         .addSelect(
           'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
           'revenue',
         ),
       'order',
+      ),
+      'order',
     )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
-      .andWhere('order.created_at >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)')
+      .andWhere(`${recognizedAtSql} >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)`)
       .groupBy('period')
       .orderBy('period', 'ASC')
       .getRawMany();
 
-    const salesByHour = await this.joinCompletedRefunds(
+    const salesByHour = await this.joinRevenueRecognition(
+      this.joinCompletedRefunds(
       this.ordersRepository
       .createQueryBuilder('order')
-        .select('HOUR(order.created_at)', 'hour')
+        .select(`HOUR(${recognizedAtSql})`, 'hour')
         .addSelect('COUNT(*)', 'orders')
         .addSelect(
           'COALESCE(SUM(GREATEST(0, order.total_payment - COALESCE(completed_refunds.completedRefund, 0))), 0)',
           'revenue',
         ),
       'order',
+      ),
+      'order',
     )
       .where('order.order_status IN (:...statuses)', {
         statuses: revenueStatuses,
       })
-      .andWhere('order.created_at >= :from', { from: last30DaysStart })
+      .andWhere(`${recognizedAtSql} >= :from`, { from: last30DaysStart })
       .groupBy('hour')
       .orderBy('hour', 'ASC')
       .getRawMany();
@@ -730,6 +807,8 @@ export class ReportsService {
         paidOrders,
         revenue: totalRevenue.toFixed(2),
         revenuePolicy: this.revenuePolicy,
+        revenueRecognitionPolicy:
+          'recognized_at_first_delivered_or_partial_delivered_status_history_fallback_order_created_at',
         todayOrders,
         todayRevenue: todayRevenue.toFixed(2),
         yesterdayRevenue: yesterdayRevenue.toFixed(2),
@@ -1875,6 +1954,7 @@ export class ReportsService {
 
     const enrichedItems = pos.map((po) => {
       const supplier = supplierById.get(po.supplierId);
+      const supplierCredit = this.buildSupplierCreditInfo(supplier);
       const refDate = po.orderDate ? new Date(po.orderDate) : new Date(po.createdAt);
       const diffDays = Math.floor((asOf.getTime() - refDate.getTime()) / (1000 * 60 * 60 * 24));
       const totalAmount = Number(po.totalAmount);
@@ -1892,6 +1972,11 @@ export class ReportsService {
         ...po,
         supplierName: supplier?.name ?? null,
         supplierCode: supplier?.code ?? null,
+        supplierCreditLimit: supplierCredit.creditLimit,
+        supplierCurrentDebt: supplierCredit.currentDebt,
+        supplierAvailableCredit: supplierCredit.availableCredit,
+        supplierDebtUsagePct: supplierCredit.debtUsagePct,
+        supplierCreditStatus: supplierCredit.creditStatus,
         diffDays,
         outstanding,
         ageBucket,
@@ -1927,12 +2012,18 @@ export class ReportsService {
         buckets[po.ageBucket as keyof typeof buckets].push({ outstanding: po.outstanding }),
       );
     const paidTotal = summaryBase.reduce((sum, po) => sum + Number(po.paidAmount), 0);
+    const summarySupplierIds = [...new Set(summaryBase.map((po) => po.supplierId))];
+    const summarySupplierCredit = summarySupplierIds.map((id) => this.buildSupplierCreditInfo(supplierById.get(id)));
 
     const summary = {
       asOf: asOfDate,
       totalPos: summaryBase.length,
       totalOutstanding: summaryBase.reduce((sum, po) => sum + po.outstanding, 0),
       totalPaid: paidTotal,
+      totalSupplierCreditLimit: summarySupplierCredit.reduce((sum, credit) => sum + credit.creditLimit, 0),
+      totalSupplierCurrentDebt: summarySupplierCredit.reduce((sum, credit) => sum + credit.currentDebt, 0),
+      nearLimitSupplierCount: summarySupplierCredit.filter((credit) => credit.creditStatus === 'near_limit').length,
+      overLimitSupplierCount: summarySupplierCredit.filter((credit) => credit.creditStatus === 'over_limit').length,
       unpaidCount: summaryBase.filter((po) => po.paymentStatus === 'unpaid').length,
       partialCount: summaryBase.filter((po) => po.paymentStatus === 'partial').length,
       paidCount: summaryBase.filter((po) => po.paymentStatus === 'paid').length,
@@ -2004,6 +2095,8 @@ export class ReportsService {
       paymentStatus: paymentStatus as 'unpaid' | 'partial' | 'paid',
       paymentNotes: dto.notes ?? null,
     });
+
+    await this.syncSupplierDebt(po.supplierId);
 
     return this.poRepository.findOne({ where: { poId: dto.poId } });
   }

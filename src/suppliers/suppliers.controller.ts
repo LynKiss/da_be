@@ -34,6 +34,13 @@ export class SuppliersController {
     return this.service.findAllActive();
   }
 
+  @Get(':id/credit-detail')
+  @RequirePermissions('manage_products')
+  @ResponseMessage('Get supplier credit detail')
+  findCreditDetail(@Param('id') id: string) {
+    return this.service.findCreditDetail(id);
+  }
+
   @Get(':id')
   @RequirePermissions('manage_products')
   @ResponseMessage('Get supplier detail')

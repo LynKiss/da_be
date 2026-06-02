@@ -35,6 +35,12 @@ export class SupplierEntity {
   @Column({ name: 'payment_terms', type: 'int', default: 30 })
   paymentTerms!: number;
 
+  @Column({ name: 'credit_limit', type: 'decimal', precision: 15, scale: 2, default: 0 })
+  creditLimit!: string;
+
+  @Column({ name: 'current_debt', type: 'decimal', precision: 15, scale: 2, default: 0 })
+  currentDebt!: string;
+
   @Column({ name: 'notes', type: 'text', nullable: true })
   notes!: string | null;
 

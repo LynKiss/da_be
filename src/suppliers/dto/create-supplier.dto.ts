@@ -1,4 +1,5 @@
-import { IsEmail, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsEmail, IsInt, IsNumber, IsOptional, IsString, Max, Min } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateSupplierDto {
   @IsString()
@@ -33,6 +34,12 @@ export class CreateSupplierDto {
   @Min(0)
   @Max(365)
   paymentTerms?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  creditLimit?: number;
 
   @IsOptional()
   @IsString()
