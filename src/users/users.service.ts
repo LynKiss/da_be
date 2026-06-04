@@ -21,7 +21,7 @@ import {
   PaymentStatus,
 } from '../orders/entities/order.entity';
 import { PaymentTransactionEntity } from '../orders/entities/payment-transaction.entity';
-import { ReturnEntity } from '../orders/entities/return.entity';
+import { ReturnEntity, ReturnStatus } from '../orders/entities/return.entity';
 import { ShippingAddressEntity } from '../orders/entities/shipping-address.entity';
 import { ProductImageEntity } from '../products/entities/product-image.entity';
 import { In, Repository } from 'typeorm';
@@ -109,7 +109,7 @@ export class UsersService {
 
     if (query?.search) {
       queryBuilder.andWhere(
-        '(user.username LIKE :search OR user.email LIKE :search)',
+        '(user.username LIKE :search OR user.email LIKE :search OR user.full_name LIKE :search OR user.phone_number LIKE :search)',
         { search: `%${query.search}%` },
       );
     }
@@ -339,6 +339,7 @@ export class UsersService {
       provider: 'local',
       providerId: null,
       isActive: createAdminUserDto.isActive ?? true,
+      isWholesale: createAdminUserDto.isWholesale ?? false,
       resetPasswordCode: null,
       resetPasswordExpiresAt: null,
     });
@@ -347,6 +348,7 @@ export class UsersService {
     return {
       ...this.toPublicUser(savedUser),
       isActive: savedUser.isActive,
+      isWholesale: savedUser.isWholesale,
       createdAt: savedUser.createdAt,
       updatedAt: savedUser.updatedAt,
     };
@@ -911,6 +913,51 @@ export class UsersService {
       items.map((item) => item.productId),
     );
 
+    // ── Return window (đồng bộ với OrdersService.buildOrderDetail) ──
+    const RETURN_WINDOW_DAYS = 7;
+    const RETURN_WINDOW_MS = RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    const returnableStatuses = [
+      OrderStatus.DELIVERED,
+      OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
+    ];
+    let canCreateReturn = false;
+    let returnDeadline: string | null = null;
+    let returnBlockedReason: string | null = 'RETURN_NOT_DELIVERED_YET';
+    if (returnableStatuses.includes(order.orderStatus)) {
+      const deliveredAt = order.updatedAt ?? order.createdAt ?? new Date();
+      const deadline = new Date(deliveredAt.getTime() + RETURN_WINDOW_MS);
+      const expired = deadline.getTime() < Date.now();
+      returnDeadline = deadline.toISOString();
+      canCreateReturn = !expired;
+      returnBlockedReason = expired ? 'RETURN_WINDOW_EXPIRED' : null;
+    }
+
+    // Số lượng đã trả (các yêu cầu đang mở / đã hoàn) theo từng orderItem
+    const reservedStatuses: ReturnStatus[] = [
+      ReturnStatus.REQUESTED,
+      ReturnStatus.APPROVED,
+      ReturnStatus.RECEIVED,
+      ReturnStatus.INSPECTED,
+      ReturnStatus.REFUNDED,
+    ];
+    const existingReturns = await this.returnsRepository.find({
+      where: { orderId: order.orderId },
+    });
+    const returnedQtyByItem = new Map<string, number>();
+    for (const r of existingReturns) {
+      if (!reservedStatuses.includes(r.returnStatus)) continue;
+      returnedQtyByItem.set(
+        r.orderItemId,
+        (returnedQtyByItem.get(r.orderItemId) ?? 0) + Number(r.returnQuantity ?? 0),
+      );
+    }
+
+    const isPartial = [
+      OrderStatus.PARTIAL_DELIVERED,
+      OrderStatus.PARTIAL_RETURNED,
+    ].includes(order.orderStatus);
+
     return {
       ...this.toOrderSummaryResponse(order),
       shippingAddressId: order.shippingAddressId,
@@ -920,15 +967,30 @@ export class UsersService {
       discountAmount: order.discountAmount,
       deliveryCost: order.deliveryCost,
       note: order.note,
-      items: items.map((item) => ({
-        id: item.orderItemId,
-        productId: item.productId,
-        productName: item.productName,
-        primaryImageUrl: productImageByProductId.get(item.productId) ?? null,
-        quantity: item.quantity,
-        unitPrice: item.unitPrice,
-        lineTotal: item.lineTotal,
-      })),
+      returnWindowDays: RETURN_WINDOW_DAYS,
+      returnDeadline,
+      canCreateReturn,
+      returnBlockedReason,
+      items: items.map((item) => {
+        const base = isPartial
+          ? Math.max(0, Number(item.quantityDelivered ?? 0))
+          : Math.max(0, Number(item.quantity ?? 0));
+        const alreadyReturned = returnedQtyByItem.get(item.orderItemId) ?? 0;
+        const returnableQuantity = canCreateReturn
+          ? Math.max(0, base - alreadyReturned)
+          : 0;
+        return {
+          id: item.orderItemId,
+          productId: item.productId,
+          productName: item.productName,
+          primaryImageUrl: productImageByProductId.get(item.productId) ?? null,
+          quantity: item.quantity,
+          quantityDelivered: item.quantityDelivered ?? item.quantity,
+          unitPrice: item.unitPrice,
+          lineTotal: item.lineTotal,
+          returnableQuantity,
+        };
+      }),
     };
   }
 
@@ -959,9 +1021,19 @@ export class UsersService {
       throw new NotFoundException('Nguoi dung khong ton tai');
     }
 
-    const [addressesCount, ordersCount] = await Promise.all([
+    const [addressesCount, ordersCount, addresses, recentOrders] = await Promise.all([
       this.shippingAddressesRepository.count({ where: { userId } }),
       this.ordersRepository.count({ where: { userId } }),
+      this.shippingAddressesRepository.find({
+        where: { userId },
+        order: { isDefault: 'DESC', updatedAt: 'DESC', createdAt: 'DESC' },
+        take: 3,
+      }),
+      this.ordersRepository.find({
+        where: { userId },
+        order: { createdAt: 'DESC' },
+        take: 5,
+      }),
     ]);
 
     return {
@@ -974,6 +1046,8 @@ export class UsersService {
         addressesCount,
         ordersCount,
       },
+      addresses: addresses.map((address) => this.toShippingAddressResponse(address)),
+      recentOrders: recentOrders.map((order) => this.toOrderSummaryResponse(order)),
     };
   }
 
@@ -1061,6 +1135,7 @@ export class UsersService {
     return {
       ...this.toPublicUser(savedUser),
       isActive: savedUser.isActive,
+      isWholesale: savedUser.isWholesale,
       createdAt: savedUser.createdAt,
       updatedAt: savedUser.updatedAt,
     };

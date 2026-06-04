@@ -46,4 +46,8 @@ export class CreateAdminUserDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  isWholesale?: boolean;
 }

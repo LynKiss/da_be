@@ -86,16 +86,16 @@ export class ReportsController {
   async exportInventoryValuation(@Res() res: Response) {
     const data = await this.reportsService.getInventoryValuation();
     const csv = toCsv(data.items, [
-      { key: 'productId', header: 'MÃ£ SP' },
-      { key: 'productName', header: 'TÃªn sáº£n pháº©m' },
-      { key: 'qtyAvailable', header: 'Tá»“n kháº£ dá»¥ng' },
-      { key: 'qtyReserved', header: 'Äang giá»¯' },
-      { key: 'totalQty', header: 'Tá»•ng SL' },
-      { key: 'avgCost', header: 'GiÃ¡ vá»‘n TB' },
-      { key: 'retailPrice', header: 'GiÃ¡ bÃ¡n' },
-      { key: 'totalValue', header: 'GiÃ¡ trá»‹ tá»“n' },
-      { key: 'potentialRevenue', header: 'Doanh thu tiá»m nÄƒng' },
-      { key: 'potentialProfit', header: 'LÃ£i tiá»m nÄƒng' },
+      { key: 'productId', header: 'Mã SP' },
+      { key: 'productName', header: 'Tên sản phẩm' },
+      { key: 'qtyAvailable', header: 'Tồn khả dụng' },
+      { key: 'qtyReserved', header: 'Đang giữ' },
+      { key: 'totalQty', header: 'Tổng SL' },
+      { key: 'avgCost', header: 'Giá vốn TB' },
+      { key: 'retailPrice', header: 'Giá bán' },
+      { key: 'totalValue', header: 'Giá trị tồn' },
+      { key: 'potentialRevenue', header: 'Doanh thu tiềm năng' },
+      { key: 'potentialProfit', header: 'Lãi tiềm năng' },
     ]);
     const headers = csvResponseHeaders(
       `inventory-valuation-${new Date().toISOString().slice(0, 10)}.csv`,
@@ -118,16 +118,16 @@ export class ReportsController {
     });
     const csv = toCsv(data.items, [
       { key: 'transactionId', header: 'ID' },
-      { key: 'productName', header: 'Sáº£n pháº©m' },
-      { key: 'transactionType', header: 'Loáº¡i' },
-      { key: 'quantityChange', header: 'SL thay Ä‘á»•i' },
-      { key: 'quantityBefore', header: 'SL trÆ°á»›c' },
+      { key: 'productName', header: 'Sản phẩm' },
+      { key: 'transactionType', header: 'Loại' },
+      { key: 'quantityChange', header: 'SL thay đổi' },
+      { key: 'quantityBefore', header: 'SL trước' },
       { key: 'quantityAfter', header: 'SL sau' },
-      { key: 'unitCostAtTime', header: 'ÄÆ¡n giÃ¡' },
-      { key: 'referenceType', header: 'Tham chiáº¿u' },
-      { key: 'referenceId', header: 'MÃ£ TC' },
-      { key: 'note', header: 'Ghi chÃº' },
-      { key: 'createdAt', header: 'Thá»i gian' },
+      { key: 'unitCostAtTime', header: 'Đơn giá' },
+      { key: 'referenceType', header: 'Tham chiếu' },
+      { key: 'referenceId', header: 'Mã TC' },
+      { key: 'note', header: 'Ghi chú' },
+      { key: 'createdAt', header: 'Thời gian' },
     ]);
     const headers = csvResponseHeaders(
       `inventory-ledger-${new Date().toISOString().slice(0, 10)}.csv`,

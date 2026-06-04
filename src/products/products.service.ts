@@ -324,6 +324,8 @@ export class ProductsService {
     if (createProductDto.originId) {
       await this.ensureOriginExists(createProductDto.originId);
     }
+    const tagIds = createProductDto.tagIds ?? [];
+    await this.ensureTagsExist(tagIds);
     await this.ensureUniqueFields(createProductDto);
 
     if (
@@ -366,6 +368,9 @@ export class ProductsService {
     });
 
     const saved = await this.productsRepository.save(product);
+    if (tagIds.length > 0) {
+      await this.replaceProductTags(saved.productId, tagIds);
+    }
     void this.notificationsService.createNotification({
       channel: NotificationChannel.SYSTEM,
       title: 'Sản phẩm mới được thêm',
@@ -386,6 +391,9 @@ export class ProductsService {
     }
     if (updateProductDto.originId) {
       await this.ensureOriginExists(updateProductDto.originId);
+    }
+    if (updateProductDto.tagIds !== undefined) {
+      await this.ensureTagsExist(updateProductDto.tagIds);
     }
 
     await this.ensureUniqueFields(updateProductDto, product.productId);
@@ -458,6 +466,9 @@ export class ProductsService {
         : product.boxBarcode;
 
     const updated = await this.productsRepository.save(product);
+    if (updateProductDto.tagIds !== undefined) {
+      await this.replaceProductTags(updated.productId, updateProductDto.tagIds);
+    }
     void this.notificationsService.createNotification({
       channel: NotificationChannel.SYSTEM,
       title: 'Sản phẩm được cập nhật',
@@ -1499,6 +1510,31 @@ export class ProductsService {
     if (productTags.length === 0) return [];
     const tagIds = productTags.map((pt) => pt.tagId);
     return this.tagsRepository.findBy(tagIds.map((tagId) => ({ tagId })));
+  }
+
+  private async ensureTagsExist(tagIds: string[]) {
+    const uniqueTagIds = [...new Set(tagIds)];
+    if (uniqueTagIds.length === 0) return;
+
+    const tags = await this.tagsRepository.findBy(
+      uniqueTagIds.map((tagId) => ({ tagId })),
+    );
+    if (tags.length !== uniqueTagIds.length) {
+      throw new NotFoundException('One or more tags not found');
+    }
+  }
+
+  private async replaceProductTags(productId: string, tagIds: string[]) {
+    const uniqueTagIds = [...new Set(tagIds)];
+    await this.ensureTagsExist(uniqueTagIds);
+    await this.productTagsRepository.delete({ productId });
+
+    if (uniqueTagIds.length === 0) return;
+
+    const entities = uniqueTagIds.map((tagId) =>
+      this.productTagsRepository.create({ productId, tagId }),
+    );
+    await this.productTagsRepository.save(entities);
   }
 
   private async ensureUniqueFields(

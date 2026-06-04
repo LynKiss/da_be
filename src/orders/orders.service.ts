@@ -99,7 +99,7 @@ const RETURN_WINDOW_MS = RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000;
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
   private readonly liveTrackingFreshnessMs = 2 * 60 * 1000;
-  private readonly stalePaymentTtlMs = 30 * 60 * 1000; // 30 phÃºt
+  private readonly stalePaymentTtlMs = 30 * 60 * 1000; // 30 phút
 
   constructor(
     @InjectRepository(DeliveryMethodEntity)
@@ -585,13 +585,13 @@ export class OrdersService {
     if (!quote.minimumOrderMet) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.DELIVERY_MIN_ORDER_NOT_MET,
-        `ÄÆ¡n hÃ ng chÆ°a Ä‘áº¡t giÃ¡ trá»‹ tá»‘i thiá»ƒu Ä‘á»ƒ chá»n ${deliveryMethod.name}`,
+        `Đơn hàng chưa đạt giá trị tối thiểu để chọn ${deliveryMethod.name}`,
       );
     }
     if (!quote.areaMatched) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.DELIVERY_OUT_OF_AREA,
-        `${deliveryMethod.name} khÃ´ng Ã¡p dá»¥ng cho khu vá»±c nháº­n hÃ ng nÃ y`,
+        `${deliveryMethod.name} không áp dụng cho khu vực nhận hàng này`,
       );
     }
     return quote;
@@ -862,7 +862,7 @@ export class OrdersService {
     throw new ConflictException({
       message:
         message ??
-        'Giá» hÃ ng Ä‘Ã£ thay Ä‘á»•i. Vui lÃ²ng kiá»ƒm tra láº¡i giÃ¡ vÃ  tá»“n kho trÆ°á»›c khi Ä‘áº·t hÃ ng.',
+        'Giỏ hàng đã thay đổi. Vui lòng kiểm tra lại giá và tồn kho trước khi đặt hàng.',
       error: 'CART_CHANGED',
     });
   }
@@ -1004,11 +1004,25 @@ export class OrdersService {
     orderId: string,
   ) {
     if (!discount) return;
-    const discountRepository = entityManager.getRepository(DiscountEntity);
     const couponUsageRepository = entityManager.getRepository(CouponUsageEntity);
 
-    discount.usedCount += 1;
-    await discountRepository.save(discount);
+    // FIX HIGH (race condition): tăng used_count ATOMIC + có điều kiện.
+    // UPDATE ... WHERE used_count < usage_limit → nếu 0 dòng bị ảnh hưởng nghĩa là
+    // đã chạm trần (do request đồng thời khác vừa dùng hết) → chặn, không cho vượt.
+    const result = await entityManager
+      .createQueryBuilder()
+      .update(DiscountEntity)
+      .set({ usedCount: () => 'used_count + 1' })
+      .where('discount_id = :id', { id: discount.discountId })
+      .andWhere('(usage_limit IS NULL OR used_count < usage_limit)')
+      .execute();
+
+    if (!result.affected || result.affected === 0) {
+      throw new BadRequestException(
+        'Mã giảm giá đã hết lượt sử dụng. Vui lòng bỏ mã và thử lại.',
+      );
+    }
+
     await couponUsageRepository.save(
       couponUsageRepository.create({
         discountId: discount.discountId,
@@ -1235,7 +1249,7 @@ export class OrdersService {
     });
 
     for (const item of items) {
-      // Lock pessimistic khi restock â€” trÃ¡nh race condition khi cancel song song
+      // Lock pessimistic khi restock — tránh race condition khi cancel song song
       const product = await productRepository.findOne({
         where: { productId: item.productId },
         lock: entityManager ? { mode: 'pessimistic_write' } : undefined,
@@ -1250,7 +1264,7 @@ export class OrdersService {
         await productRepository.save(product);
 
         if (entityManager) {
-          // HoÃ n láº¡i tá»«ng batch theo lá»‹ch sá»­ consumption (idempotent â€” query NET)
+          // Hoàn lại từng batch theo lịch sử consumption (idempotent — query NET)
           await this.restoreBatchesFromOrder(
             entityManager,
             orderId,
@@ -1268,15 +1282,15 @@ export class OrdersService {
   }
 
   /**
-   * HoÃ n batch theo lá»‹ch sá»­ consumption cá»§a order.
+   * Hoàn batch theo lịch sử consumption của order.
    *
-   * - Truy váº¥n NET consumption (export - return_in) cho cáº·p (orderId, productId)
-   * - HoÃ n dáº§n qty cáº§n restock vÃ o cÃ¡c batch theo thá»© tá»± LIFO (consume má»›i nháº¥t hoÃ n trÆ°á»›c)
-   * - Log RETURN_IN inventory_transaction vá»›i batchId
-   * - Idempotent: náº¿u Ä‘Ã£ hoÃ n rá»“i (NET = 0) thÃ¬ khÃ´ng lÃ m gÃ¬
+   * - Truy vấn NET consumption (export - return_in) cho cặp (orderId, productId)
+   * - Hoàn dần qty cần restock vào các batch theo thứ tự LIFO (consume mới nhất hoàn trước)
+   * - Log RETURN_IN inventory_transaction với batchId
+   * - Idempotent: nếu đã hoàn rồi (NET = 0) thì không làm gì
    *
-   * TrÆ°á»ng há»£p legacy (khÃ´ng cÃ³ batch_id trong txn) â†’ bá» qua, restock Ä‘Ã£ Ä‘Æ°á»£c lÃ m
-   * á»Ÿ caller báº±ng quantityAvailable += qty.
+   * Trường hợp legacy (không có batch_id trong txn) → bỏ qua, restock đã được làm
+   * ở caller bằng quantityAvailable += qty.
    */
   private async restoreBatchesFromOrder(
     em: EntityManager,
@@ -1287,9 +1301,9 @@ export class OrdersService {
     if (qtyToRestore <= 0) return;
 
     const netMap = await this.batchService.getOrderBatchConsumption(em, orderId, productId);
-    if (netMap.size === 0) return; // legacy order, khÃ´ng cÃ³ batch info
+    if (netMap.size === 0) return; // legacy order, không có batch info
 
-    // Sort theo NET descending Ä‘á»ƒ hoÃ n tá»« batch cÃ²n consumed nhiá»u nháº¥t
+    // Sort theo NET descending để hoàn từ batch còn consumed nhiều nhất
     const sorted = Array.from(netMap.entries())
       .filter(([_, net]) => net > 0)
       .sort((a, b) => b[1] - a[1]);
@@ -1316,13 +1330,13 @@ export class OrdersService {
       );
       remaining -= restore;
     }
-    // Náº¿u remaining > 0 mÃ  háº¿t batch â†’ cÃ³ thá»ƒ lÃ  partial-batch legacy mix,
-    // tá»•ng quantityAvailable Ä‘Ã£ Ä‘Æ°á»£c cá»™ng nÃªn khÃ´ng thiáº¿u, chá»‰ lÃ  batch detail khÃ´ng Ä‘á»§.
+    // Nếu remaining > 0 mà hết batch → có thể là partial-batch legacy mix,
+    // tổng quantityAvailable đã được cộng nên không thiếu, chỉ là batch detail không đủ.
   }
 
   /**
-   * Khi Ä‘Æ¡n DELIVERED â€” khÃ´ng restock, chá»‰ giáº£i phÃ³ng quantityReserved
-   * (hÃ ng Ä‘Ã£ thá»±c sá»± rá»i kho, khÃ´ng tráº£ vá» stock).
+   * Khi đơn DELIVERED — không restock, chỉ giải phóng quantityReserved
+   * (hàng đã thực sự rời kho, không trả về stock).
    */
   private async releaseReservedOnDelivered(
     orderId: string,
@@ -1341,6 +1355,11 @@ export class OrdersService {
           (product.quantityReserved ?? 0) - item.quantity,
         );
         await productRepository.save(product);
+      }
+      // Giao đủ → đánh dấu đã giao toàn bộ số lượng (để hóa đơn/báo cáo hiển thị đúng "đã giao N/N")
+      if (Number(item.quantityDelivered ?? 0) < item.quantity) {
+        item.quantityDelivered = item.quantity;
+        await orderItemsRepository.save(item);
       }
     }
   }
@@ -1367,14 +1386,14 @@ export class OrdersService {
   }
 
   /**
-   * Äáº·t hÃ ng cho khÃ¡ch vÃ£ng lai (khÃ´ng cáº§n Ä‘Äƒng kÃ½ tÃ i khoáº£n).
+   * Đặt hàng cho khách vãng lai (không cần đăng ký tài khoản).
    *
-   * KhÃ¡c createOrder thÆ°á»ng:
-   * 1. KhÃ´ng cáº§n userId â€” guest cung cáº¥p thÃ´ng tin shipping trá»±c tiáº¿p
-   * 2. Táº¡o userId táº¡m dáº¡ng `guest-<uuid>` chá»‰ Ä‘á»ƒ thoáº£ mÃ£n FK constraint
-   * 3. KhÃ´ng láº¥y giÃ¡ tá»« cart (vÃ¬ khÃ´ng cÃ³ cart) â€” láº¥y giÃ¡ hiá»‡n táº¡i tá»« products
-   * 4. KhÃ´ng support discount code (Ä‘Æ¡n giáº£n hÆ¡n) â€” cÃ³ thá»ƒ bá»• sung sau
-   * 5. Váº«n dÃ¹ng pessimistic lock + idempotency + reservation pattern
+   * Khác createOrder thường:
+   * 1. Không cần userId — guest cung cấp thông tin shipping trực tiếp
+   * 2. Tạo userId tạm dạng `guest-<uuid>` chỉ để thoả mãn FK constraint
+   * 3. Không lấy giá từ cart (vì không có cart) — lấy giá hiện tại từ products
+   * 4. Không support discount code (đơn giản hơn) — có thể bổ sung sau
+   * 5. Vẫn dùng pessimistic lock + idempotency + reservation pattern
    */
   async createGuestOrder(dto: import('./dto/create-guest-order.dto').CreateGuestOrderDto, idempotencyKey?: string) {
     await this.ensurePaymentMethodEnabled(dto.paymentMethod);
@@ -1403,13 +1422,13 @@ export class OrdersService {
     if (deliveryMethod.isPickup && !dto.pickupContact) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.PICKUP_CONTACT_REQUIRED,
-        'Nháº­n táº¡i cá»­a hÃ ng cáº§n tÃªn ngÆ°á»i nháº­n vÃ  sá»‘ Ä‘iá»‡n thoáº¡i liÃªn há»‡',
+        'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
       );
     }
     if (!deliveryMethod.isPickup && !dto.shipping) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.SHIPPING_ADDRESS_REQUIRED,
-        'Giao hÃ ng cáº§n Ä‘á»‹a chá»‰ nháº­n hÃ ng',
+        'Giao hàng cần địa chỉ nhận hàng',
       );
     }
 
@@ -1428,12 +1447,12 @@ export class OrdersService {
     for (const item of dto.items) {
       const product = productsById.get(item.productId);
       if (!product || !product.isShow) {
-        throw new BadRequestException('Sáº£n pháº©m khÃ´ng kháº£ dá»¥ng');
+        throw new BadRequestException('Sản phẩm không khả dụng');
       }
       if (item.quantity > product.quantityAvailable) {
         if (!dto.allowBackorder) {
           throw new BadRequestException(
-            `Sáº£n pháº©m ${product.productName} khÃ´ng Ä‘á»§ tá»“n kho`,
+            `Sản phẩm ${product.productName} không đủ tồn kho`,
           );
         }
         isBackorder = true;
@@ -1459,7 +1478,7 @@ export class OrdersService {
     const orderId = randomUUID();
     const guestUserId = randomUUID();
     const addressSnapshot = deliveryMethod.isPickup
-      ? `Nháº­n táº¡i cá»­a hÃ ng - ${deliveryMethod.name}`
+      ? `Nhận tại cửa hàng - ${deliveryMethod.name}`
       : [
           dto.shipping?.addressLine,
           dto.shipping?.ward,
@@ -1529,12 +1548,12 @@ export class OrdersService {
             lock: { mode: 'pessimistic_write' },
           });
           if (!product) {
-            throw new BadRequestException('Sáº£n pháº©m khÃ´ng tá»“n táº¡i');
+            throw new BadRequestException('Sản phẩm không tồn tại');
           }
           const isLineBackorder = item.quantity > product.quantityAvailable;
           if (isLineBackorder && !dto.allowBackorder) {
             throw new BadRequestException(
-              `Sáº£n pháº©m ${product.productName} khÃ´ng Ä‘á»§ tá»“n kho`,
+              `Sản phẩm ${product.productName} không đủ tồn kho`,
             );
           }
 
@@ -1641,21 +1660,21 @@ export class OrdersService {
   }
 
   /**
-   * Tra cá»©u Ä‘Æ¡n guest báº±ng orderId + phone (verify nháº¹ â€” anyone biáº¿t cáº£ 2 sáº½ xem Ä‘Æ°á»£c).
+   * Tra cứu đơn guest bằng orderId + phone (verify nhẹ — anyone biết cả 2 sẽ xem được).
    */
   async findGuestOrder(orderId: string, phone: string) {
     if (!phone || !orderId) {
-      throw new BadRequestException('Cáº§n cung cáº¥p orderId vÃ  phone');
+      throw new BadRequestException('Cần cung cấp orderId và phone');
     }
     const order = await this.ordersRepository.findOne({
       where: { orderId },
     });
-    if (!order) throw new NotFoundException('KhÃ´ng tÃ¬m tháº¥y Ä‘Æ¡n hÃ ng');
+    if (!order) throw new NotFoundException('Không tìm thấy đơn hàng');
     if (!(await this.isGuestUserId(order.userId))) {
-      throw new UnauthorizedException('ÄÆ¡n nÃ y thuá»™c tÃ i khoáº£n Ä‘Äƒng kÃ½, hÃ£y Ä‘Äƒng nháº­p Ä‘á»ƒ xem');
+      throw new UnauthorizedException('Đơn này thuộc tài khoản đăng ký, hãy đăng nhập để xem');
     }
     if (order.phone.replace(/\s+/g, '') !== phone.replace(/\s+/g, '')) {
-      throw new UnauthorizedException('Sá»‘ Ä‘iá»‡n thoáº¡i khÃ´ng khá»›p');
+      throw new UnauthorizedException('Số điện thoại không khớp');
     }
     return this.buildOrderDetail(order);
   }
@@ -1671,7 +1690,7 @@ export class OrdersService {
 
     if (allowBackorder && !currentUser.isWholesale) {
       throw new BadRequestException(
-        'Backorder chá»‰ dÃ nh cho khÃ¡ch sá»‰/B2B Ä‘Ã£ Ä‘Æ°á»£c cáº¥u hÃ¬nh.',
+        'Backorder chỉ dành cho khách sỉ/B2B đã được cấu hình.',
       );
     }
 
@@ -1711,13 +1730,13 @@ export class OrdersService {
     if (deliveryMethod.isPickup && !createOrderDto.pickupContact) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.PICKUP_CONTACT_REQUIRED,
-        'Nháº­n táº¡i cá»­a hÃ ng cáº§n tÃªn ngÆ°á»i nháº­n vÃ  sá»‘ Ä‘iá»‡n thoáº¡i liÃªn há»‡',
+        'Nhận tại cửa hàng cần tên người nhận và số điện thoại liên hệ',
       );
     }
     if (!deliveryMethod.isPickup && !createOrderDto.shippingAddressId) {
       throw invalidFulfillmentInput(
         FulfillmentErrorCode.SHIPPING_ADDRESS_REQUIRED,
-        'Giao hÃ ng cáº§n Ä‘á»‹a chá»‰ nháº­n hÃ ng',
+        'Giao hàng cần địa chỉ nhận hàng',
       );
     }
 
@@ -1733,14 +1752,14 @@ export class OrdersService {
 
     if (createOrderDto.paymentMethod === PaymentMethod.CREDIT && !currentUser.isWholesale) {
       throw new BadRequestException(
-        'PhÆ°Æ¡ng thá»©c "Mua ná»£" chá»‰ dÃ nh cho khÃ¡ch sá»‰ Ä‘Æ°á»£c cáº¥p háº¡n má»©c tÃ­n dá»¥ng',
+        'Phương thức "Mua nợ" chỉ dành cho khách sỉ được cấp hạn mức tín dụng',
       );
     }
 
     const productIds = [...new Set(cartItems.map((item) => item.productId))];
     const addressSnapshot = shippingAddress
       ? this.buildAddressSnapshot(shippingAddress)
-      : `Nháº­n táº¡i cá»­a hÃ ng - ${deliveryMethod.name}`;
+      : `Nhận tại cửa hàng - ${deliveryMethod.name}`;
     const orderId = randomUUID();
     let createdOrderId: string = orderId;
     let createdOrderWasNew = false;
@@ -1817,7 +1836,7 @@ export class OrdersService {
           if (isUnavailable) {
             if (createOrderDto.cartHash) {
               this.throwCartChanged(
-                'Má»™t hoáº·c nhiá»u sáº£n pháº©m trong giá» Ä‘Ã£ ngá»«ng bÃ¡n. Vui lÃ²ng kiá»ƒm tra láº¡i giá» hÃ ng.',
+                'Một hoặc nhiều sản phẩm trong giỏ đã ngừng bán. Vui lòng kiểm tra lại giỏ hàng.',
               );
             }
             throw new BadRequestException(
@@ -1826,15 +1845,15 @@ export class OrdersService {
           }
 
           if (stockIssue) {
-            const productName = product?.productName ?? 'Sáº£n pháº©m';
+            const productName = product?.productName ?? 'Sản phẩm';
             if (!allowBackorder) {
               if (createOrderDto.cartHash) {
                 this.throwCartChanged(
-                  `Sáº£n pháº©m ${productName} khÃ´ng Ä‘á»§ tá»“n kho. Vui lÃ²ng kiá»ƒm tra láº¡i giá» hÃ ng.`,
+                  `Sản phẩm ${productName} không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.`,
                 );
               }
               throw new BadRequestException(
-                `Sáº£n pháº©m ${productName} khÃ´ng Ä‘á»§ tá»“n kho`,
+                `Sản phẩm ${productName} không đủ tồn kho`,
               );
             }
             isBackorder = true;
@@ -1900,7 +1919,7 @@ export class OrdersService {
           });
           if (!creditLimit) {
             throw new BadRequestException(
-              'Báº¡n chÆ°a Ä‘Æ°á»£c cáº¥p háº¡n má»©c tÃ­n dá»¥ng. Vui lÃ²ng liÃªn há»‡ shop Ä‘á»ƒ Ä‘Æ°á»£c há»— trá»£',
+              'Bạn chưa được cấp hạn mức tín dụng. Vui lòng liên hệ shop để được hỗ trợ',
             );
           }
           const available =
@@ -1908,7 +1927,7 @@ export class OrdersService {
             Number(creditLimit.currentDebt ?? 0);
           if (totalPayment > available) {
             throw new BadRequestException(
-              `VÆ°á»£t háº¡n má»©c tÃ­n dá»¥ng. Háº¡n má»©c cÃ²n láº¡i: ${Math.max(0, available).toLocaleString('vi-VN')}â‚«`,
+              `Vượt hạn mức tín dụng. Hạn mức còn lại: ${Math.max(0, available).toLocaleString('vi-VN')}₫`,
             );
           }
         }
@@ -1955,7 +1974,7 @@ export class OrdersService {
           const product = lockedProductsById.get(cartItem.productId);
           if (!product || !product.isShow) {
             this.throwCartChanged(
-              'Má»™t hoáº·c nhiá»u sáº£n pháº©m trong giá» Ä‘Ã£ ngá»«ng bÃ¡n. Vui lÃ²ng kiá»ƒm tra láº¡i giá» hÃ ng.',
+              'Một hoặc nhiều sản phẩm trong giỏ đã ngừng bán. Vui lòng kiểm tra lại giỏ hàng.',
             );
           }
 
@@ -1963,7 +1982,7 @@ export class OrdersService {
             cartItem.quantity > product.quantityAvailable;
           if (isLineBackorder && !allowBackorder) {
             this.throwCartChanged(
-              `Sáº£n pháº©m ${product.productName} khÃ´ng Ä‘á»§ tá»“n kho. Vui lÃ²ng kiá»ƒm tra láº¡i giá» hÃ ng.`,
+              `Sản phẩm ${product.productName} không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.`,
             );
           }
 
@@ -2180,12 +2199,12 @@ export class OrdersService {
       if (!product || !product.isShow) {
         throw new BadRequestException('One or more products are unavailable');
       }
-      // Pre-check: náº¿u háº¿t hÃ ng vÃ  KHÃ”NG cho backorder â†’ reject sá»›m
-      // (lock tháº­t sá»± trong transaction phÃ­a dÆ°á»›i)
+      // Pre-check: nếu hết hàng và KHÔNG cho backorder → reject sớm
+      // (lock thật sự trong transaction phía dưới)
       if (cartItem.quantity > product.quantityAvailable) {
         if (!createOrderDto.allowBackorder) {
           throw new BadRequestException(
-            `Sáº£n pháº©m ${product.productName} khÃ´ng Ä‘á»§ tá»“n kho`,
+            `Sản phẩm ${product.productName} không đủ tồn kho`,
           );
         }
         isBackorder = true;
@@ -2214,20 +2233,20 @@ export class OrdersService {
     );
     const totalPayment = subtotalAmount - discountAmount + deliveryCost;
 
-    // Kiá»ƒm tra vÃ  xá»­ lÃ½ háº¡n má»©c tÃ­n dá»¥ng cho Ä‘Æ¡n mua ná»£
+    // Kiểm tra và xử lý hạn mức tín dụng cho đơn mua nợ
     let creditLimit: import('../credit-limits/entities/customer-credit-limit.entity').CustomerCreditLimitEntity | null = null;
     if (createOrderDto.paymentMethod === PaymentMethod.CREDIT) {
       if (!currentUser.isWholesale) {
-        throw new BadRequestException('PhÆ°Æ¡ng thá»©c "Mua ná»£" chá»‰ dÃ nh cho khÃ¡ch sá»‰ Ä‘Æ°á»£c cáº¥p háº¡n má»©c tÃ­n dá»¥ng');
+        throw new BadRequestException('Phương thức "Mua nợ" chỉ dành cho khách sỉ được cấp hạn mức tín dụng');
       }
       creditLimit = await this.creditLimitRepository.findOne({ where: { userId, isActive: true as unknown as boolean } });
       if (!creditLimit) {
-        throw new BadRequestException('Báº¡n chÆ°a Ä‘Æ°á»£c cáº¥p háº¡n má»©c tÃ­n dá»¥ng. Vui lÃ²ng liÃªn há»‡ shop Ä‘á»ƒ Ä‘Æ°á»£c há»— trá»£');
+        throw new BadRequestException('Bạn chưa được cấp hạn mức tín dụng. Vui lòng liên hệ shop để được hỗ trợ');
       }
       const available = Number(creditLimit.creditLimit) - Number(creditLimit.currentDebt ?? 0);
       if (totalPayment > available) {
         throw new BadRequestException(
-          `VÆ°á»£t háº¡n má»©c tÃ­n dá»¥ng. Háº¡n má»©c cÃ²n láº¡i: ${Math.max(0, available).toLocaleString('vi-VN')}â‚«`,
+          `Vượt hạn mức tín dụng. Hạn mức còn lại: ${Math.max(0, available).toLocaleString('vi-VN')}₫`,
         );
       }
     }
@@ -2236,8 +2255,8 @@ export class OrdersService {
     const orderId = randomUUID();
 
     // Stock deduction inside a transaction with pessimistic_write lock per product
-    // â†’ trÃ¡nh oversell khi nhiá»u request Ä‘á»“ng thá»i cÃ¹ng mua sáº£n pháº©m cuá»‘i cÃ¹ng.
-    // â†’ tá»± retry tá»‘i Ä‘a 3 láº§n khi gáº·p deadlock MySQL.
+    // → tránh oversell khi nhiều request đồng thời cùng mua sản phẩm cuối cùng.
+    // → tự retry tối đa 3 lần khi gặp deadlock MySQL.
     await withDeadlockRetry(() =>
       this.ordersRepository.manager.transaction(async (entityManager) => {
         const transactionalOrdersRepository =
@@ -2289,7 +2308,7 @@ export class OrdersService {
         await transactionalOrdersRepository.save(order);
 
         for (const cartItem of cartItems) {
-          // Lock row pessimistic â€” block cÃ¡c request khÃ¡c Ä‘á»c cÃ¹ng product trong khi check + trá»« stock
+          // Lock row pessimistic — block các request khác đọc cùng product trong khi check + trừ stock
           const product = await transactionalProductsRepository.findOne({
             where: { productId: cartItem.productId },
             lock: { mode: 'pessimistic_write' },
@@ -2304,7 +2323,7 @@ export class OrdersService {
             cartItem.quantity > product.quantityAvailable;
           if (isLineBackorder && !createOrderDto.allowBackorder) {
             throw new BadRequestException(
-              `Sáº£n pháº©m ${product.productName} khÃ´ng Ä‘á»§ tá»“n kho`,
+              `Sản phẩm ${product.productName} không đủ tồn kho`,
             );
           }
 
@@ -2323,26 +2342,26 @@ export class OrdersService {
           });
           await transactionalOrderItemsRepository.save(orderItem);
 
-          // Backorder line: KHÃ”NG trá»« stock, KHÃ”NG ghi inventory transaction
-          // (sáº½ xá»­ lÃ½ sau khi nháº­p hÃ ng vá» vÃ  admin fulfill)
+          // Backorder line: KHÔNG trừ stock, KHÔNG ghi inventory transaction
+          // (sẽ xử lý sau khi nhập hàng về và admin fulfill)
           if (isLineBackorder) {
             continue;
           }
 
           const qtyBefore = product.quantityAvailable;
 
-          // FIFO/FEFO consumption: pick batches theo chiáº¿n lÆ°á»£c hybrid
+          // FIFO/FEFO consumption: pick batches theo chiến lược hybrid
           // (exp_date ASC, NULL last, tie-break created_at ASC).
-          // CÃ³ 2 nhÃ¡nh:
-          //  - Product cÃ³ batch (sau khi Ä‘Ã£ migrate): consume tá»«ng batch + log txn/batch
-          //  - Product KHÃ”NG cÃ³ batch (legacy): fallback trá»« quantityAvailable thuáº§n
-          //    Ä‘á»ƒ khÃ´ng break flow cÅ©. Migration script sáº½ táº¡o legacy batch sau.
+          // Có 2 nhánh:
+          //  - Product có batch (sau khi đã migrate): consume từng batch + log txn/batch
+          //  - Product KHÔNG có batch (legacy): fallback trừ quantityAvailable thuần
+          //    để không break flow cũ. Migration script sẽ tạo legacy batch sau.
           const batchPick = await this.batchService.consumeInTx(
             entityManager,
             product.productId,
             cartItem.quantity,
           ).catch(async (err) => {
-            // Náº¿u lá»—i do KHÃ”NG cÃ³ batch nÃ o (legacy product), fallback
+            // Nếu lỗi do KHÔNG có batch nào (legacy product), fallback
             const hasAnyBatch = await entityManager
               .createQueryBuilder()
               .select('1')
@@ -2351,7 +2370,7 @@ export class OrdersService {
               .limit(1)
               .getRawOne();
             if (hasAnyBatch) {
-              // CÃ³ batch nhÆ°ng khÃ´ng Ä‘á»§ â†’ nÃ©m lá»—i tháº­t
+              // Có batch nhưng không đủ → ném lỗi thật
               throw err;
             }
             return null; // legacy â†’ fallback
@@ -2363,7 +2382,7 @@ export class OrdersService {
           await transactionalProductsRepository.save(product);
 
           if (batchPick && batchPick.success) {
-            // Log 1 txn per batch Ä‘á»ƒ truy váº¿t FIFO chÃ­nh xÃ¡c
+            // Log 1 txn per batch để truy vết FIFO chính xác
             let runningBefore = qtyBefore;
             for (const line of batchPick.lines) {
               const after = runningBefore - line.qty;
@@ -2379,14 +2398,14 @@ export class OrdersService {
                   referenceId: orderId,
                   batchId: line.batchId,
                   unitCostAtTime: line.unitCost.toFixed(4),
-                  note: `Export by order checkout Â· lÃ´ ${line.batchCode}`,
+                  note: `Export by order checkout · lô ${line.batchCode}`,
                   relatedOrderId: orderId,
                 }),
               );
               runningBefore = after;
             }
           } else {
-            // Legacy fallback: log 1 txn khÃ´ng cÃ³ batchId
+            // Legacy fallback: log 1 txn không có batchId
             await transactionalInventoryTransactionsRepository.save(
               transactionalInventoryTransactionsRepository.create({
                 productId: product.productId,
@@ -2398,7 +2417,7 @@ export class OrdersService {
                 referenceType: 'ORDER',
                 referenceId: orderId,
                 unitCostAtTime: product.avgCost ?? null,
-                note: 'Export by order checkout (legacy â€” no batch)',
+                note: 'Export by order checkout (legacy — no batch)',
                 relatedOrderId: orderId,
               }),
             );
@@ -2435,7 +2454,7 @@ export class OrdersService {
       }),
     );
 
-    // Ghi nháº­n cÃ´ng ná»£ cho Ä‘Æ¡n mua ná»£
+    // Ghi nhận công nợ cho đơn mua nợ
     if (createOrderDto.paymentMethod === PaymentMethod.CREDIT && creditLimit) {
       await this.creditLimitRepository.update(
         { userId },
@@ -2627,7 +2646,7 @@ export class OrdersService {
       await transactionalHistoryRepository.save(history);
     });
 
-    // HoÃ n láº¡i cÃ´ng ná»£ khi há»§y Ä‘Æ¡n mua ná»£
+    // Hoàn lại công nợ khi hủy đơn mua nợ
     if (order.paymentMethod === PaymentMethod.CREDIT) {
       await this.creditLimitRepository.update(
         { userId },
@@ -2713,7 +2732,7 @@ export class OrdersService {
       const transactionalCouponUsageRepository =
         entityManager.getRepository(CouponUsageEntity);
 
-      // BACKORDERED â†’ PENDING: fulfill backorder, trá»« stock chÃ­nh thá»©c
+      // BACKORDERED → PENDING: fulfill backorder, trừ stock chính thức
       if (
         previousStatus === OrderStatus.BACKORDERED &&
         nextStatus === OrderStatus.PENDING
@@ -2728,12 +2747,12 @@ export class OrdersService {
           });
           if (!product) {
             throw new BadRequestException(
-              `Sáº£n pháº©m trong Ä‘Æ¡n khÃ´ng cÃ²n tá»“n táº¡i`,
+              `Sản phẩm trong đơn không còn tồn tại`,
             );
           }
           if (item.quantity > product.quantityAvailable) {
             throw new BadRequestException(
-              `Sáº£n pháº©m ${product.productName} váº«n chÆ°a Ä‘á»§ tá»“n kho Ä‘á»ƒ fulfill`,
+              `Sản phẩm ${product.productName} vẫn chưa đủ tồn kho để fulfill`,
             );
           }
           const qtyBefore = product.quantityAvailable;
@@ -2802,7 +2821,7 @@ export class OrdersService {
       }
 
       if (nextStatus === OrderStatus.CANCELLED) {
-        // Backorder bá»‹ cancel: KHÃ”NG restock vÃ¬ chÆ°a tá»«ng trá»« stock
+        // Backorder bị cancel: KHÔNG restock vì chưa từng trừ stock
         const isBackorderCancel =
           previousStatus === OrderStatus.BACKORDERED &&
           nextStatus === OrderStatus.CANCELLED;
@@ -2826,10 +2845,10 @@ export class OrdersService {
           return;
         }
 
-        // RETURNED: KHÃ”NG tá»± restock, chá»‰ giáº£i phÃ³ng reserved (náº¿u chÆ°a giao)
-        // â†’ HÃ ng pháº£i qua inspection trÆ°á»›c. Stock chá»‰ Ä‘Æ°á»£c restock khi
+        // RETURNED: KHÔNG tự restock, chỉ giải phóng reserved (nếu chưa giao)
+        // → Hàng phải qua inspection trước. Stock chỉ được restock khi
         //   admin inspect = USABLE.
-        // CANCELLED: váº«n restock bÃ¬nh thÆ°á»ng (hÃ ng chÆ°a rá»i kho).
+        // CANCELLED: vẫn restock bình thường (hàng chưa rời kho).
         if (nextStatus === OrderStatus.CANCELLED) {
           await this.restockOrderItems(
             order.orderId,
@@ -2845,7 +2864,7 @@ export class OrdersService {
         }
       }
 
-      // Khi DELIVERED: giáº£i phÃ³ng reserved (hÃ ng Ä‘Ã£ rá»i kho tháº­t sá»±)
+      // Khi DELIVERED: giải phóng reserved (hàng đã rời kho thật sự)
       if (nextStatus === OrderStatus.DELIVERED) {
         await this.releaseReservedOnDelivered(
           order.orderId,
@@ -2857,10 +2876,10 @@ export class OrdersService {
       order.orderStatus = nextStatus;
 
       // Payment status logic:
-      // - COD + DELIVERED â†’ PAID (khÃ¡ch tráº£ tiá»n khi nháº­n hÃ ng)
-      // - Online (non-COD) khi CONFIRMED: KHÃ”NG tá»± Ä‘áº·t PAID ná»¯a.
-      //   Pháº£i cÃ³ PaymentTransaction tá»« gateway hoáº·c admin xÃ¡c nháº­n thá»§ cÃ´ng.
-      //   (giá»¯ nguyÃªn paymentStatus hiá»‡n táº¡i â€” thÆ°á»ng lÃ  UNPAID)
+      // - COD + DELIVERED → PAID (khách trả tiền khi nhận hàng)
+      // - Online (non-COD) khi CONFIRMED: KHÔNG tự đặt PAID nữa.
+      //   Phải có PaymentTransaction từ gateway hoặc admin xác nhận thủ công.
+      //   (giữ nguyên paymentStatus hiện tại — thường là UNPAID)
       if (
         nextStatus === OrderStatus.DELIVERED &&
         order.paymentMethod === PaymentMethod.COD
@@ -2887,7 +2906,7 @@ export class OrdersService {
       await transactionalHistoryRepository.save(history);
     });
 
-    // HoÃ n láº¡i cÃ´ng ná»£ khi admin há»§y Ä‘Æ¡n mua ná»£ chÆ°a thanh toÃ¡n
+    // Hoàn lại công nợ khi admin hủy đơn mua nợ chưa thanh toán
     if (
       nextStatus === OrderStatus.CANCELLED &&
       order.paymentMethod === PaymentMethod.CREDIT &&
@@ -2991,7 +3010,7 @@ export class OrdersService {
 
     await this.paymentTransactionsRepository.save(paymentTransaction);
 
-    // Sentinel value â€” frontend detects this and shows simulation modal
+    // Sentinel value — frontend detects this and shows simulation modal
     let paymentUrl = `https://payment-gateway.local?provider=${order.paymentMethod}&transactionRef=${transactionRef}&orderId=${orderId}`;
 
     if (order.paymentMethod === PaymentMethod.MOMO) {
@@ -3007,7 +3026,7 @@ export class OrdersService {
       if (momoUrl) {
         paymentUrl = momoUrl;
       } else {
-        console.warn('[MoMo] KhÃ´ng láº¥y Ä‘Æ°á»£c paymentUrl â€” kiá»ƒm tra credentials vÃ  BACKEND_URL trong .env');
+        console.warn('[MoMo] Không lấy được paymentUrl — kiểm tra credentials và BACKEND_URL trong .env');
       }
     }
 
@@ -3213,7 +3232,7 @@ export class OrdersService {
     const { accessKey, secretKey } = await this.settingsService.getMomoConfig();
     if (!secretKey || !accessKey) return { message: 'ignored' };
 
-    // 1. VERIFY HMAC SIGNATURE â€” chá»‘ng fake callback
+    // 1. VERIFY HMAC SIGNATURE — chống fake callback
     if (!verifyMomoSignature(body, accessKey, secretKey)) {
       throw new UnauthorizedException('Invalid MoMo signature');
     }
@@ -3234,7 +3253,7 @@ export class OrdersService {
       message?: string;
     };
 
-    // momoOrderId = transactionRef (requestId) â€” look up the real order via transactions table
+    // momoOrderId = transactionRef (requestId) — look up the real order via transactions table
     const txRef = momoOrderId ?? requestId;
     if (!txRef) return { message: 'missing orderId' };
 
@@ -3250,7 +3269,7 @@ export class OrdersService {
       .catch(() => null);
     if (!order) return { message: 'order not found' };
 
-    // 2. IDEMPOTENCY â€” Náº¿u Ä‘Ã£ xá»­ lÃ½ transId nÃ y thÃ nh SUCCESS rá»“i thÃ¬ return luÃ´n
+    // 2. IDEMPOTENCY — Nếu đã xử lý transId này thành SUCCESS rồi thì return luôn
     if (
       transaction &&
       transaction.transactionStatus === PaymentTransactionStatus.SUCCESS &&
@@ -3259,7 +3278,7 @@ export class OrdersService {
       return { message: 'already processed', transId };
     }
 
-    // 3. AMOUNT MISMATCH GUARD â€” TrÃ¡nh fake amount nhá»
+    // 3. AMOUNT MISMATCH GUARD — Tránh fake amount nhỏ
     if (amount !== undefined && amount !== null) {
       const expectedAmount = Number(order.totalPayment);
       const reportedAmount = Number(amount);
@@ -3268,7 +3287,7 @@ export class OrdersService {
         Number.isFinite(reportedAmount) &&
         Math.abs(expectedAmount - reportedAmount) > 0.01
       ) {
-        // LÆ°u transaction lÃ  FAILED do amount mismatch â€” khÃ´ng update order
+        // Lưu transaction là FAILED do amount mismatch — không update order
         if (transaction) {
           transaction.transactionStatus = PaymentTransactionStatus.FAILED;
           transaction.gatewayCode = 'AMOUNT_MISMATCH';
@@ -3569,7 +3588,7 @@ export class OrdersService {
       throw new BadRequestException('Payment provider does not match order');
     }
 
-    // 1. IDEMPOTENCY â€” TrÃ¡nh xá»­ lÃ½ láº¡i cÃ¹ng transactionRef
+    // 1. IDEMPOTENCY — Tránh xử lý lại cùng transactionRef
     const existingTx = await this.paymentTransactionsRepository.findOne({
       where: { transactionRef: paymentCallbackDto.transactionRef },
     });
@@ -3587,7 +3606,7 @@ export class OrdersService {
       };
     }
 
-    // 2. AMOUNT MISMATCH GUARD â€” KhÃ´ng cho fake amount nhá» hÆ¡n
+    // 2. AMOUNT MISMATCH GUARD — Không cho fake amount nhỏ hơn
     if (paymentCallbackDto.success) {
       const expectedAmount = Number(order.totalPayment);
       const reportedAmount = Number(paymentCallbackDto.amount);
@@ -3680,15 +3699,15 @@ export class OrdersService {
   }
 
   /**
-   * Cron reconciliation â€” cháº¡y má»—i 15 phÃºt.
-   * TÃ¬m cÃ¡c Ä‘Æ¡n online (non-COD) Ä‘Ã£ PENDING + paymentStatus=UNPAID quÃ¡ 30 phÃºt
-   * â†’ Äá»‘i soÃ¡t vá»›i gateway hoáº·c tá»± cancel Ä‘á»ƒ giáº£i phÃ³ng stock.
+   * Cron reconciliation — chạy mỗi 15 phút.
+   * Tìm các đơn online (non-COD) đã PENDING + paymentStatus=UNPAID quá 30 phút
+   * → Đối soát với gateway hoặc tự cancel để giải phóng stock.
    *
-   * Hiá»‡n táº¡i: KHÃ”NG gá»i MoMo query API tháº­t (cáº§n endpoint /v2/gateway/api/query
-   * + signature) â€” sáº½ AUTO CANCEL Ä‘Æ¡n náº¿u quÃ¡ 30 phÃºt khÃ´ng thanh toÃ¡n.
-   * Stock sáº½ Ä‘Æ°á»£c restock thÃ´ng qua updateOrderStatus â†’ CANCELLED.
+   * Hiện tại: KHÔNG gọi MoMo query API thật (cần endpoint /v2/gateway/api/query
+   * + signature) — sẽ AUTO CANCEL đơn nếu quá 30 phút không thanh toán.
+   * Stock sẽ được restock thông qua updateOrderStatus → CANCELLED.
    */
-  @Cron('*/15 * * * *') // má»—i 15 phÃºt
+  @Cron('*/15 * * * *') // mỗi 15 phút
   async reconcileStalePayments() {
     try {
       const cutoff = new Date(Date.now() - this.stalePaymentTtlMs);
@@ -3705,7 +3724,7 @@ export class OrdersService {
           ]),
           createdAt: LessThan(cutoff),
         },
-        take: 100, // batch nhá» Ä‘á»ƒ trÃ¡nh ngháº½n DB
+        take: 100, // batch nhỏ để tránh nghẽn DB
       });
 
       if (stale.length === 0) return;
@@ -3716,7 +3735,7 @@ export class OrdersService {
 
       for (const order of stale) {
         try {
-          // Kiá»ƒm tra cÃ³ PaymentTransaction SUCCESS chÆ°a (case race condition)
+          // Kiểm tra có PaymentTransaction SUCCESS chưa (case race condition)
           const succeeded = await this.paymentTransactionsRepository.findOne({
             where: {
               orderId: order.orderId,
@@ -3729,7 +3748,7 @@ export class OrdersService {
             continue;
           }
 
-          // Auto-cancel + restock (hoÃ n batch theo lá»‹ch sá»­ consumption)
+          // Auto-cancel + restock (hoàn batch theo lịch sử consumption)
           await this.ordersRepository.manager.transaction(async (em) => {
             const oldStatus = order.orderStatus;
             const items = await em.find(OrderItemEntity, {
@@ -3773,7 +3792,7 @@ export class OrdersService {
                 await em.save(ProductEntity, product);
               }
 
-              // HoÃ n batch náº¿u cÃ³ lá»‹ch sá»­ consumption vá»›i batchId, Ä‘á»“ng thá»i log RETURN_IN
+              // Hoàn batch nếu có lịch sử consumption với batchId, đồng thời log RETURN_IN
               const netMap = await this.batchService.getOrderBatchConsumption(
                 em,
                 order.orderId,
@@ -3805,7 +3824,7 @@ export class OrdersService {
                   remaining -= restore;
                 }
               } else {
-                // Legacy fallback: khÃ´ng cÃ³ batch info â†’ log txn khÃ´ng cÃ³ batchId
+                // Legacy fallback: không có batch info → log txn không có batchId
                 await em.save(
                   InventoryTransactionEntity,
                   em.create(InventoryTransactionEntity, {
@@ -4068,7 +4087,7 @@ export class OrdersService {
     });
     if (duplicate) {
       throw new ConflictException({
-        message: 'ÄÆ¡n Ä‘Ã£ cÃ³ hoÃ n tiá»n há»§y Ä‘Æ¡n Ä‘ang xá»­ lÃ½.',
+        message: 'Đơn đã có hoàn tiền hủy đơn đang xử lý.',
         error: 'CANCEL_PAID_REFUND_ALREADY_OPEN',
       });
     }
@@ -4088,7 +4107,7 @@ export class OrdersService {
       amount > remainingRefundable
     ) {
       throw new BadRequestException({
-        message: `Sá»‘ tiá»n hoÃ n khÃ´ng há»£p lá»‡. CÃ²n cÃ³ thá»ƒ hoÃ n ${remainingRefundable.toFixed(2)}.`,
+        message: `Số tiền hoàn không hợp lệ. Còn có thể hoàn ${remainingRefundable.toFixed(2)}.`,
         error: 'REFUND_AMOUNT_EXCEEDS_REMAINING',
       });
     }
@@ -4156,7 +4175,7 @@ export class OrdersService {
         ) {
           throw new BadRequestException({
             message:
-              'HoÃ n tiá»n thá»§ cÃ´ng cáº§n mÃ£ chá»©ng tá»« hoáº·c ghi chÃº Ä‘á»‘i soÃ¡t.',
+              'Hoàn tiền thủ công cần mã chứng từ hoặc ghi chú đối soát.',
             error: 'REFUND_COMPLETION_REFERENCE_REQUIRED',
           });
         }
@@ -4189,7 +4208,7 @@ export class OrdersService {
           );
           if (completedBefore + Number(refund.amount) > Number(order.totalPayment)) {
             throw new BadRequestException({
-              message: 'Sá»‘ tiá»n hoÃ n vÆ°á»£t sá»‘ tiá»n cÃ²n cÃ³ thá»ƒ hoÃ n cá»§a Ä‘Æ¡n.',
+              message: 'Số tiền hoàn vượt số tiền còn có thể hoàn của đơn.',
               error: 'REFUND_AMOUNT_EXCEEDS_REMAINING',
             });
           }
@@ -4228,7 +4247,7 @@ export class OrdersService {
             changedBy: currentUser._id,
             note:
               dto.note?.trim() ||
-              'ÄÃ£ hoÃ n tiá»n thá»§ cÃ´ng vÃ  há»§y Ä‘Æ¡n Ä‘Ã£ thu tiá»n',
+              'Đã hoàn tiền thủ công và hủy đơn đã thu tiền',
           });
         }
 
@@ -4277,9 +4296,9 @@ export class OrdersService {
     await this.ensureUserExists(userId);
     const order = await this.findOwnedOrder(userId, createReturnDto.orderId);
 
-    // Cho phÃ©p táº¡o return á»Ÿ cÃ¡c status:
-    //  - SHIPPING: client bÃ¡o "nháº­n thiáº¿u" (short_delivery) trÆ°á»›c khi confirm
-    //  - DELIVERED / PARTIAL_DELIVERED / PARTIAL_RETURNED: tráº£ hÃ ng bÃ¬nh thÆ°á»ng sau khi Ä‘Ã£ nháº­n
+    // Cho phép tạo return ở các status:
+    //  - SHIPPING: client báo "nhận thiếu" (short_delivery) trước khi confirm
+    //  - DELIVERED / PARTIAL_DELIVERED / PARTIAL_RETURNED: trả hàng bình thường sau khi đã nhận
     const allowedStatuses: OrderStatus[] = [
       OrderStatus.SHIPPING,
       OrderStatus.DELIVERED,
@@ -4288,17 +4307,17 @@ export class OrdersService {
     ];
     if (!allowedStatuses.includes(order.orderStatus)) {
       throw new BadRequestException(
-        `KhÃ´ng thá»ƒ táº¡o yÃªu cáº§u tráº£ á»Ÿ tráº¡ng thÃ¡i ${order.orderStatus}. Chá»‰ cháº¥p nháº­n: ${allowedStatuses.join(', ')}.`,
+        `Không thể tạo yêu cầu trả ở trạng thái ${order.orderStatus}. Chỉ chấp nhận: ${allowedStatuses.join(', ')}.`,
       );
     }
 
-    // Náº¿u order Ä‘ang SHIPPING â†’ báº¯t buá»™c reason lÃ  short_delivery Ä‘á»ƒ phÃ¢n biá»‡t rÃµ
+    // Nếu order đang SHIPPING → bắt buộc reason là short_delivery để phân biệt rõ
     if (
       order.orderStatus === OrderStatus.SHIPPING &&
       createReturnDto.reason !== 'short_delivery'
     ) {
       throw new BadRequestException(
-        'ÄÆ¡n Ä‘ang giao chá»‰ cháº¥p nháº­n lÃ½ do "short_delivery" (bÃ¡o nháº­n thiáº¿u).',
+        'Đơn đang giao chỉ chấp nhận lý do "short_delivery" (báo nhận thiếu).',
       );
     }
 
@@ -4333,12 +4352,12 @@ export class OrdersService {
       createReturnDto.returnQuantity > remainingReturnableQuantity
     ) {
       throw new BadRequestException(
-        `Sá»‘ lÆ°á»£ng tráº£ khÃ´ng há»£p lá»‡. CÃ²n cÃ³ thá»ƒ tráº£ ${Math.max(0, remainingReturnableQuantity)}/${orderItem.quantity}.`,
+        `Số lượng trả không hợp lệ. Còn có thể trả ${Math.max(0, remainingReturnableQuantity)}/${orderItem.quantity}.`,
       );
     }
 
-    // Chá»‰ block náº¿u Ä‘Ã£ cÃ³ return ÄANG Má»ž (OPEN) cho item nÃ y.
-    // REJECTED hoáº·c REFUNDED â†’ cho phÃ©p táº¡o má»›i (cÃ³ thá»ƒ bá»‹ tá»« chá»‘i oan, hoáº·c tráº£ thÃªm).
+    // Chỉ block nếu đã có return ĐANG MỞ (OPEN) cho item này.
+    // REJECTED hoặc REFUNDED → cho phép tạo mới (có thể bị từ chối oan, hoặc trả thêm).
     const openStatuses: ReturnStatus[] = [
       ReturnStatus.REQUESTED,
       ReturnStatus.APPROVED,
@@ -4354,7 +4373,7 @@ export class OrdersService {
     });
     if (openReturn) {
       throw new BadRequestException(
-        `ÄÃ£ cÃ³ yÃªu cáº§u tráº£ hÃ ng Ä‘ang xá»­ lÃ½ (${openReturn.returnStatus}). Äá»£i xá»­ lÃ½ xong trÆ°á»›c khi táº¡o má»›i.`,
+        `Đã có yêu cầu trả hàng đang xử lý (${openReturn.returnStatus}). Đợi xử lý xong trước khi tạo mới.`,
       );
     }
 
@@ -4639,9 +4658,9 @@ export class OrdersService {
     }
 
     if (updateReturnStatusDto.status === ReturnStatus.RECEIVED) {
-      // RECEIVED: chá»‰ Ä‘Ã¡nh dáº¥u Ä‘Ã£ nháº­n, KHÃ”NG tá»± restock.
-      // HÃ ng pháº£i qua inspection (admin gá»i PATCH /returns/:id/inspect)
-      // Ä‘á»ƒ quyáº¿t Ä‘á»‹nh nháº­p kho / bÃ¡o há»ng / tráº£ NCC.
+      // RECEIVED: chỉ đánh dấu đã nhận, KHÔNG tự restock.
+      // Hàng phải qua inspection (admin gọi PATCH /returns/:id/inspect)
+      // để quyết định nhập kho / báo hỏng / trả NCC.
       returnRequest.inspectionStatus = ReturnInspectionStatus.PENDING;
     }
 
@@ -4649,7 +4668,7 @@ export class OrdersService {
     if (updateReturnStatusDto.status === ReturnStatus.REFUNDED) {
       if (returnRequest.inspectionStatus === ReturnInspectionStatus.PENDING) {
         throw new BadRequestException(
-          'Return Ä‘Ã£ nháº­n váº­t lÃ½ pháº£i inspect trÆ°á»›c khi hoÃ n tiá»n.',
+          'Return đã nhận vật lý phải inspect trước khi hoàn tiền.',
         );
       }
 
@@ -4667,12 +4686,12 @@ export class OrdersService {
         requestedRefundAmount > maxRefundableAmount
       ) {
         throw new BadRequestException(
-          `Sá»‘ tiá»n hoÃ n khÃ´ng há»£p lá»‡. Tá»‘i Ä‘a ${maxRefundableAmount.toFixed(2)}.`,
+          `Số tiền hoàn không hợp lệ. Tối đa ${maxRefundableAmount.toFixed(2)}.`,
         );
       }
       returnRequest.refundAmount = requestedRefundAmount.toFixed(2);
 
-      // PHáº¢I lÆ°u return trÆ°á»›c khi tÃ­nh tá»•ng â€” vÃ¬ query bÃªn dÆ°á»›i sáº½ Ä‘á»c láº¡i tá»« DB
+      // PHẢI lưu return trước khi tính tổng — vì query bên dưới sẽ đọc lại từ DB
       await this.returnsRepository.save(returnRequest);
 
       const order = await this.findAnyOrder(returnRequest.orderId);
@@ -4721,7 +4740,7 @@ export class OrdersService {
         );
       }
 
-      // FIX HIGH: náº¿u lÃ  CREDIT order â†’ trá»« refundAmount khá»i currentDebt
+      // FIX HIGH: nếu là CREDIT order → trừ refundAmount khỏi currentDebt
       const refundAmt = Number(returnRequest.refundAmount ?? 0);
       if (
         !existingRefund &&
@@ -4737,7 +4756,7 @@ export class OrdersService {
       }
 
       if (allRefunded) {
-        // Táº¥t cáº£ item Ä‘Ã£ Ä‘Æ°á»£c hoÃ n â†’ full return
+        // Tất cả item đã được hoàn → full return
         order.orderStatus = OrderStatus.RETURNED;
         order.paymentStatus =
           order.paymentStatus === PaymentStatus.PAID ||
@@ -4745,7 +4764,7 @@ export class OrdersService {
             ? PaymentStatus.REFUNDED
             : PaymentStatus.FAILED;
       } else {
-        // Chá»‰ refund 1 pháº§n â†’ Ä‘Ã¡nh dáº¥u partial
+        // Chỉ refund 1 phần → đánh dấu partial
         order.orderStatus = OrderStatus.PARTIAL_RETURNED;
         if (order.paymentStatus === PaymentStatus.PAID) {
           order.paymentStatus = PaymentStatus.PARTIAL_REFUNDED;
@@ -4753,10 +4772,10 @@ export class OrdersService {
       }
       await this.ordersRepository.save(order);
 
-      // FIX HIGH: trigger membership recalc â€” totalSpent giá» pháº£i trá»« refund
+      // FIX HIGH: trigger membership recalc — totalSpent giờ phải trừ refund
       void this.membershipService.recalculateAndReward(returnRequest.userId);
 
-      // Tráº£ vá» saved báº£n return (Ä‘Ã£ save trÃªn dÃ²ng trÃªn rá»“i)
+      // Trả về saved bản return (đã save trên dòng trên rồi)
       await this.notificationsService.createNotification({
         userId: returnRequest.userId,
         title: 'Yêu cầu trả hàng đã cập nhật',
@@ -4792,16 +4811,16 @@ export class OrdersService {
   }
 
   /**
-   * Admin xÃ¡c nháº­n giao má»™t pháº§n (partial delivery).
-   * KhÃ¡ch mua 10 â†’ giao thá»±c táº¿ 6 â†’ cÃ¡c bÆ°á»›c:
-   *   1. Cáº­p nháº­t order_items.quantity_delivered cho tá»«ng line
-   *   2. Pháº§n chÆ°a giao (4 cÃ¡i) â†’ cá»™ng láº¡i quantityAvailable, giáº£m reserved
-   *   3. Táº¡o inventory_transaction RETURN_IN cho pháº§n thiáº¿u
-   *   4. Giáº£m reserved cho pháº§n Ä‘Ã£ giao (nhÆ° delivered bÃ¬nh thÆ°á»ng)
-   *   5. Äáº·t status = PARTIAL_DELIVERED náº¿u cÃ²n thiáº¿u, DELIVERED náº¿u Ä‘á»§
-   *   6. TÃ­nh láº¡i totalPayment theo pháº§n Ä‘Ã£ giao thá»±c táº¿
+   * Admin xác nhận giao một phần (partial delivery).
+   * Khách mua 10 → giao thực tế 6 → các bước:
+   *   1. Cập nhật order_items.quantity_delivered cho từng line
+   *   2. Phần chưa giao (4 cái) → cộng lại quantityAvailable, giảm reserved
+   *   3. Tạo inventory_transaction RETURN_IN cho phần thiếu
+   *   4. Giảm reserved cho phần đã giao (như delivered bình thường)
+   *   5. Đặt status = PARTIAL_DELIVERED nếu còn thiếu, DELIVERED nếu đủ
+   *   6. Tính lại totalPayment theo phần đã giao thực tế
    *
-   * Pháº£i gá»i tá»« status SHIPPING (chá»‰ giao Ä‘Æ°á»£c khi Ä‘ang ship).
+   * Phải gọi từ status SHIPPING (chỉ giao được khi đang ship).
    */
   async partialDeliverOrder(
     currentUser: IUser,
@@ -4814,7 +4833,7 @@ export class OrdersService {
 
     if (order.orderStatus !== OrderStatus.SHIPPING) {
       throw new BadRequestException(
-        'Partial delivery chá»‰ thá»±c hiá»‡n khi Ä‘Æ¡n Ä‘ang SHIPPING',
+        'Partial delivery chỉ thực hiện khi đơn đang SHIPPING',
       );
     }
 
@@ -4825,40 +4844,40 @@ export class OrdersService {
 
     if (items.length !== orderItems.length) {
       throw new BadRequestException(
-        'Partial delivery pháº£i gá»­i Ä‘á»§ toÃ n bá»™ dÃ²ng sáº£n pháº©m cá»§a Ä‘Æ¡n.',
+        'Partial delivery phải gửi đủ toàn bộ dòng sản phẩm của đơn.',
       );
     }
 
     const submittedItemIds = new Set(items.map((item) => item.orderItemId));
     if (submittedItemIds.size !== items.length) {
       throw new BadRequestException(
-        'Partial delivery khÃ´ng Ä‘Æ°á»£c gá»­i trÃ¹ng dÃ²ng sáº£n pháº©m.',
+        'Partial delivery không được gửi trùng dòng sản phẩm.',
       );
     }
 
     for (const orderItem of orderItems) {
       if (!submittedItemIds.has(orderItem.orderItemId)) {
         throw new BadRequestException(
-          `Thiáº¿u sá»‘ lÆ°á»£ng giao cho dÃ²ng ${orderItem.productName}.`,
+          `Thiếu số lượng giao cho dòng ${orderItem.productName}.`,
         );
       }
     }
 
-    // Validate: deliveredQty khÃ´ng Ä‘Æ°á»£c vÆ°á»£t qty Ä‘áº·t.
+    // Validate: deliveredQty không được vượt qty đặt.
     for (const dto of items) {
       const oi = itemMap.get(dto.orderItemId);
       if (!oi) {
         throw new BadRequestException(
-          `Order item ${dto.orderItemId} khÃ´ng thuá»™c Ä‘Æ¡n nÃ y`,
+          `Order item ${dto.orderItemId} không thuộc đơn này`,
         );
       }
       if (dto.deliveredQty > oi.quantity) {
         throw new BadRequestException(
-          `Sá»‘ lÆ°á»£ng giao (${dto.deliveredQty}) khÃ´ng thá»ƒ vÆ°á»£t sá»‘ Ä‘áº·t (${oi.quantity}) cá»§a ${oi.productName}`,
+          `Số lượng giao (${dto.deliveredQty}) không thể vượt số đặt (${oi.quantity}) của ${oi.productName}`,
         );
       }
       if (dto.deliveredQty < 0) {
-        throw new BadRequestException('deliveredQty khÃ´ng Ä‘Æ°á»£c Ã¢m');
+        throw new BadRequestException('deliveredQty không được âm');
       }
     }
 
@@ -4882,8 +4901,8 @@ export class OrdersService {
           oi.quantityDelivered = dto.deliveredQty;
           await em.save(OrderItemEntity, oi);
 
-          // Pháº§n Ä‘Ã£ giao: giáº£m reserved (hÃ ng Ä‘Ã£ rá»i kho tháº­t)
-          // Pháº§n KHÃ”NG giao: cá»™ng láº¡i quantityAvailable + giáº£m reserved
+          // Phần đã giao: giảm reserved (hàng đã rời kho thật)
+          // Phần KHÔNG giao: cộng lại quantityAvailable + giảm reserved
           if (oi.quantity > 0) {
             const product = await em.findOne(ProductEntity, {
               where: { productId: oi.productId },
@@ -4891,12 +4910,12 @@ export class OrdersService {
             });
             if (!product) continue;
 
-            const releaseReserved = oi.quantity; // toÃ n bá»™ qty cá»§a line
+            const releaseReserved = oi.quantity; // toàn bộ qty của line
             product.quantityReserved = Math.max(
               0,
               (product.quantityReserved ?? 0) - releaseReserved,
             );
-            // Cá»™ng láº¡i pháº§n thiáº¿u vÃ o available + hoÃ n batch
+            // Cộng lại phần thiếu vào available + hoàn batch
             if (undeliveredQty > 0) {
               const qtyBefore = product.quantityAvailable;
               product.quantityAvailable += undeliveredQty;
@@ -4965,11 +4984,11 @@ export class OrdersService {
 
         if (totalDeliveredQty <= 0) {
           throw new BadRequestException(
-            'Partial delivery cáº§n cÃ³ Ã­t nháº¥t má»™t sáº£n pháº©m Ä‘Æ°á»£c giao.',
+            'Partial delivery cần có ít nhất một sản phẩm được giao.',
           );
         }
 
-        // Cáº­p nháº­t order: status + total
+        // Cập nhật order: status + total
         const isFullyDelivered = totalDeliveredQty === totalOrderedQty;
         order.orderStatus = isFullyDelivered
           ? OrderStatus.DELIVERED
@@ -4988,7 +5007,7 @@ export class OrdersService {
         order.discountAmount = this.toMoney(newDiscountAmount);
         order.totalPayment = Math.max(0, newTotalPayment).toFixed(2);
 
-        // COD thu theo pháº§n giao thá»±c táº¿, bao gá»“m trÆ°á»ng há»£p giao má»™t pháº§n.
+        // COD thu theo phần giao thực tế, bao gồm trường hợp giao một phần.
         if (order.paymentMethod === PaymentMethod.COD) {
           order.paymentStatus = PaymentStatus.PAID;
         }
@@ -5052,16 +5071,20 @@ export class OrdersService {
       order.orderStatus,
     );
 
+    // FIX: giao 1 phần làm thay đổi totalPayment (giảm theo phần thực giao)
+    // → phải recalc membership để totalSpent + tier đúng.
+    void this.membershipService.recalculateAndReward(order.userId);
+
     return this.findAnyOrder(order.orderId);
   }
 
   /**
-   * Admin kiá»ƒm tra hÃ ng tráº£ vá» vÃ  quyáº¿t Ä‘á»‹nh:
-   *   USABLE             â†’ nháº­p láº¡i kho chÃ­nh
-   *   DAMAGED            â†’ ghi DAMAGE adjustment, KHÃ”NG nháº­p kho (loss)
-   *   RETURN_TO_SUPPLIER â†’ Ä‘Ã¡nh dáº¥u Ä‘á»ƒ admin táº¡o Supplier Return riÃªng
+   * Admin kiểm tra hàng trả về và quyết định:
+   *   USABLE             → nhập lại kho chính
+   *   DAMAGED            → ghi DAMAGE adjustment, KHÔNG nhập kho (loss)
+   *   RETURN_TO_SUPPLIER → đánh dấu để admin tạo Supplier Return riêng
    *
-   * Chá»‰ cháº¡y Ä‘Æ°á»£c khi return Ä‘Ã£ RECEIVED + inspectionStatus = PENDING.
+   * Chỉ chạy được khi return đã RECEIVED + inspectionStatus = PENDING.
    */
   async inspectReturn(
     currentUser: IUser,
@@ -5071,7 +5094,7 @@ export class OrdersService {
   ) {
     await this.ensureUserExists(currentUser._id);
     if (decision === ReturnInspectionStatus.PENDING) {
-      throw new BadRequestException('Decision khÃ´ng thá»ƒ lÃ  PENDING');
+      throw new BadRequestException('Decision không thể là PENDING');
     }
 
     const returnRequest = await this.returnsRepository.findOneBy({ returnId });
@@ -5080,12 +5103,12 @@ export class OrdersService {
     }
     if (returnRequest.returnStatus !== ReturnStatus.RECEIVED) {
       throw new BadRequestException(
-        'Chá»‰ cÃ³ thá»ƒ inspect return Ä‘Ã£ RECEIVED',
+        'Chỉ có thể inspect return đã RECEIVED',
       );
     }
     if (returnRequest.inspectionStatus !== ReturnInspectionStatus.PENDING) {
       throw new BadRequestException(
-        `Return nÃ y Ä‘Ã£ Ä‘Æ°á»£c inspect (${returnRequest.inspectionStatus})`,
+        `Return này đã được inspect (${returnRequest.inspectionStatus})`,
       );
     }
 
@@ -5101,14 +5124,14 @@ export class OrdersService {
       });
 
       if (decision === ReturnInspectionStatus.USABLE && product) {
-        // Nháº­p láº¡i kho chÃ­nh
+        // Nhập lại kho chính
         const qtyBefore = product.quantityAvailable;
         product.quantityAvailable += returnRequest.returnQuantity;
         await em.save(ProductEntity, product);
 
-        // FIX CRITICAL: hoÃ n batch theo NET consumption history.
-        // LÃºc checkout consumed tá»« batch A 3 + batch B 2 â†’ restock cÅ©ng pháº£i vÃ o
-        // chÃ­nh cÃ¡c batch Ä‘Ã³, KHÃ”NG Ä‘Æ°á»£c chá»‰ cá»™ng quantityAvailable.
+        // FIX CRITICAL: hoàn batch theo NET consumption history.
+        // Lúc checkout consumed từ batch A 3 + batch B 2 → restock cũng phải vào
+        // chính các batch đó, KHÔNG được chỉ cộng quantityAvailable.
         const netMap = await this.batchService.getOrderBatchConsumption(
           em,
           returnRequest.orderId,
@@ -5137,15 +5160,15 @@ export class OrdersService {
                 referenceId: String(returnRequest.returnId),
                 batchId,
                 unitCostAtTime: product.avgCost ?? null,
-                note: note ?? `Return inspection: USABLE â€” restocked ${restore} to batch`,
+                note: note ?? `Return inspection: USABLE — restocked ${restore} to batch`,
                 relatedOrderId: returnRequest.orderId,
               }),
             );
             runningBefore += restore;
             remaining -= restore;
           }
-          // Náº¿u cÃ²n remaining > 0 (lá»‡ch do partial-deliver hoáº·c legacy txn khÃ´ng cÃ³ batch_id)
-          // â†’ táº¡o "return batch" má»›i vá»›i unit_cost = avgCost Ä‘á»ƒ giá»¯ tá»•ng Ä‘Ãºng.
+          // Nếu còn remaining > 0 (lệch do partial-deliver hoặc legacy txn không có batch_id)
+          // → tạo "return batch" mới với unit_cost = avgCost để giữ tổng đúng.
           if (remaining > 0) {
             await this.batchService.createInTx(em, {
               productId: product.productId,
@@ -5155,11 +5178,11 @@ export class OrdersService {
               expDate: product.expiredAt ?? null,
               qtyReceived: remaining,
               unitCost: Number(product.avgCost ?? 0),
-              note: `Return restock â€” khÃ´ng khá»›p batch history, táº¡o batch má»›i`,
+              note: `Return restock — không khớp batch history, tạo batch mới`,
             });
           }
         } else {
-          // Legacy order khÃ´ng cÃ³ batch info â†’ táº¡o "return batch" má»›i
+          // Legacy order không có batch info → tạo "return batch" mới
           await this.batchService.createInTx(em, {
             productId: product.productId,
             grId: null,
@@ -5168,7 +5191,7 @@ export class OrdersService {
             expDate: product.expiredAt ?? null,
             qtyReceived: returnRequest.returnQuantity,
             unitCost: Number(product.avgCost ?? 0),
-            note: `Return restock (legacy) â€” orderItem ${orderItem.orderItemId}`,
+            note: `Return restock (legacy) — orderItem ${orderItem.orderItemId}`,
           });
           await em.save(
             InventoryTransactionEntity,
@@ -5182,7 +5205,7 @@ export class OrdersService {
               referenceType: 'RETURN',
               referenceId: String(returnRequest.returnId),
               unitCostAtTime: product.avgCost ?? null,
-              note: note ?? 'Return inspection: USABLE â€” restocked (new batch)',
+              note: note ?? 'Return inspection: USABLE — restocked (new batch)',
               relatedOrderId: returnRequest.orderId,
             }),
           );
@@ -5193,25 +5216,25 @@ export class OrdersService {
           returnRequest.returnQuantity,
         );
       } else if (decision === ReturnInspectionStatus.DAMAGED && product) {
-        // Há»ng â€” KHÃ”NG nháº­p kho. Ghi DAMAGE inventory_transaction (loss).
+        // Hỏng — KHÔNG nhập kho. Ghi DAMAGE inventory_transaction (loss).
         await em.save(
           InventoryTransactionEntity,
           em.create(InventoryTransactionEntity, {
             productId: product.productId,
             performedBy: currentUser._id,
             transactionType: InventoryTransactionType.DAMAGE,
-            quantityChange: 0, // khÃ´ng thay Ä‘á»•i tá»“n (vÃ¬ chÆ°a nháº­p)
+            quantityChange: 0, // không thay đổi tồn (vì chưa nhập)
             quantityBefore: product.quantityAvailable,
             quantityAfter: product.quantityAvailable,
             referenceType: 'RETURN',
             referenceId: String(returnRequest.returnId),
             unitCostAtTime: product.avgCost ?? null,
-            note: note ?? `Return inspection: DAMAGED â€” written off ${returnRequest.returnQuantity} unit(s)`,
+            note: note ?? `Return inspection: DAMAGED — written off ${returnRequest.returnQuantity} unit(s)`,
             relatedOrderId: returnRequest.orderId,
           }),
         );
       }
-      // RETURN_TO_SUPPLIER: khÃ´ng Ä‘á»™ng vÃ o kho. Admin sáº½ táº¡o Supplier Return riÃªng.
+      // RETURN_TO_SUPPLIER: không động vào kho. Admin sẽ tạo Supplier Return riêng.
 
       returnRequest.inspectionStatus = decision;
       returnRequest.inspectionNote = note ?? null;
@@ -5225,7 +5248,7 @@ export class OrdersService {
   }
 
   /**
-   * Admin xÃ¡c nháº­n thanh toÃ¡n thá»§ cÃ´ng cho Ä‘Æ¡n non-COD (BANK_TRANSFER, online chÆ°a tá»± ghi nháº­n).
+   * Admin xác nhận thanh toán thủ công cho đơn non-COD (BANK_TRANSFER, online chưa tự ghi nhận).
    */
   async confirmPayment(currentUser: IUser, orderId: string) {
     await this.ensureUserExists(currentUser._id);
@@ -5234,13 +5257,13 @@ export class OrdersService {
     this.assertOrderCanAcceptPayment(order);
 
     if (order.paymentStatus === PaymentStatus.PAID) {
-      throw new BadRequestException('ÄÆ¡n hÃ ng Ä‘Ã£ Ä‘Æ°á»£c thanh toÃ¡n');
+      throw new BadRequestException('Đơn hàng đã được thanh toán');
     }
     if (order.paymentMethod === PaymentMethod.COD) {
-      throw new BadRequestException('COD tá»± Ä‘á»™ng ghi nháº­n khi giao â€” khÃ´ng cáº§n xÃ¡c nháº­n thá»§ cÃ´ng');
+      throw new BadRequestException('COD tự động ghi nhận khi giao — không cần xác nhận thủ công');
     }
     if (order.paymentMethod === PaymentMethod.CREDIT) {
-      throw new BadRequestException('ÄÆ¡n hÃ ng mua ná»£ â€” cÃ´ng ná»£ Ä‘Æ°á»£c quáº£n lÃ½ riÃªng qua háº¡n má»©c tÃ­n dá»¥ng');
+      throw new BadRequestException('Đơn hàng mua nợ — công nợ được quản lý riêng qua hạn mức tín dụng');
     }
 
     const existingRefund = await this.orderRefundsRepository.findOne({
@@ -5273,7 +5296,7 @@ export class OrdersService {
       paymentStatus: PaymentStatus.PAID,
       amount: order.totalPayment,
       gatewayCode: 'MANUAL',
-      gatewayMessage: `XÃ¡c nháº­n thá»§ cÃ´ng bá»Ÿi admin ${currentUser._id}`,
+      gatewayMessage: `Xác nhận thủ công bởi admin ${currentUser._id}`,
       rawPayload: { confirmedBy: currentUser._id, confirmedAt: new Date().toISOString() },
     });
     await this.paymentTransactionsRepository.save(tx);
@@ -5289,15 +5312,15 @@ export class OrdersService {
   }
 
   /**
-   * KhÃ¡ch hÃ ng xÃ¡c nháº­n Ä‘Ã£ nháº­n hÃ ng (khi Ä‘Æ¡n Ä‘ang SHIPPING).
-   * Chuyá»ƒn â†’ DELIVERED + giáº£i phÃ³ng reserved + COD tá»± PAID.
+   * Khách hàng xác nhận đã nhận hàng (khi đơn đang SHIPPING).
+   * Chuyển → DELIVERED + giải phóng reserved + COD tự PAID.
    */
   async confirmReceivedByCustomer(currentUser: IUser, orderId: string) {
     await this.ensureUserExists(currentUser._id);
     const order = await this.findOrderDetail(currentUser, orderId);
 
     if (order.status !== OrderStatus.SHIPPING) {
-      throw new BadRequestException('Chá»‰ cÃ³ thá»ƒ xÃ¡c nháº­n nháº­n hÃ ng khi Ä‘Æ¡n Ä‘ang Ä‘Æ°á»£c giao');
+      throw new BadRequestException('Chỉ có thể xác nhận nhận hàng khi đơn đang được giao');
     }
 
     await this.ordersRepository.manager.transaction(async (em) => {

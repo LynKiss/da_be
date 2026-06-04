@@ -358,6 +358,7 @@ export class RiceDiagnosisService {
         diseaseKey: payload.diseaseKey,
         diseaseSlug: payload.diseaseSlug,
         diseaseName: payload.diseaseName,
+        diseaseNameVi: payload.diseaseNameVi,
         summary: payload.summary,
         symptoms: payload.symptoms,
         causes: payload.causes,
@@ -395,6 +396,7 @@ export class RiceDiagnosisService {
     disease.diseaseKey = payload.diseaseKey;
     disease.diseaseSlug = payload.diseaseSlug;
     disease.diseaseName = payload.diseaseName;
+    disease.diseaseNameVi = payload.diseaseNameVi;
     disease.summary = payload.summary;
     disease.symptoms = payload.symptoms;
     disease.causes = payload.causes;
@@ -753,6 +755,10 @@ export class RiceDiagnosisService {
       diseaseKey,
       diseaseSlug,
       diseaseName,
+      diseaseNameVi: this.optionalText(
+        payload.diseaseNameVi,
+        current?.diseaseNameVi ?? null,
+      ),
       summary: this.optionalText(payload.summary, current?.summary ?? null),
       symptoms: this.optionalText(payload.symptoms, current?.symptoms ?? null),
       causes: this.optionalText(payload.causes, current?.causes ?? null),

@@ -1,6 +1,8 @@
 import { ToBoolean } from '../../common/dto-transformers';
 import {
+  ArrayUnique,
   IsBoolean,
+  IsArray,
   IsInt,
   IsNotEmpty,
   IsNumberString,
@@ -86,4 +88,10 @@ export class CreateProductDto {
   @ToBoolean()
   @IsBoolean()
   isFeatured?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  tagIds?: string[];
 }

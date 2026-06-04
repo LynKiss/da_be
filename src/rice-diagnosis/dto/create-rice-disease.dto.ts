@@ -28,6 +28,11 @@ export class CreateRiceDiseaseDto {
   @IsOptional()
   @IsString()
   @MaxLength(180)
+  diseaseNameVi?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(180)
   diseaseSlug?: string;
 
   @IsOptional()

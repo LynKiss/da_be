@@ -79,8 +79,8 @@ export class CommentsController {
   }
 
   /**
-   * Upload 1 áº£nh review lÃªn Cloudinary, tráº£ vá» URL.
-   * Client gá»i nhiá»u láº§n (max 5) trÆ°á»›c khi submit review.
+   * Upload 1 ảnh review lên Cloudinary, trả về URL.
+   * Client gọi nhiều lần (max 5) trước khi submit review.
    */
   @Post('upload-image')
   @UseInterceptors(FileInterceptor('file'))
